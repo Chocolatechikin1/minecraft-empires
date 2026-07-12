@@ -1,4 +1,4 @@
-package com.example.examplemod;
+package com.devc.minecraftempires;
 
 import net.minecraft.client.Minecraft;
 import net.neoforged.api.distmarker.Dist;

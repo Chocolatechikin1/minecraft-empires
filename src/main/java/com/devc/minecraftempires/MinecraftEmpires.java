@@ -1,4 +1,4 @@
-package com.example.examplemod;
+package com.devc.minecraftempires;
 
 import org.slf4j.Logger;
 
