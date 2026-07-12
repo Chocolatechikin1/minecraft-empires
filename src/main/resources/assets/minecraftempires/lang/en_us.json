@@ -1,0 +1,13 @@
+{
+  "itemGroup.minecraftempires": "Example Mod Tab",
+  "block.minecraftempires.example_block": "Example Block",
+  "item.minecraftempires.example_item": "Example Item",
+
+  "minecraftempires.configuration.title": "Minecraft Empires Configs",
+  "minecraftempires.configuration.section.minecraftempires.common.toml": "Minecraft Empires Configs",
+  "minecraftempires.configuration.section.minecraftempires.common.toml.title": "Minecraft Empires Configs",
+  "minecraftempires.configuration.items": "Item List",
+  "minecraftempires.configuration.logDirtBlock": "Log Dirt Block",
+  "minecraftempires.configuration.magicNumberIntroduction": "Magic Number Text",
+  "minecraftempires.configuration.magicNumber": "Magic Number"
+}
