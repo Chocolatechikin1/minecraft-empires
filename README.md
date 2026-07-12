@@ -19,16 +19,16 @@ Minecraft Empires utilizes a **Two-Layer Architecture** designed to keep server 
 
 1. **GitHub Wiki:** All detailed information, including breakdowns, math scaling, and architectural diagrams can be found in the repository Wiki.
 2. **Projects Board:** Sprint issues and task cards are managed under the repository **Projects** tab. (maybe)
-3. **Pull Requests:** All development code undergoes review in separate branches before merging into `main`.
+3. **Pull Requests:** All development code undergoes review in separate branches before merging into `main`. (maybe)
 
 --- 
 
 ## Tech Stack & Prerequisites
 (Subject to change)
-* **Language:** Java (JDK 17 or JDK 21 depending on target version)
-* **Target Platform:** Java Edition (Fabric / NeoForge)
+* **Language:** Java (JDK 25)
+* **Target Platform:** Java Edition - NeoForge
 * **Build System:** Gradle
-* **Recommended IDE:** IntelliJ IDEA (Community Edition)
+* **IDE:** VS Code
 
 ---
 
