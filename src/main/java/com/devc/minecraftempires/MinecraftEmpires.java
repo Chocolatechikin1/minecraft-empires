@@ -30,6 +30,9 @@ import net.neoforged.neoforge.registries.DeferredBlock;
 import net.neoforged.neoforge.registries.DeferredHolder;
 import net.neoforged.neoforge.registries.DeferredItem;
 import net.neoforged.neoforge.registries.DeferredRegister;
+//custom command imports
+import com.devc.minecraftempires.commands.ClaimCommand;
+import net.neoforged.neoforge.event.RegisterCommandsEvent;
 
 // The value here should match an entry in the META-INF/neoforge.mods.toml file
 @Mod(MinecraftEmpires.MODID)
@@ -113,5 +116,11 @@ public class MinecraftEmpires {
     public void onServerStarting(ServerStartingEvent event) {
         // Do something when the server starts
         LOGGER.info("HELLO from server starting");
+    }
+    //claim commands
+    @SubscribeEvent
+    public void onRegisterCommands(RegisterCommandsEvent event) {
+        ClaimCommand.register(event.getDispatcher());
+        LOGGER.info("Registered Minecraft Empires commands!");
     }
 }

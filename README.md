@@ -59,9 +59,9 @@ Below is the active development schedule for the project. (Note: timeline may ta
 ---
 
 ### Phase 3: Interactive Map Dashboard UI
-* **Goal:** Build the primary command center interface.
+* **Goal:** Build the primary command center interface for all functions that need a UI.
 * **Key Mechanics:**
-  * Dynamic 2D top-down strategy view with live territory color overlays, provincial labels, and an interactive "Claim Core" button to purchase radius expansions via treasury emeralds.
+  * Dynamic 2D top-down strategy view with live territory color overlays, provincial labels, and an interactive "Claim Core" button to purchase radius expansions via treasury emeralds. (can be split into multiple UIs, TBD)
   * **Obfuscated Fog of War:** Unexplored/unscouted territories hide precise enemy unit coordinates; breached provinces display a generalized warning overlay on the UI map.
   * Real-time chat alerts when provincial boundaries are breached.
 * **Technical Implementation:** Construct a custom `Screen` / `ScreenHandler` UI layer fed directly by Phase 1 backend data.
