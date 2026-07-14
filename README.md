@@ -8,10 +8,10 @@ The official development repository for **Minecraft Empires**!
 
 ## Overview & Architecture
 
-Minecraft Empires utilizes a **Two-Layer Architecture** designed to keep server performance smooth and lag-free, bypassing traditional entity limits:
+Minecraft Empires utilizes a Two-Layer Architecture designed to keep server performance smooth and lag-free, bypassing traditional entity limits:
 
-* **The Abstract Data Layer (Backend):** Manages state finances, territory claims, public order, and army movements entirely in memory (RAM) as lightweight Java objects without spawning physical entities.
-* **The Immersive Render Layer (Frontend):** When a player approaches an abstracted object, entity, or building, the mod dynamically converts abstract data into physical world elements. Cities would generate as players approach, and battlefield soldiers load in based on performance metrics of the user.
+* The Abstract Data Layer (Backend): Manages state finances, territory claims, public order, and army movements entirely in memory (RAM) as lightweight Java objects without spawning physical entities.
+* The Immersive Render Layer (Frontend): When a player approaches an abstracted object, entity, or building, the mod dynamically converts abstract data into physical world elements. Cities would generate as players approach, and battlefield soldiers load in based on performance metrics of the user.
 
 ---
 
@@ -29,6 +29,7 @@ Minecraft Empires utilizes a **Two-Layer Architecture** designed to keep server 
 * **Target Platform:** Java Edition - NeoForge
 * **Build System:** Gradle
 * **IDE:** VS Code
+* **Development Target Version:** 26.2
 
 ---
 
@@ -43,7 +44,7 @@ Below is the active development schedule for the project. (Note: timeline may ta
 * **Key Mechanics:**
   * Define settlement tier logic (base settlement radius scaled to 100 blocks / ~156 chunks).
   * Build boundary restriction logic: enemy armies crossing borders flip un-garrisoned land until reaching a settlement’s protective radius.
-* **Technical Implementation:** Use **Fabric API Components** or **Forge Capabilities** to track X/Z coordinate maps and serialize state ownership directly into world save data.
+* **Technical Implementation:** Using **Forge Capabilities** to track X/Z coordinate maps and serialize state ownership directly into world save data.
 
 ---
 
@@ -58,9 +59,9 @@ Below is the active development schedule for the project. (Note: timeline may ta
 ---
 
 ### Phase 3: Interactive Map Dashboard UI
-* **Goal:** Build the primary command center interface.
+* **Goal:** Build the primary command center interface for all functions that need a UI.
 * **Key Mechanics:**
-  * Dynamic 2D top-down strategy view with live territory color overlays, provincial labels, and an interactive "Claim Core" button to purchase radius expansions via treasury emeralds.
+  * Dynamic 2D top-down strategy view with live territory color overlays, provincial labels, and an interactive "Claim Core" button to purchase radius expansions via treasury emeralds. (can be split into multiple UIs, TBD)
   * **Obfuscated Fog of War:** Unexplored/unscouted territories hide precise enemy unit coordinates; breached provinces display a generalized warning overlay on the UI map.
   * Real-time chat alerts when provincial boundaries are breached.
 * **Technical Implementation:** Construct a custom `Screen` / `ScreenHandler` UI layer fed directly by Phase 1 backend data.
