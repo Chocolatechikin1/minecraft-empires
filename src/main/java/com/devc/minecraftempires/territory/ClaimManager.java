@@ -19,6 +19,9 @@ public class ClaimManager extends SavedData {
     //central data storage, HashMap for O(1) lookups, key is ChunkPos, value is ChunkData
     private final Map<ChunkPos, ChunkData> claims = new HashMap<>();
 
+    // Tracks the core "City Altar" chunk for a given settlement ID
+    private final Map<String, ChunkPos> settlementCenters = new HashMap<>();
+
     //standard identifier
     private static final String DATA_NAME = "minecraftempires_claims";
     private static final String CLAIMS_LIST_KEY = "ClaimsList";
@@ -68,16 +71,80 @@ public class ClaimManager extends SavedData {
         return claims.containsKey(pos);
     }
 
+    //settlement management methods
+    //calculates Euclidean distance between two chunks
+    public double getChunkDistance(ChunkPos pos1, ChunkPos pos2) {
+        int dx = pos1.x() - pos2.x();
+        int dz = pos1.z() - pos2.z();
+        return Math.sqrt(dx * dx + dz * dz);
+    }
+
+    //protective settlement radius (increases by tier)
+    public double getProtectiveRadius(int tier){
+        return 6.0 + (tier * 4.0); // Base radius of 6 chunks, increasing by 4 chunks per tier
+    }
+
+    //center altar chunk
+    public void registerSettlementCenter(String settlementID, ChunkPos centerPos) {
+        settlementCenters.put(settlementID, centerPos);
+        setDirty();
+    }
+
+    //main border flipping logic: called when a hostile unit enters a chunk
+    public boolean tryFlipBorder(ChunkPos targetPos, UUID attackerUUID, String attackerSettlementID) {
+        ChunkData targetData = claims.get(targetPos);
+
+        //if land is unclaimed, take instantly
+        if(targetData == null) {
+            setClaim(targetPos, attackerUUID, attackerSettlementID, false, 1);
+            return true;
+        }
+
+        //if chunk is garrisoned, cannot flip passively
+        if(targetData.isGarrisoned()) {
+            return false; //triggers a siege or battle
+        }
+
+        //defending settlement core locater
+        String defenderSettlement = targetData.getSettlementID();
+        ChunkPos defenderCore = settlementCenters.get(defenderSettlement);
+
+        //if core missing, land is considered abandoned, attacker takes it
+        if(defenderCore == null) {
+            setClaim(targetPos, attackerUUID, attackerSettlementID, false, 1);
+            return true;
+        }
+
+        //calculate if attackers have reached the radius of the settlement
+        double distanceToCore = getChunkDistance(targetPos, defenderCore);
+        double protectiveRadius = getProtectiveRadius(targetData.getSettlementTier());
+
+        if (distanceToCore > protectiveRadius) {
+            // Attacker is outside the core protection. Flip the un-garrisoned land!
+            setClaim(targetPos, attackerUUID, attackerSettlementID, false, 1);
+            return true;
+        }
+
+        // Attacker hit the protective radius. Passive flipping stops here.
+        return false;
+    }
+
     //serialization
     private CompoundTag toTag() {
         ListTag list = new ListTag();
+        CompoundTag tag = new CompoundTag();
 
         for (Map.Entry<ChunkPos, ChunkData> entry : claims.entrySet()) {
             list.add(toEntryTag(entry.getKey(), entry.getValue()));
         }
 
-        CompoundTag tag = new CompoundTag();
+        //save settlement centers as well
+        CompoundTag centersTag = new CompoundTag();
+        for (Map.Entry<String, ChunkPos> entry : settlementCenters.entrySet()) {
+            centersTag.putLong(entry.getKey(), entry.getValue().pack());
+        }
         tag.put(CLAIMS_LIST_KEY, list);
+        tag.put("SettlementCenters", centersTag);
         return tag;
     }
 
@@ -90,6 +157,16 @@ public class ClaimManager extends SavedData {
             for (int i = 0; i < list.size(); i++) {
                 CompoundTag entryTag = list.getCompound(i).orElse(new CompoundTag());
                 decodeEntryTag(entryTag).ifPresent(entry -> manager.claims.put(entry.pos(), entry.data()));
+            }
+        }
+
+        //load settlement centers
+        if (tag.contains("SettlementCenters")) {
+            CompoundTag centersTag = tag.getCompound("SettlementCenters").orElse(new CompoundTag());
+            for (String settlementID : centersTag.keySet()) {
+                long packedPos = centersTag.getLong(settlementID).orElse(0L);
+                ChunkPos centerPos = ChunkPos.unpack(packedPos);
+                manager.settlementCenters.put(settlementID, centerPos);
             }
         }
 
