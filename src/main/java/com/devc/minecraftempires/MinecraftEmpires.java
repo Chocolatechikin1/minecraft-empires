@@ -32,6 +32,8 @@ import net.neoforged.neoforge.registries.DeferredItem;
 import net.neoforged.neoforge.registries.DeferredRegister;
 //custom command imports
 import com.devc.minecraftempires.commands.ClaimCommand;
+import com.devc.minecraftempires.commands.StateCommand;
+import com.devc.minecraftempires.state.EconomyTickHandler;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 
 // The value here should match an entry in the META-INF/neoforge.mods.toml file
@@ -83,6 +85,7 @@ public class MinecraftEmpires {
         // Note that this is necessary if and only if we want *this* class (MinecraftEmpires) to respond directly to events.
         // Do not add this line if there are no @SubscribeEvent-annotated functions in this class, like onServerStarting() below.
         NeoForge.EVENT_BUS.register(this);
+        NeoForge.EVENT_BUS.register(new EconomyTickHandler());
 
         // Register the item to a creative tab
         modEventBus.addListener(this::addCreative);
@@ -117,10 +120,12 @@ public class MinecraftEmpires {
         // Do something when the server starts
         LOGGER.info("HELLO from server starting");
     }
-    //claim commands
+    //claim commands and state commands
     @SubscribeEvent
     public void onRegisterCommands(RegisterCommandsEvent event) {
         ClaimCommand.register(event.getDispatcher());
+        StateCommand.register(event.getDispatcher());
         LOGGER.info("Registered Minecraft Empires commands!");
     }
+    
 }
