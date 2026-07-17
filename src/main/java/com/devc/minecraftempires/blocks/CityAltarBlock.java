@@ -28,11 +28,11 @@ public class CityAltarBlock extends Block {
         // Security Guard: Data logic must strictly evaluate only on the Logical Server
         if (!level.isClientSide() && level instanceof ServerLevel serverLevel && placer instanceof Player player) {
             
-            // 1. Fetch our global StateManager state machine
-            StateManager stateManager = StateManager.get(serverLevel);
+            // 1. Fetch our global StateManager state machine (FIXED: references serverLevel directly)
+            StateManager manager = StateManager.get(serverLevel);
             
-            // 2. Resolve the player's overarching macro State profile
-            StateData playerState = stateManager.getStateByPlayer(player.getUUID());
+            // 2. Resolve the player's overarching macro State profile (FIXED: references manager)
+            StateData playerState = manager.getStateByPlayer(player.getUUID());
             
             // Guard Clause: Check if the player is a nomadic citizen without an established country
             if (playerState == null) {
@@ -56,10 +56,10 @@ public class CityAltarBlock extends Block {
             
             // 4. Register links inside both the macro State structure and the global system mapping
             playerState.addSettlement(settlementId);
-            stateManager.registerSettlement(settlementId, freshSettlement);
+            manager.registerSettlement(settlementId, freshSettlement);
             
             // 5. Fire off the geometric abstract chunk claims matrix around the altar block
-            stateManager.establishSettlementClaims(serverLevel, freshSettlement, playerState.getStateId());
+            manager.establishSettlementClaims(serverLevel, freshSettlement, playerState.getStateId());
             
             // 6. Provide clear visual confirmation feedback to the player
             player.sendSystemMessage(Component.literal("§6§l[Empires] §aCity Altar Ignited! Established §e" + settlementName + "§a linked to the realm of §b" + playerState.getStateName() + "§a."));

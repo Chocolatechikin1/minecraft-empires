@@ -47,6 +47,11 @@ public class StateManager extends SavedData {
     // --- Core Management Methods ---
     
     // --- State Methods ---
+    public static StateManager get(ServerLevel level) {
+        // This tells NeoForge: "Go to this world's storage. If minecraftempires_states.dat exists, load it. If not, create a new one."
+        return level.getDataStorage().computeIfAbsent(TYPE);
+    }
+
     public StateData getState(UUID stateId) {
         return activeStates.get(stateId);
     }
@@ -114,23 +119,29 @@ public class StateManager extends SavedData {
     }
 
     // --- SavedData Saving & Loading ---
-
-    private CompoundTag toTag() {
+   private CompoundTag toTag() {
         CompoundTag tag = new CompoundTag();
 
         // 1. Save States
         ListTag stateList = new ListTag();
-        for (StateData state : activeStates.values()) { // FIXED: Changed states.values() to activeStates.values()
+        for (StateData state : activeStates.values()) { 
             stateList.add(state.toNBT());
         }
         tag.put(STATES_LIST_KEY, stateList);
 
-        // 2. Save Settlements (NEW)
+        // 2. Save Settlements
         ListTag settlementList = new ListTag();
         for (SettlementData settlement : activeSettlements.values()) {
             settlementList.add(settlement.toNBT());
         }
         tag.put(SETTLEMENTS_LIST_KEY, settlementList);
+
+        // 3. Save Player-to-State Map (THE FIX)
+        CompoundTag playerMapTag = new CompoundTag();
+        for (Map.Entry<UUID, UUID> entry : playerToStateMap.entrySet()) {
+            playerMapTag.putString(entry.getKey().toString(), entry.getValue().toString());
+        }
+        tag.put("PlayerStates", playerMapTag);
 
         return tag;
     }
@@ -146,19 +157,29 @@ public class StateManager extends SavedData {
             manager.activeStates.put(loadedState.getStateId(), loadedState);
         }
 
-        // 2. Load Settlements (NEW)
-        ListTag settlementList = tag.getList(SETTLEMENTS_LIST_KEY).orElse(new ListTag());
-        for (int i = 0; i < settlementList.size(); i++) {
-            CompoundTag sTag = settlementList.getCompound(i).orElse(new CompoundTag());
-            SettlementData loadedSettlement = SettlementData.fromNBT(sTag);
-            manager.activeSettlements.put(loadedSettlement.getSettlementId(), loadedSettlement);
+        // 2. Load Settlements
+        // FIX: Just check if the key exists; the orElse() handle handles the empty check
+        if (tag.contains(SETTLEMENTS_LIST_KEY)) {
+            ListTag settlementList = tag.getList(SETTLEMENTS_LIST_KEY).orElse(new ListTag());
+            for (int i = 0; i < settlementList.size(); i++) {
+                CompoundTag sTag = settlementList.getCompound(i).orElse(new CompoundTag());
+                SettlementData loadedSettlement = SettlementData.fromNBT(sTag);
+                manager.activeSettlements.put(loadedSettlement.getSettlementId(), loadedSettlement);
+            }
+        }
+
+        // 3. Load Player-to-State Map
+        // FIX: Just check if key exists, then read keySet() instead of getAllKeys()
+        if (tag.contains("PlayerStates")) {
+            CompoundTag playerMapTag = tag.getCompound("PlayerStates").orElse(new CompoundTag());
+            for (String key : playerMapTag.keySet()) {
+                String valueStr = playerMapTag.getString(key).orElse("");
+                if (!valueStr.isEmpty()) {
+                    manager.playerToStateMap.put(UUID.fromString(key), UUID.fromString(valueStr));
+                }
+            }
         }
         
         return manager;
-    }
-
-    // --- Singleton Accessor ---
-    public static StateManager get(ServerLevel level) {
-        return level.getServer().overworld().getDataStorage().computeIfAbsent(TYPE);
     }
 }

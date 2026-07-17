@@ -9,6 +9,7 @@ import com.mojang.brigadier.context.CommandContext;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
+import net.minecraft.server.level.ServerLevel;
 
 import java.util.UUID;
 
@@ -33,10 +34,13 @@ public class StateCommand {
         
         if (source.getPlayer() != null) {
             UUID leaderId = source.getPlayer().getUUID();
-            StateManager manager = StateManager.get(source.getLevel());
+            StateManager manager = StateManager.get((ServerLevel) source.getLevel());
             
-            // Create a base Tier 1 (County) State for testing
-            manager.createState(name, leaderId, StateTier.COUNTY);
+            // Create a base Tier 1 (County) State for testing and save the returned data object
+            StateData newState = manager.createState(name, leaderId, StateTier.COUNTY);
+            
+            // NEW MAPPING FIX: Explicitly add player to the map so CityAltarBlock can validate them
+            manager.addPlayerToState(leaderId, newState.getStateId());
             
             source.sendSuccess(() -> Component.literal("§aSuccessfully founded the Realm of " + name + "!"), false);
             return 1;
@@ -49,7 +53,7 @@ public class StateCommand {
         
         if (source.getPlayer() != null) {
             UUID playerId = source.getPlayer().getUUID();
-            StateManager manager = StateManager.get(source.getLevel());
+            StateManager manager = StateManager.get((ServerLevel) source.getLevel());
             
             // Find the state this player leads
             StateData playerState = null;
