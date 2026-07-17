@@ -4,6 +4,8 @@ import net.minecraft.server.level.ServerLevel;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 
+import com.devc.minecraftempires.territory.ClaimManager; 
+
 public class EconomyTickHandler {
     private static final int TICKS_PER_DAY = 24000; //1 in game day
     private static int tickCounter = 0;
@@ -26,13 +28,14 @@ public class EconomyTickHandler {
 
     private static void processDailyEconomics(ServerLevel level) {
         StateManager manager = StateManager.get(level);
+        ClaimManager claimManager = ClaimManager.get(level);
         
         for (StateData state : manager.getAllStates()) {
             
             //calculates tax revenue
             double taxRevenue = calculateTax(state);
             //calculates maintenance costs
-            double maintenanceCost = calculateMaintenance(state);
+            double maintenanceCost = calculateMaintenance(state, claimManager);
             //applies extra to treasury
             double netProfit = taxRevenue - maintenanceCost;
             
@@ -62,11 +65,15 @@ public class EconomyTickHandler {
         return baseIncome + popIncome;
     }
 
-    private static double calculateMaintenance(StateData state) {
+    private static double calculateMaintenance(StateData state, ClaimManager claimManager) {
         //higher tiers cost more inherently to maintain
         double baseMaintenance = state.getCurrentTier().ordinal() * 75.0;
+
+        //get land upkeep costs
+        int ownedChunks = claimManager.getClaimCountForState(state.getStateId());
+        double chunkCost = ownedChunks * 2.0; //2 emeralds per chunk per day
         
         // TODO (Phase 3): Add cost of active legions here later
-        return baseMaintenance;
+        return baseMaintenance + chunkCost;
     }
 }
