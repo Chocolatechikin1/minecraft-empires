@@ -17,6 +17,10 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
+import com.devc.minecraftempires.MinecraftEmpires;
+import com.devc.minecraftempires.territory.ChunkData;
+import com.devc.minecraftempires.territory.ClaimManager;
+
 public class StateManager extends SavedData {
 
     private static final String DATA_NAME = "minecraftempires_states";
@@ -102,20 +106,45 @@ public class StateManager extends SavedData {
     }
 
     public void establishSettlementClaims(ServerLevel level, SettlementData settlement, UUID stateId) {
-        BlockPos center = settlement.getCenterAltarPos();
-        ChunkPos centerChunk = new ChunkPos(center.getX() >> 4, center.getZ() >> 4);
+        BlockPos altarPos = settlement.getCenterAltarPos(); 
         
-        // Tier 1 defaults to ~100 blocks out, which is roughly a 6-chunk radius
-        int chunkRadius = settlement.getProtectiveRadius() / 16;
+        // Convert the altar's block coordinates to chunk coordinates
+        int centerChunkX = altarPos.getX() >> 4;
+        int centerChunkZ = altarPos.getZ() >> 4;
+        ChunkPos centerChunkPos = new ChunkPos(centerChunkX, centerChunkZ);
+        
+        // Fetch the ClaimManager for this world to handle the chunk map
+        ClaimManager claimManager = ClaimManager.get(level);
 
-        for (int x = -chunkRadius; x <= chunkRadius; x++) {
-            for (int z = -chunkRadius; z <= chunkRadius; z++) {
-                ChunkPos targetChunk = new ChunkPos(centerChunk.x() + x, centerChunk.z() + z);
+        //register the core chunk of the settlement in the ClaimManager
+        claimManager.registerSettlementCenter(settlement.getSettlementId().toString(), centerChunkPos);
+        
+        // Loop through a 3x3 chunk radius centered on the City Altar
+        for (int xOffset = -1; xOffset <= 1; xOffset++) {
+            for (int zOffset = -1; zOffset <= 1; zOffset++) {
+                int currentX = centerChunkX + xOffset;
+                int currentZ = centerChunkZ + zOffset;
                 
-                // TODO: Link this to ClaimManager.getInstance().setChunkClaim(...) in the next step!
+                ChunkPos chunkPos = new ChunkPos(currentX, currentZ);
+                
+                //claim chunk, only if it is not already claimed 
+                if (!claimManager.isClaimed(chunkPos)) { 
+                    claimManager.setClaim(
+                        chunkPos, 
+                        stateId, 
+                        settlement.getSettlementId().toString(), 
+                        false, 
+                        1      
+                    );
+                } 
             }
         }
+        
+        // Mark State data as dirty, and tell ClaimManager to mark its data as dirty too!
         this.setDirty();
+        claimManager.setDirty();
+        
+        MinecraftEmpires.LOGGER.info("Established 9 automatic chunk claims for settlement: {}", settlement.getSettlementName());
     }
 
     // --- SavedData Saving & Loading ---

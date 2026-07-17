@@ -15,6 +15,10 @@ import net.minecraft.world.level.block.state.BlockState;
 import org.jetbrains.annotations.Nullable;
 import java.util.UUID;
 
+import com.devc.minecraftempires.territory.ClaimManager; 
+import com.devc.minecraftempires.territory.ChunkData; 
+import net.minecraft.world.level.ChunkPos; 
+
 public class CityAltarBlock extends Block {
 
     public CityAltarBlock(Properties properties) {
@@ -42,6 +46,19 @@ public class CityAltarBlock extends Block {
                 level.destroyBlock(pos, true, player);
                 return;
             }
+
+            ClaimManager claimManager = ClaimManager.get(serverLevel); 
+            ChunkPos altarChunkPos = new ChunkPos(pos.getX() >> 4, pos.getZ() >> 4);
+            
+            if (claimManager.isClaimed(altarChunkPos)) { 
+                ChunkData chunkData = claimManager.getClaim(altarChunkPos); 
+                // If it's claimed, and the owner is NOT this player's state, block it. 
+                if (!chunkData.getOwnerUUID().equals(playerState.getStateId())) { 
+                    player.sendSystemMessage(Component.literal("§c[Empires] You cannot establish a City Altar inside another state's territory!")); 
+                    level.destroyBlock(pos, true, player); 
+                    return; 
+                } 
+            } 
 
             // 3. Initialize the unique local data model parameters
             UUID settlementId = UUID.randomUUID();
