@@ -7,6 +7,7 @@ import com.mojang.logging.LogUtils;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.food.FoodProperties;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.CreativeModeTab;
@@ -58,7 +59,10 @@ public class MinecraftEmpires {
     public static final DeferredItem<BlockItem> EXAMPLE_BLOCK_ITEM = ITEMS.registerSimpleBlockItem("example_block", EXAMPLE_BLOCK);
     //city altar block and item
     public static final DeferredBlock<Block> CITY_ALTAR = BLOCKS.register("city_altar", 
-            () -> new CityAltarBlock(BlockBehaviour.Properties.of().mapColor(MapColor.GOLD).strength(5.0f, 1200.0f).requiresCorrectToolForDrops()));
+            () -> new CityAltarBlock(BlockBehaviour.Properties.of()
+                .setId(ResourceKey.create(Registries.BLOCK, net.minecraft.resources.Identifier.parse(MODID + ":city_altar")))
+                .mapColor(MapColor.GOLD)
+                .strength(5.0f, 1200.0f)));
     
     //create altar block item
     public static final DeferredItem<BlockItem> CITY_ALTAR_ITEM = ITEMS.registerSimpleBlockItem("city_altar", CITY_ALTAR);

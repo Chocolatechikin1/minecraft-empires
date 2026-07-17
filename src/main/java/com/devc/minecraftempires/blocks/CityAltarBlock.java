@@ -1,7 +1,11 @@
 package com.devc.minecraftempires.blocks;
 
+import com.devc.minecraftempires.state.StateManager;
+import com.devc.minecraftempires.state.StateData;
+import com.devc.minecraftempires.territory.SettlementData;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
@@ -9,6 +13,7 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import org.jetbrains.annotations.Nullable;
+import java.util.UUID;
 
 public class CityAltarBlock extends Block {
 
@@ -20,15 +25,44 @@ public class CityAltarBlock extends Block {
     public void setPlacedBy(Level level, BlockPos pos, BlockState state, @Nullable LivingEntity placer, ItemStack stack) {
         super.setPlacedBy(level, pos, state, placer, stack);
 
-        //ensures data handling remains server-side only, and that the placer is a player
-        if (!level.isClientSide() && placer instanceof Player player) {
+        // Security Guard: Data logic must strictly evaluate only on the Logical Server
+        if (!level.isClientSide() && level instanceof ServerLevel serverLevel && placer instanceof Player player) {
             
-            // TODO: In the next step, we will add the logic here to:
-            // 1. Check if the player belongs to a State.
-            // 2. Check if this chunk is far enough away from enemy borders.
-            // 3. Generate the actual SettlementData object.
+            // 1. Fetch our global StateManager state machine
+            StateManager stateManager = StateManager.get(serverLevel);
             
-            player.sendSystemMessage(Component.literal("§6City Altar placed! Establishing settlement link..."));
+            // 2. Resolve the player's overarching macro State profile
+            StateData playerState = stateManager.getStateByPlayer(player.getUUID());
+            
+            // Guard Clause: Check if the player is a nomadic citizen without an established country
+            if (playerState == null) {
+                player.sendSystemMessage(Component.literal("§c[Empires] You must declare or join a State via commands before placing a City Altar!"));
+                
+                // Refund the block to the player and safely break it to prevent free claims
+                level.destroyBlock(pos, true, player);
+                return;
+            }
+
+            // 3. Initialize the unique local data model parameters
+            UUID settlementId = UUID.randomUUID();
+            String settlementName = player.getName().getString() + "'s Holding";
+            
+            SettlementData freshSettlement = new SettlementData(
+                settlementId, 
+                playerState.getStateId(), 
+                settlementName, 
+                pos
+            );
+            
+            // 4. Register links inside both the macro State structure and the global system mapping
+            playerState.addSettlement(settlementId);
+            stateManager.registerSettlement(settlementId, freshSettlement);
+            
+            // 5. Fire off the geometric abstract chunk claims matrix around the altar block
+            stateManager.establishSettlementClaims(serverLevel, freshSettlement, playerState.getStateId());
+            
+            // 6. Provide clear visual confirmation feedback to the player
+            player.sendSystemMessage(Component.literal("§6§l[Empires] §aCity Altar Ignited! Established §e" + settlementName + "§a linked to the realm of §b" + playerState.getStateName() + "§a."));
         }
     }
 }

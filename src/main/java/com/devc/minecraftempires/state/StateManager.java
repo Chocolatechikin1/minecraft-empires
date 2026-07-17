@@ -1,10 +1,13 @@
 package com.devc.minecraftempires.state;
 
+import com.devc.minecraftempires.territory.SettlementData;
 import com.mojang.serialization.Codec;
+import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
 import net.minecraft.util.datafix.DataFixTypes;
@@ -18,45 +21,63 @@ public class StateManager extends SavedData {
 
     private static final String DATA_NAME = "minecraftempires_states";
     private static final String STATES_LIST_KEY = "States";
+    private static final String SETTLEMENTS_LIST_KEY = "Settlements";
+
+    //map of all states
+    private final Map<UUID, StateData> activeStates = new HashMap<>();
+    private final Map<UUID, UUID> playerToStateMap = new HashMap<>();
+    //all settlements
+    private final Map<UUID, SettlementData> activeSettlements = new HashMap<>();
+
+    public StateManager() {}
 
     private static final Codec<StateManager> CODEC = CompoundTag.CODEC.xmap(StateManager::fromTag, StateManager::toTag);
 
     public static final SavedDataType<StateManager> TYPE = new SavedDataType<>(
         Identifier.withDefaultNamespace(DATA_NAME),
         StateManager::new,
+        //StateManager::fromTag,
         CODEC,
         DataFixTypes.LEVEL
     );
     
     // The master list of all active states on the server
-    private final Map<UUID, StateData> states = new HashMap<>();
+    //private final Map<UUID, StateData> states = new HashMap<>();
 
     // --- Core Management Methods ---
     
-    public StateData createState(String stateName, UUID leaderId, StateTier startingTier) {
-        UUID newId = UUID.randomUUID();
-        StateData newState = new StateData(newId, stateName, leaderId, startingTier);
-        states.put(newId, newState);
-        
-        this.setDirty(); // Tells the server this file needs to be saved to disk
-        return newState;
-    }
-
+    // --- State Methods ---
     public StateData getState(UUID stateId) {
-        return states.get(stateId);
-    }
-    
-    public Collection<StateData> getAllStates() {
-        return states.values();
+        return activeStates.get(stateId);
     }
 
-    public void removeState(UUID stateId) {
-        states.remove(stateId);
+    public Collection<StateData> getAllStates() {
+        return activeStates.values();
+    }
+
+    public StateData getStateByPlayer(UUID playerUUID) {
+        UUID stateId = playerToStateMap.get(playerUUID);
+        return stateId != null ? activeStates.get(stateId) : null;
+    }
+
+    public void createState(StateData state) {
+        activeStates.put(state.getStateId(), state);
         this.setDirty();
     }
 
-    // Helper method to make economy changes easy from other classes
-    public void addFundsToState(UUID stateId, double amount) {
+    public StateData createState(String stateName, UUID leaderId, StateTier startingTier) {
+        UUID newId = UUID.randomUUID();
+        StateData state = new StateData(newId, stateName, leaderId, startingTier);
+        createState(state);
+        return state;
+    }
+
+    public void addPlayerToState(UUID playerUUID, UUID stateId) {
+        playerToStateMap.put(playerUUID, stateId);
+        this.setDirty();
+    }
+
+    public void addFunds(UUID stateId, double amount) {
         StateData state = getState(stateId);
         if (state != null) {
             state.addFunds(amount);
@@ -64,39 +85,80 @@ public class StateManager extends SavedData {
         }
     }
 
+    // --- NEW: Sprint 2B Settlement Methods ---
+    
+    public SettlementData getSettlement(UUID settlementId) {
+        return activeSettlements.get(settlementId);
+    }
+
+    public void registerSettlement(UUID settlementId, SettlementData data) {
+        activeSettlements.put(settlementId, data);
+        this.setDirty(); // Tells Minecraft to save this new town to disk
+    }
+
+    public void establishSettlementClaims(ServerLevel level, SettlementData settlement, UUID stateId) {
+        BlockPos center = settlement.getCenterAltarPos();
+        ChunkPos centerChunk = new ChunkPos(center.getX() >> 4, center.getZ() >> 4);
+        
+        // Tier 1 defaults to ~100 blocks out, which is roughly a 6-chunk radius
+        int chunkRadius = settlement.getProtectiveRadius() / 16;
+
+        for (int x = -chunkRadius; x <= chunkRadius; x++) {
+            for (int z = -chunkRadius; z <= chunkRadius; z++) {
+                ChunkPos targetChunk = new ChunkPos(centerChunk.x() + x, centerChunk.z() + z);
+                
+                // TODO: Link this to ClaimManager.getInstance().setChunkClaim(...) in the next step!
+            }
+        }
+        this.setDirty();
+    }
+
     // --- SavedData Saving & Loading ---
 
     private CompoundTag toTag() {
+        CompoundTag tag = new CompoundTag();
+
+        // 1. Save States
         ListTag stateList = new ListTag();
-        
-        for (StateData state : states.values()) {
+        for (StateData state : activeStates.values()) { // FIXED: Changed states.values() to activeStates.values()
             stateList.add(state.toNBT());
         }
-        
-        CompoundTag tag = new CompoundTag();
         tag.put(STATES_LIST_KEY, stateList);
+
+        // 2. Save Settlements (NEW)
+        ListTag settlementList = new ListTag();
+        for (SettlementData settlement : activeSettlements.values()) {
+            settlementList.add(settlement.toNBT());
+        }
+        tag.put(SETTLEMENTS_LIST_KEY, settlementList);
+
         return tag;
     }
 
     private static StateManager fromTag(CompoundTag tag) {
         StateManager manager = new StateManager();
-        ListTag stateList = tag.getList(STATES_LIST_KEY).orElse(new ListTag());
         
+        // 1. Load States
+        ListTag stateList = tag.getList(STATES_LIST_KEY).orElse(new ListTag());
         for (int i = 0; i < stateList.size(); i++) {
             CompoundTag stateTag = stateList.getCompound(i).orElse(new CompoundTag());
             StateData loadedState = StateData.fromNBT(stateTag);
-            manager.states.put(loadedState.getStateId(), loadedState);
+            manager.activeStates.put(loadedState.getStateId(), loadedState);
+        }
+
+        // 2. Load Settlements (NEW)
+        ListTag settlementList = tag.getList(SETTLEMENTS_LIST_KEY).orElse(new ListTag());
+        for (int i = 0; i < settlementList.size(); i++) {
+            CompoundTag sTag = settlementList.getCompound(i).orElse(new CompoundTag());
+            SettlementData loadedSettlement = SettlementData.fromNBT(sTag);
+            manager.activeSettlements.put(loadedSettlement.getSettlementId(), loadedSettlement);
         }
         
         return manager;
     }
 
     // --- Singleton Accessor ---
-    // This is how you fetch the manager from anywhere in your mod
     public static StateManager get(ServerLevel level) {
-        // We attach this data specifically to the Overworld so it's always loaded globally
-        ServerLevel overworld = level.getServer().getLevel(ServerLevel.OVERWORLD);
-        
-        return overworld.getDataStorage().computeIfAbsent(TYPE);
+        return level.getServer().overworld().getDataStorage().computeIfAbsent(TYPE);
     }
 }
