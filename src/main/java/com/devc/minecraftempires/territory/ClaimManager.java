@@ -191,4 +191,15 @@ public class ClaimManager extends SavedData {
     }
 
     private record ClaimEntry(ChunkPos pos, ChunkData data) {}
+
+    //get the total terrutory (claims) owned by a specific state for tax purposes
+    public int getClaimCountForState(UUID stateId) {
+        int count = 0;
+        for (ChunkData data : this.claims.values()) {
+            if (data.getOwnerUUID().equals(stateId)) {
+                count++;
+            }
+        }
+        return count;
+    }
 }

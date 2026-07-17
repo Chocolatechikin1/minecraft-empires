@@ -10,6 +10,13 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.ChunkPos;
 
+import com.devc.minecraftempires.state.StateData;  
+import com.devc.minecraftempires.state.StateManager;  
+import com.devc.minecraftempires.territory.SettlementData;  
+import com.devc.minecraftempires.territory.ChunkData;  
+import net.minecraft.core.BlockPos;  
+import java.util.UUID; 
+
 public class ClaimCommand {
 
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
@@ -31,19 +38,84 @@ public class ClaimCommand {
             ChunkPos pos = player.chunkPosition();
 
             ClaimManager manager = ClaimManager.get(level);
+            StateManager stateManager = StateManager.get(level);
+            StateData playerState = stateManager.getStateByPlayer(player.getUUID());
 
-            if (manager.isClaimed(pos)) {
-                player.sendSystemMessage(Component.literal("§cThis chunk is already claimed!"));
+            if (playerState == null) {
+                player.sendSystemMessage(Component.literal("§c[Minecraft Empires] Create a state to claim territory. Use /state create <name> to begin."));
                 return 0;
             }
 
-            // Claim the chunk (using player UUID, default settlement ID, ungarrisoned, tier 1)
-            manager.setClaim(pos, player.getUUID(), "player_settlement", false, 1);
-            player.sendSystemMessage(Component.literal("§aSuccessfully claimed chunk at [" + pos.x() + ", " + pos.z() + "]!"));
+            if (manager.isClaimed(pos)) {
+                player.sendSystemMessage(Component.literal("§c[Minecraft Empires] This chunk is already claimed!"));
+                return 0;
+            }
+
+            //adjacency check: ensure the player is claiming adjacent to their existing territory
+            boolean isAdjacent = false;
+            UUID stateId = playerState.getStateId();
+            //check all four cardinal directions for adjacency
+            ChunkPos[] adjacentChunks = {
+                new ChunkPos(pos.x() + 1, pos.z()),
+                new ChunkPos(pos.x() - 1, pos.z()),
+                new ChunkPos(pos.x(), pos.z() + 1),
+                new ChunkPos(pos.x(), pos.z() - 1)
+            };
+
+            for (ChunkPos adj : adjacentChunks) {
+                if (manager.isClaimed(adj)) { 
+                    ChunkData adjData = manager.getClaim(adj); 
+                    if (adjData.getOwnerUUID().equals(stateId)) { 
+                        isAdjacent = true; 
+                        break; 
+                    } 
+                } 
+            }
+
+            if (!isAdjacent) {
+                player.sendSystemMessage(Component.literal("§c[Minecraft Empires] You can only claim chunks adjacent to your existing territory!"));
+                return 0;
+            }
+
+            //nearest settlement attribution
+            SettlementData nearestSettlement = null;
+            double minDistance = Double.MAX_VALUE;
+
+            //get chunk center position
+            int chunkCenterX = (pos.x() << 4) + 8;
+            int chunkCenterZ = (pos.z() << 4) + 8;
+
+            //loop through all owned settlements to find the nearest one
+            for (UUID sId : playerState.getOwnedSettlements()) {
+                SettlementData settlement = stateManager.getSettlement(sId);
+                if (settlement != null) {
+                    BlockPos center = settlement.getCenterAltarPos();
+                    double distance = Math.sqrt(Math.pow(center.getX() - chunkCenterX, 2) + Math.pow(center.getZ() - chunkCenterZ, 2));
+                    if (distance < minDistance) {
+                        minDistance = distance;
+                        nearestSettlement = settlement;
+                    }
+                }
+            }
+
+            //if no settlements, warn player
+            if (nearestSettlement == null) {
+                player.sendSystemMessage(Component.literal("§c[Minecraft Empires] You must have at least one settlement to claim territory!"));
+                return 0;
+            }
+
+            //register claim with the nearest settlement's ID
+            manager.setClaim(pos, stateId, nearestSettlement.getSettlementId().toString(), false, nearestSettlement.getSettlementTier());
+
+            //mark data as dirty
+            stateManager.setDirty();
+            manager.setDirty();
+
+            player.sendSystemMessage(Component.literal("§a[Minecraft Empires] Successfully claimed chunk at [" + pos.x() + ", " + pos.z() + "]!"));
 
             return 1;
         } catch (Exception e) {
-            context.getSource().sendFailure(Component.literal("Only players can run this command!"));
+            context.getSource().sendFailure(Component.literal("§c[Minecraft Empires] Only players can run this command!"));
             return 0;
         }
     }
@@ -57,16 +129,16 @@ public class ClaimCommand {
             ClaimManager manager = ClaimManager.get(level);
 
             if (!manager.isClaimed(pos)) {
-                player.sendSystemMessage(Component.literal("§cThis chunk is not claimed!"));
+                player.sendSystemMessage(Component.literal("§c[Minecraft Empires] This chunk is not claimed!"));
                 return 0;
             }
 
             manager.removeClaim(pos);
-            player.sendSystemMessage(Component.literal("§eSuccessfully unclaimed chunk at [" + pos.x() + ", " + pos.z() + "]!"));
+            player.sendSystemMessage(Component.literal("§e[Minecraft Empires] Successfully unclaimed chunk at [" + pos.x() + ", " + pos.z() + "]!"));
 
             return 1;
         } catch (Exception e) {
-            context.getSource().sendFailure(Component.literal("Only players can run this command!"));
+            context.getSource().sendFailure(Component.literal("§c[Minecraft Empires] Only players can run this command!"));
             return 0;
         }
     }

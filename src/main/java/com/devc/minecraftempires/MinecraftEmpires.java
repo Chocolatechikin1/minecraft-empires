@@ -7,6 +7,7 @@ import com.mojang.logging.LogUtils;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.world.food.FoodProperties;
 import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.CreativeModeTab;
@@ -32,7 +33,11 @@ import net.neoforged.neoforge.registries.DeferredItem;
 import net.neoforged.neoforge.registries.DeferredRegister;
 //custom command imports
 import com.devc.minecraftempires.commands.ClaimCommand;
+import com.devc.minecraftempires.commands.StateCommand;
+import com.devc.minecraftempires.state.EconomyTickHandler;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
+//custom block imports
+import com.devc.minecraftempires.blocks.CityAltarBlock;
 
 // The value here should match an entry in the META-INF/neoforge.mods.toml file
 @Mod(MinecraftEmpires.MODID)
@@ -52,6 +57,15 @@ public class MinecraftEmpires {
     public static final DeferredBlock<Block> EXAMPLE_BLOCK = BLOCKS.registerSimpleBlock("example_block", p -> p.mapColor(MapColor.STONE));
     // Creates a new BlockItem with the id "minecraftempires:example_block", combining the namespace and path
     public static final DeferredItem<BlockItem> EXAMPLE_BLOCK_ITEM = ITEMS.registerSimpleBlockItem("example_block", EXAMPLE_BLOCK);
+    //city altar block and item
+    public static final DeferredBlock<Block> CITY_ALTAR = BLOCKS.register("city_altar", 
+            () -> new CityAltarBlock(BlockBehaviour.Properties.of()
+                .setId(ResourceKey.create(Registries.BLOCK, net.minecraft.resources.Identifier.parse(MODID + ":city_altar")))
+                .mapColor(MapColor.GOLD)
+                .strength(5.0f, 1200.0f)));
+    
+    //create altar block item
+    public static final DeferredItem<BlockItem> CITY_ALTAR_ITEM = ITEMS.registerSimpleBlockItem("city_altar", CITY_ALTAR);
 
     // Creates a new food item with the id "minecraftempires:example_id", nutrition 1 and saturation 2
     public static final DeferredItem<Item> EXAMPLE_ITEM = ITEMS.registerSimpleItem("example_item", p -> p.food(new FoodProperties.Builder()
@@ -64,6 +78,7 @@ public class MinecraftEmpires {
             .icon(() -> EXAMPLE_ITEM.get().getDefaultInstance())
             .displayItems((parameters, output) -> {
                 output.accept(EXAMPLE_ITEM.get()); // Add the example item to the tab. For your own tabs, this method is preferred over the event
+                output.accept(CITY_ALTAR_ITEM.get()); //add city altar block to the creative tab
             }).build());
 
     // The constructor for the mod class is the first code that is run when your mod is loaded.
@@ -83,6 +98,7 @@ public class MinecraftEmpires {
         // Note that this is necessary if and only if we want *this* class (MinecraftEmpires) to respond directly to events.
         // Do not add this line if there are no @SubscribeEvent-annotated functions in this class, like onServerStarting() below.
         NeoForge.EVENT_BUS.register(this);
+        NeoForge.EVENT_BUS.register(new EconomyTickHandler());
 
         // Register the item to a creative tab
         modEventBus.addListener(this::addCreative);
@@ -117,10 +133,12 @@ public class MinecraftEmpires {
         // Do something when the server starts
         LOGGER.info("HELLO from server starting");
     }
-    //claim commands
+    //claim commands and state commands
     @SubscribeEvent
     public void onRegisterCommands(RegisterCommandsEvent event) {
         ClaimCommand.register(event.getDispatcher());
+        StateCommand.register(event.getDispatcher());
         LOGGER.info("Registered Minecraft Empires commands!");
     }
+    
 }
