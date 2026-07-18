@@ -10,12 +10,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
-/**
- * Server-to-client snapshot used by the Phase 3 map dashboard.
- *
- * Only information allowed by fog-of-war rules is placed in this payload.
- */
-public record MapDataPayload(
+//server to client packet for sending map data to the client, including chunk ownership, settlement information, and breach alerts
+public record MapDataPayload( //weird ai formatting, i like it tho
         UUID viewerStateId,
         String viewerStateName,
         List<MapChunkData> chunks,
@@ -23,15 +19,18 @@ public record MapDataPayload(
         List<SettlementSummary> settlements,
         List<BreachAlert> breachAlerts
 ) implements CustomPacketPayload {
+    //method to register the packet type with the network system
     public static final Type<MapDataPayload> TYPE = new Type<>(
             Identifier.fromNamespaceAndPath(MinecraftEmpires.MODID, "map_data")
     );
 
+    //stream codec for serializing and deserializing the packet data
     public static final StreamCodec<RegistryFriendlyByteBuf, MapDataPayload> STREAM_CODEC = StreamCodec.ofMember(
             MapDataPayload::write,
             MapDataPayload::new
     );
 
+    //constructor
     public MapDataPayload {
         viewerStateName = viewerStateName == null ? "" : viewerStateName;
         chunks = List.copyOf(chunks);
@@ -40,6 +39,7 @@ public record MapDataPayload(
         breachAlerts = List.copyOf(breachAlerts);
     }
 
+    //constructor for deserializing the packet data from a buffer
     public MapDataPayload(RegistryFriendlyByteBuf buffer) {
         this(
                 readNullableUuid(buffer),
@@ -51,6 +51,7 @@ public record MapDataPayload(
         );
     }
 
+    //method for serializing the packet data to a buffer
     private void write(RegistryFriendlyByteBuf buffer) {
         writeNullableUuid(buffer, viewerStateId);
         buffer.writeUtf(viewerStateName);
@@ -60,15 +61,18 @@ public record MapDataPayload(
         writeList(buffer, breachAlerts, BreachAlert::write);
     }
 
+    //method for getting the packet type
     @Override
     public Type<? extends CustomPacketPayload> type() {
         return TYPE;
     }
 
+    //method for creating an empty packet
     public static MapDataPayload empty() {
         return new MapDataPayload(null, "", List.of(), List.of(), List.of(), List.of());
     }
 
+    //method for creating a packet with only the viewer state information
     public record MapChunkData(
             long packedChunkPos,
             int runLength,
@@ -78,11 +82,12 @@ public record MapDataPayload(
             int settlementTier,
             boolean contested
     ) {
-        public MapChunkData {
+        public MapChunkData { 
             settlementId = settlementId == null ? "" : settlementId;
             runLength = Math.max(1, runLength);
         }
 
+        //constructor for deserializing the chunk data from a buffer
         public MapChunkData(RegistryFriendlyByteBuf buffer) {
             this(
                     buffer.readLong(),
@@ -106,6 +111,7 @@ public record MapDataPayload(
         }
     }
 
+    //record for storing state info
     public record StateSummary(
             UUID stateId,
             String stateName,
@@ -146,6 +152,7 @@ public record MapDataPayload(
         }
     }
 
+    //record for storing settlement info
     public record SettlementSummary(
             String settlementId,
             UUID stateId,
@@ -189,6 +196,7 @@ public record MapDataPayload(
         }
     }
 
+    //record for storing border breached info
     public record BreachAlert(
             long packedChunkPos,
             UUID defenderStateId,
@@ -207,6 +215,7 @@ public record MapDataPayload(
         }
     }
 
+    //gets the interface
     @FunctionalInterface
     private interface Reader<T> {
         T read(RegistryFriendlyByteBuf buffer);
@@ -217,15 +226,17 @@ public record MapDataPayload(
         void write(T value, RegistryFriendlyByteBuf buffer);
     }
 
+    //helper methods for reading and writing lists and nullable UUIDs
     private static <T> List<T> readList(RegistryFriendlyByteBuf buffer, Reader<T> reader) {
         int size = buffer.readVarInt();
-        List<T> values = new ArrayList<>(size);
+        List<T> values = new ArrayList<>(size); //use ArrayList for better performance when the size is known
         for (int index = 0; index < size; index++) {
-            values.add(reader.read(buffer));
+            values.add(reader.read(buffer));//use the reader to read each value from the buffer and add it to the list
         }
         return values;
     }
 
+    //helper method for writing a list of values to a buffer
     private static <T> void writeList(RegistryFriendlyByteBuf buffer, List<T> values, Writer<T> writer) {
         buffer.writeVarInt(values.size());
         for (T value : values) {
@@ -233,10 +244,12 @@ public record MapDataPayload(
         }
     }
 
+    //helper method for reading a nullable UUID from a buffer
     private static UUID readNullableUuid(RegistryFriendlyByteBuf buffer) {
         return buffer.readBoolean() ? buffer.readUUID() : null;
     }
 
+    //helper method for writing a nullable UUID to a buffer
     private static void writeNullableUuid(RegistryFriendlyByteBuf buffer, UUID value) {
         buffer.writeBoolean(value != null);
         if (value != null) {

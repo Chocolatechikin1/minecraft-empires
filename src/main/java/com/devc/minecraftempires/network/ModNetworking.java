@@ -8,7 +8,7 @@ import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 
-/** Common-side registration and server payload handlers. */
+//registering and handling the custom packets for requesting and sending map data between the client and server
 public final class ModNetworking {
     private ModNetworking() {}
 

@@ -247,4 +247,12 @@ public class ClaimManager extends SavedData {
         }
         return count;
     }
+
+    //clear chunk claims when disbanding a state
+    public void clearAllClaimsForState(UUID stateId) {
+        boolean chunksRemoved = this.claims.entrySet().removeIf(entry -> entry.getValue().getOwnerUUID().equals(stateId));
+        if (chunksRemoved) {
+            this.setDirty(); // CRITICAL: Tells the server to save the cleared map to disk!
+        }
+    }
 }

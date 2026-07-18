@@ -15,7 +15,7 @@ import org.lwjgl.glfw.GLFW;
 
 import java.util.Locale;
 
-/** Main Phase 3 empire-map dashboard. */
+//primary file to house the map screen, including the map widget and the details panel, which shows information about the selected chunk, settlement, and state
 public final class MapScreen extends Screen {
     private static final int PANEL_WIDTH = 205;
     private static final int MARGIN = 8;
@@ -26,6 +26,7 @@ public final class MapScreen extends Screen {
         super(Component.translatable("gui.minecraftempires.map.title"));
     }
 
+    //sets default map size
     @Override
     protected void init() {
         super.init();
@@ -56,11 +57,10 @@ public final class MapScreen extends Screen {
         ClientNetworking.requestMapData();
     }
 
+    //renders the map widget and the details panel, which shows information about the selected chunk, settlement, and state
     @Override
     public void extractRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {
-        // Screen.extractRenderStateWithTooltipAndSubtitles already extracts the
-        // blurred background. Calling extractBackground here requests a second
-        // blur in the same frame and crashes with "Can only blur once per frame".
+        //draw the map widget if it exists
         if (this.mapWidget != null) {
             this.mapWidget.render(graphics, this.font, mouseX, mouseY);
         }
@@ -69,6 +69,7 @@ public final class MapScreen extends Screen {
         super.extractRenderState(graphics, mouseX, mouseY, partialTick);
     }
 
+    //draws the details panel, which shows information about the selected chunk, settlement, and state, or a legend if no chunk is selected
     private void drawDetailsPanel(GuiGraphicsExtractor graphics) {
         int panelX = this.width - PANEL_WIDTH;
         graphics.fill(panelX, 0, this.width, this.height, 0xEE0D1218);
@@ -89,13 +90,14 @@ public final class MapScreen extends Screen {
 
         if (snapshot.viewerStateId() == null) {
             y = drawLine(graphics, textX, y, Component.translatable("gui.minecraftempires.map.no_state"), 0xFFFF7777);
-            drawWrappedHint(graphics, textX, y + 4, "Create or join a state before opening the empire map.");
+            drawWrappedHint(graphics, textX, y + 4, "[Minecraft Empires] Create or join a state before opening the empire map!");
             return;
         }
 
         MapDataPayload.MapChunkData selectedChunk = mapWidget == null ? null : mapWidget.getSelectedChunk();
         ChunkPos selectedPosition = mapWidget == null ? null : mapWidget.getSelectedPosition();
 
+        //displays the details of the selected chunk, settlement, and state, or a legend if no chunk is selected
         if (selectedChunk == null) {
             MapDataPayload.StateSummary viewerSummary = snapshot.getState(snapshot.viewerStateId());
             y = drawHeading(graphics, textX, y, snapshot.viewerStateName().isBlank() ? "Your State" : snapshot.viewerStateName());
@@ -112,13 +114,14 @@ public final class MapScreen extends Screen {
             y = drawLegendLine(graphics, textX, y, 0xFF73E0FF, "Garrisoned");
             y = drawLegendLine(graphics, textX, y, 0xFFFF4242, "Recent breach");
             y += 5;
-            drawWrappedHint(graphics, textX, y, "Left-click territory for details. Drag to pan. Scroll to zoom. Right-click clears selection.");
+            drawWrappedHint(graphics, textX, y, "Left-click territory for details. Drag to pan. Scroll to zoom. Right-click to clear selection.");
             return;
         }
 
         MapDataPayload.StateSummary state = snapshot.getState(selectedChunk.ownerStateId());
         MapDataPayload.SettlementSummary settlement = snapshot.getSettlement(selectedChunk.settlementId());
 
+        //if chunk is part of an unorganized province, display "Unorganized Territory" instead of the settlement name
         String heading = settlement == null
                 ? (selectedChunk.settlementId().isBlank() ? "Unorganized Territory" : "Province")
                 : settlement.settlementName();
@@ -147,28 +150,33 @@ public final class MapScreen extends Screen {
         }
     }
 
+    //helper methods for drawing text and lines in the details panel, including headings, labels, values, and legends
     private int drawHeading(GuiGraphicsExtractor graphics, int x, int y, String text) {
         graphics.text(this.font, Component.literal(trim(text, 28)), x, y, 0xFFFFD45A);
         return y + 14;
     }
 
+    //helper method for drawing a line of text with a label and value in the details panel, returning the new y position
     private int drawLine(GuiGraphicsExtractor graphics, int x, int y, String label, String value) {
         graphics.text(this.font, Component.literal(label + ":"), x, y, 0xFFAAB4BE);
         graphics.text(this.font, Component.literal(trim(value, 22)), x + 78, y, 0xFFF3F5F7);
         return y + 12;
     }
 
+    //similar to the previous drawLine method but takes a Component instead of a String for the value
     private int drawLine(GuiGraphicsExtractor graphics, int x, int y, Component text, int color) {
         graphics.text(this.font, text, x, y, color);
         return y + 12;
     }
 
+    //helper method for drawing a legend line with a colored box and text in the details panel, returning the new y position
     private int drawLegendLine(GuiGraphicsExtractor graphics, int x, int y, int color, String text) {
         graphics.fill(x, y + 2, x + 7, y + 9, color);
         graphics.text(this.font, Component.literal(text), x + 12, y, 0xFFD7DEE5);
         return y + 12;
     }
 
+    //helper method for drawing wrapped text in the details panel, splitting the text into lines that fit within the panel width
     private void drawWrappedHint(GuiGraphicsExtractor graphics, int x, int y, String text) {
         String[] words = text.split(" ");
         StringBuilder line = new StringBuilder();
@@ -188,6 +196,7 @@ public final class MapScreen extends Screen {
         }
     }
 
+    //all mouse and keyboard input is passed to the map widget, which handles panning, zooming, and selecting chunks, settlements, and states
     @Override
     public boolean mouseClicked(MouseButtonEvent event, boolean doubleClick) {
         if (super.mouseClicked(event, doubleClick)) {
@@ -234,6 +243,7 @@ public final class MapScreen extends Screen {
         return false;
     }
 
+    //helper method to format the tier name for display, capitalizing the first letter and replacing underscores with spaces, or returning "Unknown" if the value is null or blank
     private static String formatTier(String value) {
         if (value == null || value.isBlank()) {
             return "Unknown";
@@ -242,6 +252,7 @@ public final class MapScreen extends Screen {
         return Character.toUpperCase(lower.charAt(0)) + lower.substring(1);
     }
 
+    //helper method to trim a string to a maximum number of characters, adding "..." if the string is too long, or returning an empty string if the value is null
     private static String trim(String value, int maximumCharacters) {
         if (value == null) {
             return "";

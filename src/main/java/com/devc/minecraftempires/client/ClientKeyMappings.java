@@ -7,7 +7,7 @@ import net.minecraft.resources.Identifier;
 import net.neoforged.neoforge.client.event.RegisterKeyMappingsEvent;
 import org.lwjgl.glfw.GLFW;
 
-/** Phase 3 configurable key mapping. */
+//class that handles the key mapping
 public final class ClientKeyMappings {
     public static final KeyMapping.Category CATEGORY = new KeyMapping.Category(
             Identifier.fromNamespaceAndPath(MinecraftEmpires.MODID, "empire_management")
@@ -16,7 +16,7 @@ public final class ClientKeyMappings {
     public static final KeyMapping OPEN_MAP = new KeyMapping(
             "key.minecraftempires.open_map",
             InputConstants.Type.KEYSYM,
-            GLFW.GLFW_KEY_M,
+            GLFW.GLFW_KEY_M, //set to M
             CATEGORY
     );
 

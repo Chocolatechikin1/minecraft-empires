@@ -11,10 +11,7 @@ import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
 
-/**
- * Phase 3 map canvas. Handles viewport culling, panning, cursor-centered zooming,
- * territory borders, province labels, settlement markers, and breach overlays.
- */
+//primary class for rendering the interactive map, including panning, zooming, and displaying chunk ownership, settlements, and alerts
 public final class InteractiveMapWidget {
     private static final double MIN_ZOOM = 3.0;
     private static final double MAX_ZOOM = 28.0;
@@ -43,6 +40,7 @@ public final class InteractiveMapWidget {
         this.height = Math.max(1, height);
     }
 
+    //sets the center of the map to the specified chunk coordinates, clamping the zoom level to the allowed range
     public void render(GuiGraphicsExtractor graphics, Font font, int mouseX, int mouseY) {
         ClientMapData.Snapshot snapshot = ClientMapData.get();
         refreshViewportForNewData(snapshot);
@@ -74,6 +72,7 @@ public final class InteractiveMapWidget {
         drawCoordinates(graphics, font, mouseX, mouseY);
     }
 
+    //allows the map to be panned by dragging with the left mouse button, zoomed with the scroll wheel, and chunks to be selected or deselected with left and right clicks
     private void drawGrid(GuiGraphicsExtractor graphics) {
         if (zoom < 7.0) {
             return;
@@ -94,6 +93,7 @@ public final class InteractiveMapWidget {
         }
     }
 
+    //renders the territory on the map, including chunk ownership, settlements, and borders, using the provided snapshot of the map data
     private void drawTerritory(GuiGraphicsExtractor graphics, ClientMapData.Snapshot snapshot) {
         int minChunkX = Math.max(snapshot.minChunkX(), floorChunk(screenToChunkX(x)) - 1);
         int maxChunkX = Math.min(snapshot.maxChunkX(), floorChunk(screenToChunkX(x + width)) + 1);
@@ -143,6 +143,7 @@ public final class InteractiveMapWidget {
         }
     }
 
+    //draws a hatching pattern on the map for unclaimed chunks
     private void drawHatching(GuiGraphicsExtractor graphics, int left, int top, int right, int bottom) {
         if (zoom < 6.0) {
             return;
@@ -152,6 +153,7 @@ public final class InteractiveMapWidget {
         }
     }
 
+    //draws borders around chunks using a mask, using the specified color and thickness
     private void drawMask(
             GuiGraphicsExtractor graphics,
             int left,
@@ -176,6 +178,7 @@ public final class InteractiveMapWidget {
         }
     }
 
+    //highlights chunks that have breach alerts, drawing a red border around them
     private void drawBreachAlerts(GuiGraphicsExtractor graphics, ClientMapData.Snapshot snapshot) {
         for (MapDataPayload.BreachAlert alert : snapshot.breachAlerts()) {
             ChunkPos position = ChunkPos.unpack(alert.packedChunkPos());
@@ -203,6 +206,7 @@ public final class InteractiveMapWidget {
         }
     }
 
+    //primary method for drawing province labels and settlement markers on the map, ensuring that labels do not overlap and are only drawn when zoomed in sufficiently
     private void drawProvinceLabelsAndMarkers(
             GuiGraphicsExtractor graphics,
             Font font,
@@ -221,6 +225,7 @@ public final class InteractiveMapWidget {
                 drawSettlementMarker(graphics, markerX, markerY, anchor.capital(), anchor.garrisoned());
             }
 
+            //only draw province markers when close enough 
             if (zoom < 5.5) {
                 continue;
             }
@@ -237,6 +242,7 @@ public final class InteractiveMapWidget {
         }
     }
 
+    //draws a marker for a settlement on the map
     private void drawSettlementMarker(
             GuiGraphicsExtractor graphics,
             int centerX,
@@ -262,6 +268,7 @@ public final class InteractiveMapWidget {
         }
     }
 
+    //adds the coordinates of the chunk the users mouse is hovering over
     private void drawCoordinates(GuiGraphicsExtractor graphics, Font font, int mouseX, int mouseY) {
         if (!contains(mouseX, mouseY)) {
             return;
@@ -277,6 +284,7 @@ public final class InteractiveMapWidget {
         graphics.text(font, Component.literal(text), left, top, 0xFFD7DEE5);
     }
 
+    //allows the user to drag the map
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
         if (!contains(mouseX, mouseY)) {
             return false;
@@ -302,6 +310,7 @@ public final class InteractiveMapWidget {
         return false;
     }
 
+    //stops dragging the map when the left mouse button is released
     public boolean mouseReleased(int button) {
         if (button == 0 && dragging) {
             dragging = false;
@@ -310,6 +319,7 @@ public final class InteractiveMapWidget {
         return false;
     }
 
+    //allows the user to drag the map by updating the center chunk coordinates based on mouse movement
     public boolean mouseDragged(double deltaX, double deltaY, int button) {
         if (button != 0 || !dragging) {
             return false;
@@ -320,6 +330,7 @@ public final class InteractiveMapWidget {
         return true;
     }
 
+    //allows user to zoom in and out of the map, also adjusts center chunk coordinates to keep the mouse position consistent during zooming
     public boolean mouseScrolled(double mouseX, double mouseY, double scrollY) {
         if (!contains(mouseX, mouseY) || scrollY == 0.0) {
             return false;
@@ -336,6 +347,7 @@ public final class InteractiveMapWidget {
         return true;
     }
 
+    //controls the "reset" button, which resets the map to the default zoom and centers it on the player's current position
     public void resetView() {
         ClientMapData.Snapshot snapshot = ClientMapData.get();
         centerChunkX = snapshot.centerChunkX();
@@ -344,6 +356,7 @@ public final class InteractiveMapWidget {
         selectedChunk = Long.MIN_VALUE;
     }
 
+    //gets the currently selected chunk, returning null if no chunk is selected
     public MapDataPayload.MapChunkData getSelectedChunk() {
         if (selectedChunk == Long.MIN_VALUE) {
             return null;
@@ -351,10 +364,12 @@ public final class InteractiveMapWidget {
         return ClientMapData.get().chunksByPosition().get(selectedChunk);
     }
 
+    //gets the currently selected chunk position, returning null if no chunk is selected
     public ChunkPos getSelectedPosition() {
         return selectedChunk == Long.MIN_VALUE ? null : ChunkPos.unpack(selectedChunk);
     }
 
+    //gets the currently selected chunk position, returning null if no chunk is selected
     private void refreshViewportForNewData(ClientMapData.Snapshot snapshot) {
         if (snapshot.version() == loadedSnapshotVersion) {
             return;
@@ -363,6 +378,7 @@ public final class InteractiveMapWidget {
         resetView();
     }
 
+    //calculates the zoom level
     private double calculateFitZoom(ClientMapData.Snapshot snapshot) {
         if (!snapshot.hasData()) {
             return DEFAULT_ZOOM;
@@ -410,6 +426,7 @@ public final class InteractiveMapWidget {
         return Math.max(minimum, Math.min(maximum, value));
     }
 
+    //colors the state territories based on their UUID, using a hash function to generate a unique color for each state, with different alpha values for the viewer's state and other states
     private static int stateFillColor(UUID stateId, boolean viewerState) {
         int hash = stateId.hashCode();
         int red = 72 + Math.floorMod(hash, 112);
@@ -419,6 +436,7 @@ public final class InteractiveMapWidget {
         return (alpha << 24) | (red << 16) | (green << 8) | blue;
     }
 
+    //helper method to trim a string to a maximum number of characters, adding "..." if the string is too long, or returning an empty string if the value is null
     private static String trimToWidth(Font font, String text, int maximumWidth) {
         if (font.width(text) <= maximumWidth) {
             return text;
