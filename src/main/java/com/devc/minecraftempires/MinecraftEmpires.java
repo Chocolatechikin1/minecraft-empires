@@ -38,6 +38,13 @@ import com.devc.minecraftempires.state.EconomyTickHandler;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 //custom block imports
 import com.devc.minecraftempires.blocks.CityAltarBlock;
+//custom network imports
+import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent; 
+import net.neoforged.neoforge.network.registration.PayloadRegistrar; 
+//custom UI imports
+import com.devc.minecraftempires.network.packet.MapDataPayload; 
+import com.devc.minecraftempires.network.ClientMapHandler; 
+import com.devc.minecraftempires.network.ModNetworking; 
 
 // The value here should match an entry in the META-INF/neoforge.mods.toml file
 @Mod(MinecraftEmpires.MODID)
@@ -86,6 +93,7 @@ public class MinecraftEmpires {
     public MinecraftEmpires(IEventBus modEventBus, ModContainer modContainer) {
         // Register the commonSetup method for modloading
         modEventBus.addListener(this::commonSetup);
+        modEventBus.addListener(ModNetworking::registerPayloads); // PHASE 3
 
         // Register the Deferred Register to the mod event bus so blocks get registered
         BLOCKS.register(modEventBus);

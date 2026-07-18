@@ -1,6 +1,7 @@
 {
-  "itemGroup.minecraftempires": "Example Mod Tab",
+  "itemGroup.minecraftempires": "Minecraft Empires",
   "block.minecraftempires.example_block": "Example Block",
+  "block.minecraftempires.city_altar": "City Altar",
   "item.minecraftempires.example_item": "Example Item",
 
   "minecraftempires.configuration.title": "Minecraft Empires Configs",
@@ -9,5 +10,18 @@
   "minecraftempires.configuration.items": "Item List",
   "minecraftempires.configuration.logDirtBlock": "Log Dirt Block",
   "minecraftempires.configuration.magicNumberIntroduction": "Magic Number Text",
-  "minecraftempires.configuration.magicNumber": "Magic Number"
+  "minecraftempires.configuration.magicNumber": "Magic Number",
+
+  "key.category.minecraftempires.empire_management": "Minecraft Empires",
+  "key.minecraftempires.open_map": "Open Empire Map",
+
+  "gui.minecraftempires.map.title": "Empire Map",
+  "gui.minecraftempires.map.awaiting_data": "Awaiting map data...",
+  "gui.minecraftempires.map.no_state": "No state membership found.",
+  "gui.minecraftempires.map.reset": "Reset",
+  "gui.minecraftempires.map.refresh": "Refresh",
+  "gui.minecraftempires.map.close": "Close",
+  "gui.minecraftempires.map.inventory_button": "Map",
+
+  "message.minecraftempires.border_breach": "Border breach by %1$s near chunk %2$s, %3$s!"
 }
