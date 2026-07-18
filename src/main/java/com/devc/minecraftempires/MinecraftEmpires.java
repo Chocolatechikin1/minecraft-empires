@@ -38,6 +38,13 @@ import com.devc.minecraftempires.state.EconomyTickHandler;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 //custom block imports
 import com.devc.minecraftempires.blocks.CityAltarBlock;
+//custom network imports
+import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent; 
+import net.neoforged.neoforge.network.registration.PayloadRegistrar; 
+//custom UI imports
+import com.devc.minecraftempires.network.packet.MapDataPayload; 
+import com.devc.minecraftempires.network.ClientMapHandler; 
+import com.devc.minecraftempires.client.ClientKeybinds;
 
 // The value here should match an entry in the META-INF/neoforge.mods.toml file
 @Mod(MinecraftEmpires.MODID)
@@ -105,6 +112,9 @@ public class MinecraftEmpires {
 
         // Register our mod's ModConfigSpec so that FML can create and load the config file for us
         modContainer.registerConfig(ModConfig.Type.COMMON, Config.SPEC);
+
+        // Registers our custom keybinds to the client
+        modEventBus.addListener(ClientKeybinds::registerKeyBindings); 
     }
 
     private void commonSetup(FMLCommonSetupEvent event) {
@@ -140,5 +150,16 @@ public class MinecraftEmpires {
         StateCommand.register(event.getDispatcher());
         LOGGER.info("Registered Minecraft Empires commands!");
     }
-    
+    //network payload registration
+    @SubscribeEvent
+    public void registerNetworking(final RegisterPayloadHandlersEvent event) { 
+        final PayloadRegistrar registrar = event.registrar("minecraftempires"); 
+        
+        // Registers our map data to be sent FROM the Server TO the Client 
+        registrar.playToClient( 
+            MapDataPayload.TYPE, 
+            MapDataPayload.STREAM_CODEC, 
+            ClientMapHandler.getInstance()::handleData 
+        ); 
+    } 
 }

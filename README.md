@@ -39,7 +39,7 @@ Below is the active development schedule for the project. (Note: timeline may ta
 
 ---
 
-### Phase 1: Core Territory Tracking & Claims (The Abstract Foundation)
+### Sprint 1: Core Territory Tracking & Claims (The Abstract Foundation)
 * **Goal:** Build the backend system that registers chunk ownership in memory without relying on heavy physical blocks.
 * **Key Mechanics:**
   * Define settlement tier logic (base settlement radius scaled to 100 blocks / ~156 chunks).
@@ -48,7 +48,7 @@ Below is the active development schedule for the project. (Note: timeline may ta
 
 ---
 
-### Phase 2: State Progression & Treasury Systems
+### Sprint 2: State Progression & Treasury Systems
 * **Goal:** Create the macro-economic engine and tier classification hierarchy.
 * **Key Mechanics:**
   * Dual-key state progression matrix: state tiers scale dynamically based on both claimed territory footprints and total population milestones (from *Outpost* up to *Empire*).
@@ -58,17 +58,17 @@ Below is the active development schedule for the project. (Note: timeline may ta
 
 ---
 
-### Phase 3: Interactive Map Dashboard UI
+### Sprint 3: Interactive Map Dashboard UI
 * **Goal:** Build the primary command center interface for all functions that need a UI.
 * **Key Mechanics:**
   * Dynamic 2D top-down strategy view with live territory color overlays, provincial labels, and an interactive "Claim Core" button to purchase radius expansions via treasury emeralds. (can be split into multiple UIs, TBD)
   * **Obfuscated Fog of War:** Unexplored/unscouted territories hide precise enemy unit coordinates; breached provinces display a generalized warning overlay on the UI map.
   * Real-time chat alerts when provincial boundaries are breached.
-* **Technical Implementation:** Construct a custom `Screen` / `ScreenHandler` UI layer fed directly by Phase 1 backend data.
+* **Technical Implementation:** Construct a custom `Screen` / `ScreenHandler` UI layer fed directly by Sprint 1 backend data.
 
 ---
 
-### Phase 4: Abstract Army Data Structures & Morale Engine
+### Sprint 4: Abstract Army Data Structures & Morale Engine
 * **Goal:** Program the "brains" and stats of military cohorts without spawning physical entities.
 * **Key Mechanics:**
   * Define `Cohort` and `Legion` object structures (health, speed, endurance, loyalty, and **Morale** scored from 1–100).
@@ -78,7 +78,7 @@ Below is the active development schedule for the project. (Note: timeline may ta
 
 ---
 
-### Phase 5: Army Management & Waypoint Dispatch System
+### Sprint 5: Army Management & Waypoint Dispatch System
 * **Goal:** Connect army data to the Interactive Map UI for strategic maneuvering.
 * **Key Mechanics:**
   * Sub-menus to raise, disband, or inspect armies using treasury funds.
@@ -88,7 +88,7 @@ Below is the active development schedule for the project. (Note: timeline may ta
 
 ---
 
-### Phase 6: Tactical Battle Map (Macro Combat Engine)
+### Sprint 6: Tactical Battle Map (Macro Combat Engine)
 * **Goal:** Implement the primary bird's-eye battle map mode for resolving clashes.
 * **Key Mechanics:**
   * Triggering battles when opposing forces close within 100 blocks.
@@ -98,7 +98,7 @@ Below is the active development schedule for the project. (Note: timeline may ta
 
 ---
 
-### Phase 7: Logistics, Infrastructure & Supply Lines
+### Sprint 7: Logistics, Infrastructure & Supply Lines
 * **Goal:** Add historical depth to state building and military campaigns.
 * **Key Mechanics:**
   * **Supply Lines:** Armies operating in unorganized/enemy lands require a continuous link to friendly settlements or camps via roads/adjacent territory; severed supply lines cause daily endurance and morale decay.
@@ -108,7 +108,7 @@ Below is the active development schedule for the project. (Note: timeline may ta
 
 ---
 
-### Phase 8: AI State Decision Engine (The Macro Brain)
+### Sprint 8: AI State Decision Engine (The Macro Brain)
 * **Goal:** Bring the world to life with competing computer-controlled nations.
 * **Key Mechanics:**
   * Background AI states managing finances, upgrading settlement tiers, declaring wars, and deploying "Ghost Legions".
@@ -117,7 +117,7 @@ Below is the active development schedule for the project. (Note: timeline may ta
 
 ---
 
-### Phase 9: World Generation & Procedural Infrastructure
+### Sprint 9: World Generation & Procedural Infrastructure
 * **Goal:** Alter the physical Minecraft world to reflect macro state data.
 * **Key Mechanics:**
   * Structure generation for outposts, forts, and city centers.
@@ -126,7 +126,7 @@ Below is the active development schedule for the project. (Note: timeline may ta
 
 ---
 
-### Phase 10: "Hop In" Mode & Battlefield Entity Abstraction
+### Sprint 10: "Hop In" Mode & Battlefield Entity Abstraction
 * **Goal:** Bridge macro grand strategy with first-person, physical action.
 * **Key Mechanics:**
   * **"Hop In" First-Person Deployment:** Equipping a **Command Banner** in the off-hand allows the player to physically spawn and tie a personal guard cohort to their player coordinates.
