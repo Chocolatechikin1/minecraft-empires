@@ -14,10 +14,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * Client-only immutable cache. Expensive border and province-anchor calculations happen once
- * when a server payload arrives rather than once per rendered frame.
- */
+//cleint side storage and processing of map data received from the server, including chunk ownership, settlement information, and breach alerts
 public final class ClientMapData {
     public static final int BORDER_NORTH = 1;
     public static final int BORDER_EAST = 1 << 1;
@@ -83,6 +80,7 @@ public final class ClientMapData {
             );
         }
 
+        //handles client snapshot creation from a payload which has all the data for the map
         private static Snapshot from(MapDataPayload payload, int version) {
             if (payload == null || payload.chunks().isEmpty()) {
                 return new Snapshot(
@@ -109,6 +107,7 @@ public final class ClientMapData {
             int minZ = Integer.MAX_VALUE;
             int maxZ = Integer.MIN_VALUE;
 
+            //process the run-length encoded chunk data from the payload, unpacking it into individual chunks and storing them in a map, while also tracking the minimum and maximum chunk coordinates for later use
             for (MapDataPayload.MapChunkData run : payload.chunks()) {
                 ChunkPos start = ChunkPos.unpack(run.packedChunkPos());
                 for (int offset = 0; offset < run.runLength(); offset++) {
@@ -187,6 +186,7 @@ public final class ClientMapData {
         }
     }
 
+    //calculates the borders for each chunk based on nearby chunks
     private static Map<Long, Integer> precomputeBorders(
             Map<Long, MapDataPayload.MapChunkData> chunks,
             boolean compareSettlement
@@ -214,6 +214,7 @@ public final class ClientMapData {
         return result;
     }
 
+    //determines if nearby chunks are part of the same region
     private static boolean isDifferentRegion(
             Map<Long, MapDataPayload.MapChunkData> chunks,
             int x,
@@ -228,6 +229,7 @@ public final class ClientMapData {
         return compareSettlement && !Objects.equals(neighbor.settlementId(), current.settlementId());
     }
 
+    //load all states
     private static Map<UUID, MapDataPayload.StateSummary> indexStates(
             List<MapDataPayload.StateSummary> states
     ) {
@@ -238,6 +240,7 @@ public final class ClientMapData {
         return Collections.unmodifiableMap(indexed);
     }
 
+    //load all settlements
     private static Map<String, MapDataPayload.SettlementSummary> indexSettlements(
             List<MapDataPayload.SettlementSummary> settlements
     ) {
@@ -248,6 +251,7 @@ public final class ClientMapData {
         return Collections.unmodifiableMap(indexed);
     }
 
+    //builds the anchors for each province based on the chunks and settlements
     private static List<ProvinceAnchor> buildProvinceAnchors(
             Map<Long, MapDataPayload.MapChunkData> chunks,
             Map<String, MapDataPayload.SettlementSummary> settlements
@@ -264,6 +268,7 @@ public final class ClientMapData {
             }
         }
 
+        //uses hashing to group chunks by their settlement ID, accumulating the sum of their coordinates and garrison status for later use in calculating province anchors
         Map<String, Accumulator> groups = new HashMap<>();
         Set<Long> unorganizedChunks = new java.util.HashSet<>();
         for (MapDataPayload.MapChunkData chunk : chunks.values()) {
@@ -309,8 +314,7 @@ public final class ClientMapData {
                 garrisoned = settlement.garrisoned();
                 settlementMarker = true;
             } else {
-                // Commanderies and legacy provinces have no known capital marker, so their
-                // label falls back to the mathematical center of their visible claim.
+                //commanderies and legacy provinces have no known capital marker (by design), so their label falls back to the mathematical center of their visible claim.
                 anchorX = (double) group.sumX() / group.count() + 0.5;
                 anchorZ = (double) group.sumZ() / group.count() + 0.5;
                 displayName = abbreviatedId(settlementId);
@@ -333,6 +337,7 @@ public final class ClientMapData {
         return anchors;
     }
 
+    //handles unorganized chunks that aren't part of a settlement
     private static void addUnorganizedAnchors(
             Map<Long, MapDataPayload.MapChunkData> chunks,
             Set<Long> unvisited,
@@ -343,6 +348,7 @@ public final class ClientMapData {
             long seed = unvisited.iterator().next();
             unvisited.remove(seed);
 
+            //use BFS to find all connected and unorganized chunks
             java.util.ArrayDeque<Long> queue = new java.util.ArrayDeque<>();
             queue.add(seed);
             MapDataPayload.MapChunkData seedChunk = chunks.get(seed);
@@ -352,7 +358,7 @@ public final class ClientMapData {
             int count = 0;
             boolean garrisoned = false;
 
-            while (!queue.isEmpty()) {
+            while (!queue.isEmpty()) { //if statisfied, add to the province anchor list
                 long packed = queue.removeFirst();
                 MapDataPayload.MapChunkData current = chunks.get(packed);
                 if (current == null || !stateId.equals(current.ownerStateId())) {
@@ -386,6 +392,7 @@ public final class ClientMapData {
         }
     }
 
+    //handles adding neighboring unorganized chunks to the BFS queue for processing, ensuring that all connected unorganized chunks are grouped together
     private static void addUnorganizedNeighbor(
             int x,
             int z,

@@ -6,9 +6,7 @@ import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.resources.Identifier;
 
-/**
- * Client-to-server request for the player's currently visible empire map data.
- */
+//same map showing method, but this one only shows areas that the player has access to, and is sent from the client to the server to request map data
 public record RequestMapDataPayload() implements CustomPacketPayload {
     public static final Type<RequestMapDataPayload> TYPE = new Type<>(
             Identifier.fromNamespaceAndPath(MinecraftEmpires.MODID, "request_map_data")

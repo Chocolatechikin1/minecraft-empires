@@ -24,7 +24,7 @@ public class ClientMapHandler {
         context.enqueueWork(() -> {
             this.lastReceivedData = payload;
             
-            // Once we build the UI, we will tell it to refresh its graphics right here!
+            //ONCE UI IS BUILT, ADD IT HERE
         });
     }
 
