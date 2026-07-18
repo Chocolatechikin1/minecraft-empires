@@ -48,9 +48,9 @@ public class StateManager extends SavedData {
     // The master list of all active states on the server
     //private final Map<UUID, StateData> states = new HashMap<>();
 
-    // --- Core Management Methods ---
+    //Management methods
     
-    // --- State Methods ---
+    //all state methods
     public static StateManager get(ServerLevel level) {
         // This tells NeoForge: "Go to this world's storage. If minecraftempires_states.dat exists, load it. If not, create a new one."
         return level.getDataStorage().computeIfAbsent(TYPE);
@@ -65,8 +65,13 @@ public class StateManager extends SavedData {
     }
 
     public StateData getStateByPlayer(UUID playerUUID) {
+        /*UUID stateId = playerToStateMap.get(playerUUID);
+        return stateId != null ? activeStates.get(stateId) : null;*/
         UUID stateId = playerToStateMap.get(playerUUID);
-        return stateId != null ? activeStates.get(stateId) : null;
+        if (stateId != null) {
+            return activeStates.get(stateId);
+        }
+        return null;
     }
 
     public void createState(StateData state) {
@@ -94,19 +99,44 @@ public class StateManager extends SavedData {
         }
     }
 
-    // --- NEW: Sprint 2B Settlement Methods ---
+    public boolean disbandState(UUID stateId, ServerLevel level) {
+        StateData state = activeStates.remove(stateId);
+        if (state != null) {
+            playerToStateMap.remove(state.getLeaderId());
+            
+            // Unclaim all chunks owned by this state/leader
+            ClaimManager claimManager = ClaimManager.get(level);
+            claimManager.clearAllClaimsForState(state.getLeaderId());
+            
+            // TODO: Delete Settlements from activeSettlements if applicable
+            setDirty();
+            return true;
+        }
+        return false;
+    }
+
+    public boolean leaveState(UUID playerId) {
+        if (playerToStateMap.containsKey(playerId)) {
+            playerToStateMap.remove(playerId);
+            setDirty();
+            return true;
+        }
+        return false;
+    }
+
+    //all settlement methods
     
     public SettlementData getSettlement(UUID settlementId) {
         return activeSettlements.get(settlementId);
     }
 
-    public Collection<SettlementData> getAllSettlements() { // PHASE 3
+    public Collection<SettlementData> getAllSettlements() { 
         return java.util.Collections.unmodifiableCollection(activeSettlements.values());
     }
 
     public void registerSettlement(UUID settlementId, SettlementData data) {
         activeSettlements.put(settlementId, data);
-        this.setDirty(); // Tells Minecraft to save this new town to disk
+        this.setDirty(); //tells server to save this new town to disk
     }
 
     public void establishSettlementClaims(ServerLevel level, SettlementData settlement, UUID stateId) {
@@ -151,7 +181,7 @@ public class StateManager extends SavedData {
         MinecraftEmpires.LOGGER.info("Established 9 automatic chunk claims for settlement: {}", settlement.getSettlementName());
     }
 
-    // --- SavedData Saving & Loading ---
+    //saving and loading methods
    private CompoundTag toTag() {
         CompoundTag tag = new CompoundTag();
 
