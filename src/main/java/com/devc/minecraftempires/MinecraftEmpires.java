@@ -43,7 +43,6 @@ import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar; 
 //custom UI imports
 import com.devc.minecraftempires.network.packet.MapDataPayload; 
-import com.devc.minecraftempires.network.ClientMapHandler; 
 import com.devc.minecraftempires.network.ModNetworking; 
 
 // The value here should match an entry in the META-INF/neoforge.mods.toml file
