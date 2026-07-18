@@ -11,6 +11,7 @@ import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
 import net.minecraft.util.datafix.DataFixTypes;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -71,6 +72,14 @@ public class ClaimManager extends SavedData {
         return claims.containsKey(pos);
     }
 
+    public Map<ChunkPos, ChunkData> getClaimsView() { // PHASE 3
+        return Collections.unmodifiableMap(claims);
+    }
+
+    public Map<String, ChunkPos> getSettlementCentersView() { // PHASE 3
+        return Collections.unmodifiableMap(settlementCenters);
+    }
+
     //settlement management methods
     //calculates Euclidean distance between two chunks
     public double getChunkDistance(ChunkPos pos1, ChunkPos pos2) {
@@ -92,26 +101,50 @@ public class ClaimManager extends SavedData {
 
     //main border flipping logic: called when a hostile unit enters a chunk
     public boolean tryFlipBorder(ChunkPos targetPos, UUID attackerUUID, String attackerSettlementID) {
+        return tryFlipBorderInternal(null, targetPos, attackerUUID, attackerSettlementID);
+    }
+
+    /**
+     * Phase 3-aware overload. Future army movement code should use this version so successful
+     * hostile border crossings generate both chat warnings and map breach markers.
+     */
+    public boolean tryFlipBorder(
+            ServerLevel level,
+            ChunkPos targetPos,
+            UUID attackerUUID,
+            String attackerSettlementID
+    ) {
+        return tryFlipBorderInternal(level, targetPos, attackerUUID, attackerSettlementID);
+    }
+
+    private boolean tryFlipBorderInternal(
+            ServerLevel level,
+            ChunkPos targetPos,
+            UUID attackerUUID,
+            String attackerSettlementID
+    ) {
         ChunkData targetData = claims.get(targetPos);
+        UUID defenderStateId = targetData == null ? null : targetData.getOwnerUUID();
 
         //if land is unclaimed, take instantly
-        if(targetData == null) {
+        if (targetData == null) {
             setClaim(targetPos, attackerUUID, attackerSettlementID, false, 1);
             return true;
         }
 
         //if chunk is garrisoned, cannot flip passively
-        if(targetData.isGarrisoned()) {
+        if (targetData.isGarrisoned()) {
             return false; //triggers a siege or battle
         }
 
-        //defending settlement core locater
+        //defending settlement core locator
         String defenderSettlement = targetData.getSettlementID();
         ChunkPos defenderCore = settlementCenters.get(defenderSettlement);
 
         //if core missing, land is considered abandoned, attacker takes it
-        if(defenderCore == null) {
+        if (defenderCore == null) {
             setClaim(targetPos, attackerUUID, attackerSettlementID, false, 1);
+            notifyBreachIfNeeded(level, targetPos, defenderStateId, attackerUUID);
             return true;
         }
 
@@ -122,11 +155,23 @@ public class ClaimManager extends SavedData {
         if (distanceToCore > protectiveRadius) {
             // Attacker is outside the core protection. Flip the un-garrisoned land!
             setClaim(targetPos, attackerUUID, attackerSettlementID, false, 1);
+            notifyBreachIfNeeded(level, targetPos, defenderStateId, attackerUUID);
             return true;
         }
 
         // Attacker hit the protective radius. Passive flipping stops here.
         return false;
+    }
+
+    private static void notifyBreachIfNeeded(
+            ServerLevel level,
+            ChunkPos targetPos,
+            UUID defenderStateId,
+            UUID attackerStateId
+    ) {
+        if (level != null) {
+            BreachAlertService.recordBreach(level, targetPos, defenderStateId, attackerStateId);
+        }
     }
 
     //serialization

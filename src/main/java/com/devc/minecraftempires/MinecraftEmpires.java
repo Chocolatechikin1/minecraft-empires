@@ -45,6 +45,10 @@ import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 import com.devc.minecraftempires.network.packet.MapDataPayload; 
 import com.devc.minecraftempires.network.ClientMapHandler; 
 import com.devc.minecraftempires.client.ClientKeybinds;
+import com.devc.minecraftempires.network.ModNetworking; // PHASE 3
+import net.neoforged.neoforge.event.RegisterCommandsEvent;
+//custom block imports
+import com.devc.minecraftempires.blocks.CityAltarBlock;
 
 // The value here should match an entry in the META-INF/neoforge.mods.toml file
 @Mod(MinecraftEmpires.MODID)
@@ -93,6 +97,7 @@ public class MinecraftEmpires {
     public MinecraftEmpires(IEventBus modEventBus, ModContainer modContainer) {
         // Register the commonSetup method for modloading
         modEventBus.addListener(this::commonSetup);
+        modEventBus.addListener(ModNetworking::registerPayloads); // PHASE 3
 
         // Register the Deferred Register to the mod event bus so blocks get registered
         BLOCKS.register(modEventBus);
@@ -112,9 +117,6 @@ public class MinecraftEmpires {
 
         // Register our mod's ModConfigSpec so that FML can create and load the config file for us
         modContainer.registerConfig(ModConfig.Type.COMMON, Config.SPEC);
-
-        // Registers our custom keybinds to the client
-        modEventBus.addListener(ClientKeybinds::registerKeyBindings); 
     }
 
     private void commonSetup(FMLCommonSetupEvent event) {
@@ -150,16 +152,5 @@ public class MinecraftEmpires {
         StateCommand.register(event.getDispatcher());
         LOGGER.info("Registered Minecraft Empires commands!");
     }
-    //network payload registration
-    @SubscribeEvent
-    public void registerNetworking(final RegisterPayloadHandlersEvent event) { 
-        final PayloadRegistrar registrar = event.registrar("minecraftempires"); 
-        
-        // Registers our map data to be sent FROM the Server TO the Client 
-        registrar.playToClient( 
-            MapDataPayload.TYPE, 
-            MapDataPayload.STREAM_CODEC, 
-            ClientMapHandler.getInstance()::handleData 
-        ); 
-    } 
+    
 }

@@ -40,6 +40,8 @@ public class SettlementData {
     public BlockPos getCenterAltarPos() { return centerAltarPos; }
     
     public int getSettlementTier() { return settlementTier; }
+    public int getLocalPopulation() { return localPopulation; } // PHASE 3
+    public int getGarrisonCapacity() { return garrisonCapacity; } // PHASE 3
     public int getProtectiveRadius() { return protectiveRadius; }
     public int getLocalSiegeImmunityTicks() { return localSiegeImmunityTicks; }
     public void setLocalSiegeImmunityTicks(int ticks) { this.localSiegeImmunityTicks = ticks; }

@@ -100,6 +100,10 @@ public class StateManager extends SavedData {
         return activeSettlements.get(settlementId);
     }
 
+    public Collection<SettlementData> getAllSettlements() { // PHASE 3
+        return java.util.Collections.unmodifiableCollection(activeSettlements.values());
+    }
+
     public void registerSettlement(UUID settlementId, SettlementData data) {
         activeSettlements.put(settlementId, data);
         this.setDirty(); // Tells Minecraft to save this new town to disk
