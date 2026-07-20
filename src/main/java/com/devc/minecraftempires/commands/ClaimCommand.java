@@ -5,16 +5,20 @@ import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.context.CommandContext;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Holder;
 import net.minecraft.network.chat.Component;
+import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.biome.Biome;
 
 import com.devc.minecraftempires.state.StateData;  
 import com.devc.minecraftempires.state.StateManager;  
 import com.devc.minecraftempires.territory.SettlementData;  
 import com.devc.minecraftempires.territory.ChunkData;  
-import net.minecraft.core.BlockPos;  
 import java.util.UUID; 
 
 public class ClaimCommand {
@@ -106,6 +110,18 @@ public class ClaimCommand {
 
             //register claim with the nearest settlement's ID
             manager.setClaim(pos, stateId, nearestSettlement.getSettlementId().toString(), false, nearestSettlement.getSettlementTier());
+
+            //checks biome type in the settlement radius
+            BlockPos samplePos = new BlockPos(chunkCenterX, 64, chunkCenterZ);
+            Holder<Biome> biomeHolder = level.getBiome(samplePos);
+            java.util.Optional<ResourceKey<Biome>> biomeKeyOpt = biomeHolder.unwrapKey();
+            if (biomeKeyOpt.isPresent()) {
+                ResourceKey<Biome> biomeKey = biomeKeyOpt.get();
+                // .identifier() returns net.minecraft.resources.Identifier in NeoForge 26.x
+                // .getPath() strips the namespace: "minecraft:badlands" -> "badlands"
+                Identifier biomeId = biomeKey.identifier();
+                nearestSettlement.incrementBiomeTally(biomeId.getPath());
+            }
 
             //mark data as dirty
             stateManager.setDirty();
