@@ -1,10 +1,11 @@
 package com.devc.minecraftempires.state;
 
+import com.devc.minecraftempires.army.ArmyManager;
 import net.minecraft.server.level.ServerLevel;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 
-import com.devc.minecraftempires.territory.ClaimManager; 
+import com.devc.minecraftempires.territory.ClaimManager;
 
 public class EconomyTickHandler {
     private static final int TICKS_PER_DAY = 24000; //1 in game day
@@ -27,16 +28,17 @@ public class EconomyTickHandler {
     }
 
     private static void processDailyEconomics(ServerLevel level) {
-        StateManager manager = StateManager.get(level);
+        StateManager manager     = StateManager.get(level);
         ClaimManager claimManager = ClaimManager.get(level);
+        ArmyManager armyManager  = ArmyManager.get(level);
         
         for (StateData state : manager.getAllStates()) {
             
             //calculates tax revenue
             double taxRevenue = calculateTax(state);
-            //calculates maintenance costs
-            double maintenanceCost = calculateMaintenance(state, claimManager);
-            //applies extra to treasury
+            //calculates maintenance costs (now includes Legion upkeep)
+            double maintenanceCost = calculateMaintenance(state, claimManager, armyManager);
+            //applies net to treasury
             double netProfit = taxRevenue - maintenanceCost;
             
             if (netProfit > 0) {
@@ -50,8 +52,14 @@ public class EconomyTickHandler {
             state.tickSiegeImmunity();
         }
         
+        // Run daily garbage collection: disband Legions that have fallen below viability.
+        // This runs AFTER treasury deductions so a newly bankrupt state isn't immediately
+        // stripped of armies — that's a separate Phase 4 mechanic.
+        armyManager.runGarbageCollection();
+
         // IMPORTANT: Tell the server this data changed so it writes the new bank balances to disk!
         manager.setDirty();
+        armyManager.setDirty();
     }
 
     //all math formulas for economy are here, can be adjusted later for balance
@@ -65,15 +73,18 @@ public class EconomyTickHandler {
         return baseIncome + popIncome;
     }
 
-    private static double calculateMaintenance(StateData state, ClaimManager claimManager) {
+    private static double calculateMaintenance(StateData state, ClaimManager claimManager, ArmyManager armyManager) {
         //higher tiers cost more inherently to maintain
         double baseMaintenance = state.getCurrentTier().ordinal() * 75.0;
 
         //get land upkeep costs
         int ownedChunks = claimManager.getClaimCountForState(state.getStateId());
         double chunkCost = ownedChunks * 2.0; //2 emeralds per chunk per day
-        
-        // TODO (Phase 3): Add cost of active legions here later
-        return baseMaintenance + chunkCost;
+
+        //legion upkeep variables: 750 emeralds per active Legion per day (can be adjusted)
+        int legionCount = armyManager.getLegionCountForState(state.getStateId());
+        double legionCost = legionCount * 750.0;
+
+        return baseMaintenance + chunkCost + legionCost;
     }
 }
