@@ -12,6 +12,9 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.datafix.DataFixTypes;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
+import com.devc.minecraftempires.network.packet.DispatchArmyPayload; //new
+import net.neoforged.neoforge.network.handling.IPayloadContext; //new
+import net.minecraft.server.level.ServerPlayer; //new
 
 import java.util.*;
 
@@ -195,4 +198,26 @@ public class ArmyManager extends SavedData {
                 "[Minecraft Empires] Loaded {} Legion(s) from disk.", manager.activeLegions.size());
         return manager;
     }
+
+    //network handler
+    public static void handleDispatchArmy(final DispatchArmyPayload payload, final IPayloadContext context) { 
+        // context.enqueueWork() ensures this runs safely on the main server thread, preventing concurrent crashes
+        context.enqueueWork(() -> { 
+            if (context.player() instanceof ServerPlayer player) { 
+                
+                //fetch the legion OR cohort with its UUID
+                ArmyManager manager = ArmyManager.get(player.level());
+                Legion targetLegion = manager.getLegion(payload.armyId());
+                
+                //queue logic
+                if(targetLegion != null){
+                    if(!payload.isQueueing()){
+                        targetLegion.clearWaypoints();
+                    }
+                    targetLegion.addWaypoint(payload.targetPos());
+                }
+                
+            } 
+        }); 
+    } 
 }

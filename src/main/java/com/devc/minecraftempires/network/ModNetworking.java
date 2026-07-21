@@ -7,6 +7,8 @@ import net.neoforged.neoforge.network.PacketDistributor;
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
+import com.devc.minecraftempires.network.packet.DispatchArmyPayload; 
+import com.devc.minecraftempires.army.ArmyManager; 
 
 //registering and handling the custom packets for requesting and sending map data between the client and server
 public final class ModNetworking {
@@ -20,6 +22,11 @@ public final class ModNetworking {
                 ModNetworking::handleMapRequest
         );
         registrar.playToClient(MapDataPayload.TYPE, MapDataPayload.STREAM_CODEC);
+        registrar.playToServer(
+                DispatchArmyPayload.TYPE,
+                DispatchArmyPayload.STREAM_CODEC,
+                ArmyManager::handleDispatchArmy
+        );
     }
 
     private static void handleMapRequest(RequestMapDataPayload payload, IPayloadContext context) {
