@@ -1,8 +1,10 @@
 package com.devc.minecraftempires.army;
 
 import net.minecraft.nbt.CompoundTag;
-
 import java.util.UUID;
+import java.util.LinkedList;
+import java.util.Queue;
+import net.minecraft.core.BlockPos;
 
 //ai generated summary i like it so its staying
 /**
@@ -69,6 +71,9 @@ public class Cohort {
     //round robin index tracking: 0=endurance, 1=strength, 2=health, 3=speed, 4=morale
     private int statLevelIndex;
     private boolean isRouting;
+
+    //waypoint tracking
+    private final Queue<BlockPos> waypoints = new LinkedList<>();
 
     //constructors
     public Cohort(UUID cohortId, CohortType type, String biomeTag) {
@@ -225,4 +230,17 @@ public class Cohort {
         c.isRouting          = tag.getBoolean("IsRouting").orElse(false);
         return c;
     }
+
+    //rts Waypoint Logic
+    public Queue<BlockPos> getWaypoints() { 
+        return this.waypoints; 
+    } 
+
+    public void addWaypoint(BlockPos pos) { 
+        this.waypoints.offer(pos); 
+    } 
+
+    public void clearWaypoints() { 
+        this.waypoints.clear(); 
+    } 
 }

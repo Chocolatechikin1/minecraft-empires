@@ -8,6 +8,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
+import java.util.LinkedList;
+import java.util.Queue;
 
 //legion class
 public class Legion {
@@ -20,6 +22,9 @@ public class Legion {
 
     //variable to store the legion position
     private BlockPos storedPosition;
+
+    //waypoint tracking
+    private final Queue<BlockPos> waypoints = new LinkedList<>();
 
     private final List<Cohort> infantryCohorts;    // max MAX_INFANTRY_COHORTS
     private final List<Cohort> cavalrySquadrons;   // max MAX_CAVALRY_SQUADRONS
@@ -161,4 +166,17 @@ public class Legion {
             list.getCompound(i).ifPresent(ct -> target.add(Cohort.fromNBT(ct)));
         }
     }
+
+    //rts Waypoint Logic
+    public Queue<BlockPos> getWaypoints() { 
+        return this.waypoints; 
+    } 
+
+    public void addWaypoint(BlockPos pos) { 
+        this.waypoints.offer(pos); 
+    } 
+
+    public void clearWaypoints() { 
+        this.waypoints.clear(); 
+    } 
 }
