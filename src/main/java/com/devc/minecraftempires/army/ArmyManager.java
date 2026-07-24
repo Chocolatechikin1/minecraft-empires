@@ -199,25 +199,31 @@ public class ArmyManager extends SavedData {
         return manager;
     }
 
-    //network handler
-    public static void handleDispatchArmy(final DispatchArmyPayload payload, final IPayloadContext context) { 
-        // context.enqueueWork() ensures this runs safely on the main server thread, preventing concurrent crashes
-        context.enqueueWork(() -> { 
-            if (context.player() instanceof ServerPlayer player) { 
-                
-                //fetch the legion OR cohort with its UUID
+    //network handler — receives a DispatchArmyPayload from the client and updates the target legion's waypoint queue
+    public static void handleDispatchArmy(final DispatchArmyPayload payload, final IPayloadContext context) {
+        // enqueueWork() schedules the block to run on the main server thread, preventing concurrent data corruption
+        context.enqueueWork(() -> {
+            if (context.player() instanceof ServerPlayer player) {
+
+                //fetch the ArmyManager for this world, then look up the target Legion by UUID
                 ArmyManager manager = ArmyManager.get(player.level());
                 Legion targetLegion = manager.getLegion(payload.armyId());
-                
-                //queue logic
-                if(targetLegion != null){
-                    if(!payload.isQueueing()){
+
+                //waypoint queueing:
+                //If not queueing (plain right-click), clear existing waypoints first (overwrite mode)
+                //Then push the new target onto the FIFO queue
+                if (targetLegion != null) {
+                    if (!payload.isQueueing()) {
                         targetLegion.clearWaypoints();
                     }
                     targetLegion.addWaypoint(payload.targetPos());
+                    manager.setDirty(); // Persist the updated queue to disk
+                    MinecraftEmpires.LOGGER.info(
+                            "[Minecraft Empires] Legion {} dispatched to {} (queuing={})",
+                            payload.armyId(), payload.targetPos(), payload.isQueueing()
+                    );
                 }
-                
-            } 
-        }); 
-    } 
+            }
+        });
+    }
 }

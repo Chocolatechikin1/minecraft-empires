@@ -1,11 +1,16 @@
 package com.devc.minecraftempires.client.gui.widget;
 
+import com.devc.minecraftempires.client.map.ClientArmyData;
 import com.devc.minecraftempires.client.map.ClientMapData;
+import com.devc.minecraftempires.network.packet.ArmyMapPayload;
+import com.devc.minecraftempires.network.packet.DispatchArmyPayload;
 import com.devc.minecraftempires.network.packet.MapDataPayload;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
+import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.ChunkPos;
+import net.neoforged.neoforge.client.network.ClientPacketDistributor;
 
 import java.util.HashSet;
 import java.util.Set;
@@ -16,6 +21,9 @@ public final class InteractiveMapWidget {
     private static final double MIN_ZOOM = 3.0;
     private static final double MAX_ZOOM = 28.0;
     private static final double DEFAULT_ZOOM = 8.0;
+
+    //army icon size in pixels at 1:1 zoom, scales with zoom but is clamped so it's always legible
+    private static final int ARMY_ICON_BASE_PX = 10;
 
     private int x;
     private int y;
@@ -28,6 +36,9 @@ public final class InteractiveMapWidget {
     private boolean dragging;
     private long selectedChunk = Long.MIN_VALUE;
     private int loadedSnapshotVersion = -1;
+
+    //currently selected legion, no legion selected by default
+    private UUID selectedArmyId = null;
 
     public InteractiveMapWidget(int x, int y, int width, int height) {
         setBounds(x, y, width, height);
@@ -63,6 +74,9 @@ public final class InteractiveMapWidget {
             );
         }
 
+        //places cohort and army icons in front of the map
+        drawArmies(graphics, font, snapshot);
+
         graphics.disableScissor();
         graphics.fill(x, y, x + width, y + 1, 0xFF485563);
         graphics.fill(x, y + height - 1, x + width, y + height, 0xFF485563);
@@ -70,6 +84,67 @@ public final class InteractiveMapWidget {
         graphics.fill(x + width - 1, y, x + width, y + height, 0xFF485563);
 
         drawCoordinates(graphics, font, mouseX, mouseY);
+    }
+
+    //renders army icons on the map.
+    //each legion is drawn as a coloured square whose hue is derived from the owning state UUID, matching the territory color convention.  Your own legions are fully opaque; when enemy visibility is added in Sprint 6 those will appear at a reduced alpha.
+    //yellow border is drawn around whichever legion is currently selected.
+    // Placeholder design — replace with graphics.blit(...) once Figma PNGs are ready.
+    private void drawArmies(GuiGraphicsExtractor graphics, Font font, ClientMapData.Snapshot snapshot) {
+        ClientArmyData.Snapshot armies = ClientArmyData.get();
+        if (!armies.hasArmies()) {
+            return;
+        }
+
+        int iconSize = Math.max(6, Math.min(ARMY_ICON_BASE_PX, (int) zoom));
+
+        for (ArmyMapPayload.LegionSummary legion : armies.byId().values()) {
+            ChunkPos chunkPos = ChunkPos.unpack(legion.packedChunkPos());
+            int screenX = chunkToScreenX(chunkPos.x());
+            int screenY = chunkToScreenY(chunkPos.z());
+
+            //skip loading icons that are not currently visible on screen
+            if (!intersects(screenX, screenY, iconSize, iconSize)) {
+                continue;
+            }
+
+            boolean isViewerLegion = snapshot.viewerStateId() != null
+                    && legion.ownerStateId().equals(snapshot.viewerStateId());
+
+            //fill variable, set to be based on the owning state UUID and whether the legion belongs to the viewer's state
+            int fillColor = armyIconColor(legion.ownerStateId(), isViewerLegion);
+            graphics.fill(screenX, screenY, screenX + iconSize, screenY + iconSize, fillColor);
+
+            //dark crosshair center so icons read clearly over territory
+            int cx = screenX + iconSize / 2;
+            int cy = screenY + iconSize / 2;
+            if (iconSize >= 8) {
+                graphics.fill(cx - 1, screenY + 1, cx + 1, screenY + iconSize - 1, 0x88000000);
+                graphics.fill(screenX + 1, cy - 1, screenX + iconSize - 1, cy + 1, 0x88000000);
+            }
+
+            // Yellow selection glow — 2 px border just outside the icon
+            if (legion.legionId().equals(selectedArmyId)) {
+                drawMask(
+                        graphics,
+                        screenX - 2, screenY - 2,
+                        screenX + iconSize + 2, screenY + iconSize + 2,
+                        ClientMapData.BORDER_NORTH | ClientMapData.BORDER_EAST
+                                | ClientMapData.BORDER_SOUTH | ClientMapData.BORDER_WEST,
+                        0xFFFFE84A,
+                        2
+                );
+            }
+
+            //shows troop count label
+            if (zoom >= 12.0 && font != null) {
+                String label = "L";   // "L" = Legion placeholder; replace with troop count when synced
+                int labelX = screenX + iconSize + 2;
+                int labelY = screenY + (iconSize / 2) - 4;
+                graphics.fill(labelX - 1, labelY - 1, labelX + font.width(label) + 2, labelY + 10, 0xAA111820);
+                graphics.text(font, Component.literal(label), labelX, labelY, 0xFFFFFFFF);
+            }
+        }
     }
 
     //allows the map to be panned by dragging with the left mouse button, zoomed with the scroll wheel, and chunks to be selected or deselected with left and right clicks
@@ -225,7 +300,7 @@ public final class InteractiveMapWidget {
                 drawSettlementMarker(graphics, markerX, markerY, anchor.capital(), anchor.garrisoned());
             }
 
-            //only draw province markers when close enough 
+            //only draw province markers when close enough
             if (zoom < 5.5) {
                 continue;
             }
@@ -284,15 +359,30 @@ public final class InteractiveMapWidget {
         graphics.text(font, Component.literal(text), left, top, 0xFFD7DEE5);
     }
 
-    //allows the user to drag the map
+    //left click:  Select an army (priority) or a chunk.
+    //right click: If an army is selected, dispatch it to the clicked chunk.
+    //Shift + Right click queues an additional waypoint instead of overwriting.
+    //If no army is selected, deselects everything.
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
         if (!contains(mouseX, mouseY)) {
             return false;
         }
 
+        int chunkX = floorChunk(screenToChunkX(mouseX));
+        int chunkZ = floorChunk(screenToChunkZ(mouseY));
+
+        //left click logic
         if (button == 0) {
-            int chunkX = floorChunk(screenToChunkX(mouseX));
-            int chunkZ = floorChunk(screenToChunkZ(mouseY));
+            //priority 1: did the player click on an army icon?
+            UUID clickedLegionId = ClientArmyData.get().getLegionIdAtChunk(chunkX, chunkZ);
+            if (clickedLegionId != null) {
+                this.selectedArmyId = clickedLegionId;
+                this.selectedChunk = Long.MIN_VALUE;  // Clear chunk selection when an army is selected
+                dragging = true;
+                return true;
+            }
+
+            //priority 2: fallback: standard chunk selection
             if (ClientMapData.get().getChunk(chunkX, chunkZ) != null) {
                 selectedChunk = new ChunkPos(chunkX, chunkZ).pack();
             } else {
@@ -302,7 +392,22 @@ public final class InteractiveMapWidget {
             return true;
         }
 
+        //right click logic
         if (button == 1) {
+            if (this.selectedArmyId != null) {
+                // Shift held = queue waypoint; no Shift = clear queue and set new target
+                boolean isQueueing = net.minecraft.client.Minecraft.getInstance().options.keyShift.isDown();
+
+                // Target the block-centre of the clicked chunk at a safe surface height
+                BlockPos targetPos = new BlockPos(chunkX * 16 + 8, 100, chunkZ * 16 + 8);
+
+                ClientPacketDistributor.sendToServer(
+                        new DispatchArmyPayload(this.selectedArmyId, targetPos, isQueueing)
+                );
+                return true;
+            }
+
+            // No army selected — deselect chunk
             selectedChunk = Long.MIN_VALUE;
             return true;
         }
@@ -354,6 +459,7 @@ public final class InteractiveMapWidget {
         centerChunkZ = snapshot.centerChunkZ();
         zoom = calculateFitZoom(snapshot);
         selectedChunk = Long.MIN_VALUE;
+        selectedArmyId = null;
     }
 
     //gets the currently selected chunk, returning null if no chunk is selected
@@ -367,6 +473,11 @@ public final class InteractiveMapWidget {
     //gets the currently selected chunk position, returning null if no chunk is selected
     public ChunkPos getSelectedPosition() {
         return selectedChunk == Long.MIN_VALUE ? null : ChunkPos.unpack(selectedChunk);
+    }
+
+    //returns the UUID of the currently selected legion, or null if none is selected
+    public UUID getSelectedArmyId() {
+        return selectedArmyId;
     }
 
     //gets the currently selected chunk position, returning null if no chunk is selected
@@ -433,6 +544,18 @@ public final class InteractiveMapWidget {
         int green = 72 + Math.floorMod(hash >> 8, 112);
         int blue = 72 + Math.floorMod(hash >> 16, 112);
         int alpha = viewerState ? 0xB8 : 0x82;
+        return (alpha << 24) | (red << 16) | (green << 8) | blue;
+    }
+
+    // Army icon color — same hash-derived hue as the territory but pushed into a brighter range (140–254)
+    // so icons are visually distinct from the muted territory fill beneath them.
+    // Viewer's own legions are fully opaque; enemy legions use reduced alpha (added in Sprint 6).
+    private static int armyIconColor(UUID stateId, boolean isViewerLegion) {
+        int hash = stateId.hashCode();
+        int red   = 140 + Math.floorMod(hash,        114);
+        int green = 140 + Math.floorMod(hash >> 8,   114);
+        int blue  = 140 + Math.floorMod(hash >> 16,  114);
+        int alpha = isViewerLegion ? 0xFF : 0xCC;
         return (alpha << 24) | (red << 16) | (green << 8) | blue;
     }
 
