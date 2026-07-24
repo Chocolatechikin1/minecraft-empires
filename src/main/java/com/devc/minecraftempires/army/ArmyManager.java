@@ -12,6 +12,9 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.datafix.DataFixTypes;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
+import com.devc.minecraftempires.network.packet.DispatchArmyPayload; //new
+import net.neoforged.neoforge.network.handling.IPayloadContext; //new
+import net.minecraft.server.level.ServerPlayer; //new
 
 import java.util.*;
 
@@ -194,5 +197,33 @@ public class ArmyManager extends SavedData {
         MinecraftEmpires.LOGGER.info(
                 "[Minecraft Empires] Loaded {} Legion(s) from disk.", manager.activeLegions.size());
         return manager;
+    }
+
+    //network handler — receives a DispatchArmyPayload from the client and updates the target legion's waypoint queue
+    public static void handleDispatchArmy(final DispatchArmyPayload payload, final IPayloadContext context) {
+        // enqueueWork() schedules the block to run on the main server thread, preventing concurrent data corruption
+        context.enqueueWork(() -> {
+            if (context.player() instanceof ServerPlayer player) {
+
+                //fetch the ArmyManager for this world, then look up the target Legion by UUID
+                ArmyManager manager = ArmyManager.get(player.level());
+                Legion targetLegion = manager.getLegion(payload.armyId());
+
+                //waypoint queueing:
+                //If not queueing (plain right-click), clear existing waypoints first (overwrite mode)
+                //Then push the new target onto the FIFO queue
+                if (targetLegion != null) {
+                    if (!payload.isQueueing()) {
+                        targetLegion.clearWaypoints();
+                    }
+                    targetLegion.addWaypoint(payload.targetPos());
+                    manager.setDirty(); // Persist the updated queue to disk
+                    MinecraftEmpires.LOGGER.info(
+                            "[Minecraft Empires] Legion {} dispatched to {} (queuing={})",
+                            payload.armyId(), payload.targetPos(), payload.isQueueing()
+                    );
+                }
+            }
+        });
     }
 }

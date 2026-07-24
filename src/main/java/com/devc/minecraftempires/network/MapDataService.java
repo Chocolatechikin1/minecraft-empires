@@ -1,5 +1,8 @@
 package com.devc.minecraftempires.network;
 
+import com.devc.minecraftempires.army.ArmyManager;
+import com.devc.minecraftempires.army.Legion;
+import com.devc.minecraftempires.network.packet.ArmyMapPayload;
 import com.devc.minecraftempires.network.packet.MapDataPayload;
 import com.devc.minecraftempires.state.StateData;
 import com.devc.minecraftempires.state.StateManager;
@@ -361,4 +364,31 @@ public final class MapDataService {
             Set<Long> scoutedForeignChunks,
             Set<UUID> borderingStateIds
     ) {}
+
+    //builds an army map payload for a given player, which includes the positions of all legions owned by the player's state, and is used for displaying army icons on the map
+    // Phase 1 scope: only the viewer's own legions are included.
+    // Enemy visibility will be added in Sprint 6 alongside war-state logic.
+    public static ArmyMapPayload buildArmyPayload(ServerPlayer player) {
+        ServerLevel level = player.level();
+        StateManager stateManager = StateManager.get(level);
+        ArmyManager armyManager = ArmyManager.get(level);
+
+        StateData viewerState = stateManager.getStateByPlayer(player.getUUID());
+        if (viewerState == null) {
+            return ArmyMapPayload.empty();
+        }
+
+        List<ArmyMapPayload.LegionSummary> summaries = new ArrayList<>();
+        for (Legion legion : armyManager.getLegionsForState(viewerState.getStateId())) {
+            BlockPos pos = legion.getStoredPosition();
+            ChunkPos chunkPos = new ChunkPos(pos.getX() >> 4, pos.getZ() >> 4);
+            summaries.add(new ArmyMapPayload.LegionSummary(
+                    legion.getLegionId(),
+                    legion.getOwningStateId(),
+                    chunkPos.pack()
+            ));
+        }
+
+        return new ArmyMapPayload(summaries);
+    }
 }
