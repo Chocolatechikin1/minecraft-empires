@@ -42,9 +42,11 @@ import com.devc.minecraftempires.blocks.CityAltarBlock;
 //custom network imports
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent; 
 import net.neoforged.neoforge.network.registration.PayloadRegistrar; 
+import net.neoforged.neoforge.event.tick.ServerTickEvent;
 //custom UI imports
 import com.devc.minecraftempires.network.packet.MapDataPayload; 
 import com.devc.minecraftempires.network.ModNetworking; 
+import com.devc.minecraftempires.army.ArmyManager;
 
 // The value here should match an entry in the META-INF/neoforge.mods.toml file
 @Mod(MinecraftEmpires.MODID)
@@ -148,6 +150,16 @@ public class MinecraftEmpires {
         StateCommand.register(event.getDispatcher());
         ArmyCommand.register(event.getDispatcher());
         LOGGER.info("custom commands registered");
+    }
+    //army movement method
+    @SubscribeEvent
+    public void onServerTick(ServerTickEvent.Post event){
+        //calculate the movement every 5 ticks, maintaining performance
+        if(event.getServer().getTickCount() % 5 == 0){
+            event.getServer().getAllLevels().forEach(level -> {
+                ArmyManager.get(level).tickArmies();
+            });
+        }
     }
     
 }

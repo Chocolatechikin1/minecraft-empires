@@ -226,4 +226,42 @@ public class ArmyManager extends SavedData {
             }
         });
     }
+
+    //army mover - calculates the waypoints for an army to move to
+    public void tickArmies(){
+        boolean requiresSave = false;
+        for (Legion legion : activeLegions.values()) {
+            if(!legion.getWaypoints().isEmpty()){
+                BlockPos current = legion.getStoredPosition(); 
+                BlockPos target = legion.getWaypoints().peek();
+                
+                //calculate the waypoint distances using 2D vector math
+                double dx = target.getX() - current.getX();
+                double dz = target.getZ() - current.getZ();
+                double distance = Math.hypot(dx, dz);
+
+                //actual army speed (adjust here if you want to change how fast armies move)
+                double marchSpeed = 4.0; // blocks per tick
+
+                if(distance <= marchSpeed){
+                    //army is close enough to the target, snap to it and remove the waypoint
+                    legion.setStoredPosition(target);
+                    legion.getWaypoints().poll(); //pop the waypoint off the queue
+                }
+                else{
+                    //army still moving, "move" them to the target
+                    double ratio = marchSpeed / distance;
+                    int stepX = current.getX() + (int) Math.round(dx * ratio);
+                    int stepZ = current.getZ() + (int) Math.round(dz * ratio);
+                    legion.setStoredPosition(new BlockPos(stepX, current.getY(), stepZ));
+                }
+                //save position
+                requiresSave = true;
+            }
+        }
+        //save to disk 
+        if(requiresSave){
+            setDirty();
+        }
+    }
 }
