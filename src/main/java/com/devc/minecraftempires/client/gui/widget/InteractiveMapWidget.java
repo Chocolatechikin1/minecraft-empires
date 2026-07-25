@@ -88,9 +88,7 @@ public final class InteractiveMapWidget {
         drawCoordinates(graphics, font, mouseX, mouseY);
 
         //shows army info sidebar if an army is selected
-        if(this.selectedArmyId != null){
-            drawArmySidebar(graphics, font, mouseX, mouseY, snapshot);
-        }
+        // (Removed in favor of top bar in MapScreen)
     }
 
     //renders army icons on the map.
@@ -399,21 +397,7 @@ public final class InteractiveMapWidget {
             return false;
         }
 
-        //sidebar for army info
-        if(this.selectedArmyId != null && mouseX > x + width - 150) {
-            int buttonY = y + height - 40;
-            //check if DISBAND button is clicked
-            if(button == 0 && mouseY >= buttonY && mouseY <= buttonY + 20){
-                ClientPacketDistributor.sendToServer(
-                    new DisbandArmyPayload(this.selectedArmyId)
-                );
-                System.out.println("Disband clicked for " + this.selectedArmyId);
-                this.selectedArmyId = null;
-                return true;
-            }
-            return true;
-        }
-
+        // sidebar logic removed (moved to MapScreen)
         int chunkX = floorChunk(screenToChunkX(mouseX));
         int chunkZ = floorChunk(screenToChunkZ(mouseY));
 
@@ -428,7 +412,14 @@ public final class InteractiveMapWidget {
                 return true;
             }
 
-            //priority 2: fallback: standard chunk selection
+            //priority 2: if an army is currently selected, any left-click that doesn't hit another army clears the selection
+            if (this.selectedArmyId != null) {
+                this.selectedArmyId = null;
+                dragging = true;
+                return true;
+            }
+
+            //priority 3: fallback: standard chunk selection
             if (ClientMapData.get().getChunk(chunkX, chunkZ) != null) {
                 selectedChunk = new ChunkPos(chunkX, chunkZ).pack();
             } else {
@@ -524,6 +515,11 @@ public final class InteractiveMapWidget {
     //returns the UUID of the currently selected legion, or null if none is selected
     public UUID getSelectedArmyId() {
         return selectedArmyId;
+    }
+
+    //clears the currently selected legion
+    public void clearSelectedArmy() {
+        this.selectedArmyId = null;
     }
 
     //gets the currently selected chunk position, returning null if no chunk is selected
@@ -650,33 +646,4 @@ public final class InteractiveMapWidget {
         }
     }
 
-    //helper method to draw the army info sidebar
-    private void drawArmySidebar(GuiGraphicsExtractor graphics, Font font, int mouseX, int mouseY, ClientMapData.Snapshot snapshot){
-        int panelWidth = 150;
-        int panelX = x + width -panelWidth;
-
-        //draw panel background and border
-        graphics.fill(panelX, y, x + width, y + height, 0xF0182430);
-        graphics.fill(panelX, y, panelX + 2, y + height, 0xFF485563);
-
-        //text headers
-        graphics.text(font, Component.literal("Info"), panelX + 10, y + 15, 0xFFFFE84A); 
-        graphics.text(font, Component.literal("#: " + this.selectedArmyId.toString().substring(0, 8)), panelX + 10, y + 35, 0xFFAAB8C0); 
-        
-        //fetch army stats from the static ClientArmyData cache by UUID
-        ArmyMapPayload.LegionSummary activeData = ClientArmyData.get().byId().get(this.selectedArmyId);
-
-        //load selected army data
-        if (activeData != null) {
-            graphics.text(font, Component.literal("Troops: " + activeData.troops()), panelX + 10, y + 60, 0xFFFFFFFF);
-            graphics.text(font, Component.literal("Morale: " + activeData.morale()), panelX + 10, y + 75, 0xFFFFFFFF);
-            graphics.text(font, Component.literal("Cost: " + activeData.maintenance() + " / day"), panelX + 10, y + 90, 0xFFFFFFFF);
-        }
-
-        //disband button
-        int button = y + height -40;
-        boolean hover = mouseX >= panelX + 10 && mouseX <= panelX + panelWidth - 10 && mouseY >= button && mouseY <= button + 20;
-        graphics.fill(panelX + 10, button, panelX + panelWidth - 10, button + 20, hover ? 0xFFFF6666 : 0xFFCC0000); //highlight red on hover
-        graphics.centeredText(font, Component.literal("Disband Army"), panelX + panelWidth / 2, button + 6, 0xFFFFFFFF); //center text
-    }
 }

@@ -3,6 +3,9 @@ package com.devc.minecraftempires.client.gui.screen;
 import com.devc.minecraftempires.client.ClientNetworking;
 import com.devc.minecraftempires.client.gui.widget.InteractiveMapWidget;
 import com.devc.minecraftempires.client.map.ClientMapData;
+import com.devc.minecraftempires.client.map.ClientArmyData;
+import com.devc.minecraftempires.network.packet.ArmyMapPayload;
+import com.devc.minecraftempires.network.packet.DisbandArmyPayload;
 import com.devc.minecraftempires.network.packet.MapDataPayload;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
@@ -11,9 +14,11 @@ import net.minecraft.client.input.KeyEvent;
 import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.level.ChunkPos;
+import net.neoforged.neoforge.client.network.ClientPacketDistributor;
 import org.lwjgl.glfw.GLFW;
 
 import java.util.Locale;
+import java.util.UUID;
 
 //primary file to house the map screen, including the map widget and the details panel, which shows information about the selected chunk, settlement, and state
 public final class MapScreen extends Screen {
@@ -57,6 +62,8 @@ public final class MapScreen extends Screen {
         ClientNetworking.requestMapData();
     }
 
+
+
     //renders the map widget and the details panel, which shows information about the selected chunk, settlement, and state
     @Override
     public void extractRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {
@@ -66,10 +73,14 @@ public final class MapScreen extends Screen {
         }
 
         drawDetailsPanel(graphics);
+
+        if (this.mapWidget != null && this.mapWidget.getSelectedArmyId() != null) {
+            drawArmyTopBar(graphics, mouseX, mouseY);
+        }
+
         super.extractRenderState(graphics, mouseX, mouseY, partialTick);
     }
 
-    //draws the details panel, which shows information about the selected chunk, settlement, and state, or a legend if no chunk is selected
     private void drawDetailsPanel(GuiGraphicsExtractor graphics) {
         int panelX = this.width - PANEL_WIDTH;
         graphics.fill(panelX, 0, this.width, this.height, 0xEE0D1218);
@@ -199,6 +210,29 @@ public final class MapScreen extends Screen {
     //all mouse and keyboard input is passed to the map widget, which handles panning, zooming, and selecting chunks, settlements, and states
     @Override
     public boolean mouseClicked(MouseButtonEvent event, boolean doubleClick) {
+        if (this.mapWidget != null && this.mapWidget.getSelectedArmyId() != null) {
+            // Button coords must match those computed in drawArmyTopBar
+            int panelX = this.width - PANEL_WIDTH;
+            int overlayTop = 29;
+            // heading (14) + divider gap (6) + 4 stat rows (48) + gap (18) = top of button
+            int buttonY = overlayTop + 8 + 14 + 1 + 6 + (12 * 4) + 18;
+            int buttonWidth = PANEL_WIDTH - 28;
+            int buttonX = panelX + 14;
+            if (event.button() == 0) {
+                if (event.y() >= buttonY && event.y() <= buttonY + 20 && event.x() >= buttonX && event.x() <= buttonX + buttonWidth) {
+                    // Disband button clicked
+                    ClientPacketDistributor.sendToServer(new DisbandArmyPayload(this.mapWidget.getSelectedArmyId()));
+                    this.mapWidget.clearSelectedArmy();
+                    return true;
+                }
+                // Left-clicking anywhere in the panel clears the army selection
+                if (event.x() >= panelX) {
+                    this.mapWidget.clearSelectedArmy();
+                    return true;
+                }
+            }
+        }
+
         if (super.mouseClicked(event, doubleClick)) {
             return true;
         }
@@ -235,6 +269,11 @@ public final class MapScreen extends Screen {
             this.mapWidget.resetView();
             return true;
         }
+        // Escape clears army selection before closing the screen
+        if (event.key() == GLFW.GLFW_KEY_ESCAPE && this.mapWidget != null && this.mapWidget.getSelectedArmyId() != null) {
+            this.mapWidget.clearSelectedArmy();
+            return true;
+        }
         return super.keyPressed(event);
     }
 
@@ -261,5 +300,51 @@ public final class MapScreen extends Screen {
             return value;
         }
         return value.substring(0, maximumCharacters - 3) + "...";
+    }
+
+    private void drawArmyTopBar(GuiGraphicsExtractor graphics, int mouseX, int mouseY) {
+        UUID selectedArmyId = this.mapWidget.getSelectedArmyId();
+        if (selectedArmyId == null) return;
+        ArmyMapPayload.LegionSummary activeData = ClientArmyData.get().byId().get(selectedArmyId);
+        if (activeData == null) return;
+
+        // Overlay covers only the details panel content area (below the header + divider)
+        int panelX = this.width - PANEL_WIDTH;
+        int overlayTop = 29;  // just below the separator line drawn at y=27-28
+        int overlayBottom = this.height - 35; // leave room for the buttons at the bottom
+        int textX = panelX + 12;
+
+        // Dark overlay fills the panel content area
+        graphics.fill(panelX + 2, overlayTop, this.width, overlayBottom, 0xF0101820);
+        graphics.fill(panelX + 2, overlayBottom, this.width, overlayBottom + 1, 0xFF485563);
+
+        // Army heading
+        int y = overlayTop + 8;
+        graphics.text(this.font, Component.literal("Selected Army"), textX, y, 0xFFFFD45A);
+        y += 14;
+        graphics.fill(textX, y, this.width - 12, y + 1, 0xFF3E4A55);
+        y += 6;
+
+        // Stats
+        graphics.text(this.font, Component.literal("ID:"), textX, y, 0xFFAAB4BE);
+        graphics.text(this.font, Component.literal(selectedArmyId.toString().substring(0, 8)), textX + 78, y, 0xFFF3F5F7);
+        y += 12;
+        graphics.text(this.font, Component.literal("Troops:"), textX, y, 0xFFAAB4BE);
+        graphics.text(this.font, Component.literal(Integer.toString(activeData.troops())), textX + 78, y, 0xFFF3F5F7);
+        y += 12;
+        graphics.text(this.font, Component.literal("Morale:"), textX, y, 0xFFAAB4BE);
+        graphics.text(this.font, Component.literal(Integer.toString(activeData.morale())), textX + 78, y, 0xFFF3F5F7);
+        y += 12;
+        graphics.text(this.font, Component.literal("Cost/day:"), textX, y, 0xFFAAB4BE);
+        graphics.text(this.font, Component.literal(Integer.toString(activeData.maintenance())), textX + 78, y, 0xFFF3F5F7);
+        y += 18;
+
+        // Disband button — centered inside the panel
+        int buttonWidth = PANEL_WIDTH - 28;
+        int buttonX = panelX + 14;
+        int buttonY = y;
+        boolean hover = mouseX >= buttonX && mouseX <= buttonX + buttonWidth && mouseY >= buttonY && mouseY <= buttonY + 20;
+        graphics.fill(buttonX, buttonY, buttonX + buttonWidth, buttonY + 20, hover ? 0xFFFF6666 : 0xFFCC0000);
+        graphics.centeredText(this.font, Component.literal("Disband Army"), buttonX + buttonWidth / 2, buttonY + 6, 0xFFFFFFFF);
     }
 }
