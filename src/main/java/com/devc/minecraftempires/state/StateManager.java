@@ -11,11 +11,18 @@ import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
 import net.minecraft.util.datafix.DataFixTypes;
+import net.minecraft.tags.BiomeTags;
+import net.minecraft.core.Holder;
+import net.minecraft.world.level.biome.Biome;
 
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.Queue;
+import java.util.ArrayDeque;
+import java.util.HashSet;
+import java.util.Set;
 
 import com.devc.minecraftempires.MinecraftEmpires;
 import com.devc.minecraftempires.territory.ChunkData;
@@ -141,36 +148,64 @@ public class StateManager extends SavedData {
 
     public void establishSettlementClaims(ServerLevel level, SettlementData settlement, UUID stateId) {
         BlockPos altarPos = settlement.getCenterAltarPos(); 
-        
-        // Convert the altar's block coordinates to chunk coordinates
-        int centerChunkX = altarPos.getX() >> 4;
-        int centerChunkZ = altarPos.getZ() >> 4;
-        ChunkPos centerChunkPos = new ChunkPos(centerChunkX, centerChunkZ);
-        
-        // Fetch the ClaimManager for this world to handle the chunk map
+        ChunkPos centerChunkPos = ChunkPos.containing(altarPos); 
         ClaimManager claimManager = ClaimManager.get(level);
 
         //register the core chunk of the settlement in the ClaimManager
         claimManager.registerSettlementCenter(settlement.getSettlementId().toString(), centerChunkPos);
         
-        // Loop through a 3x3 chunk radius centered on the City Altar
-        for (int xOffset = -1; xOffset <= 1; xOffset++) {
-            for (int zOffset = -1; zOffset <= 1; zOffset++) {
-                int currentX = centerChunkX + xOffset;
-                int currentZ = centerChunkZ + zOffset;
-                
-                ChunkPos chunkPos = new ChunkPos(currentX, currentZ);
-                
-                //claim chunk, only if it is not already claimed 
-                if (!claimManager.isClaimed(chunkPos)) { 
-                    claimManager.setClaim(
-                        chunkPos, 
-                        stateId, 
-                        settlement.getSettlementId().toString(), 
-                        false, 
-                        1      
-                    );
-                } 
+        //BFS variables
+        int maxClaims = 9; // The maximum amount of chunks an initial outpost can claim
+        int claimedCount = 0;
+        int maxRadius = 2; //used to prevent flood fill algo from claiming chunks too far away
+        
+        Queue<ChunkPos> queue = new ArrayDeque<>(); //queue for BFS
+        Set<ChunkPos> visited = new HashSet<>(); //set to track visited chunks and prevent reprocessing
+        
+        queue.add(centerChunkPos); 
+        visited.add(centerChunkPos); 
+        
+        //use BFS to claim chunks around the altar, stopping at water biomes and respecting maxClaims
+        while (!queue.isEmpty() && claimedCount < maxClaims) {
+            ChunkPos currentChunk = queue.poll();
+            
+            //get altar biome
+            BlockPos checkPos = currentChunk.getMiddleBlockPosition(level.getSeaLevel());
+            Holder<Biome> biomeHolder = level.getBiome(checkPos);
+            
+            //if theres water around, stop claiming (though altar chunk is always claimed, MAY NEED BUG FIX)
+            if (!currentChunk.equals(centerChunkPos) && (biomeHolder.is(BiomeTags.IS_OCEAN) || biomeHolder.is(BiomeTags.IS_RIVER))) {
+                continue; 
+            }
+
+            //claim chunk, only if it is not already claimed 
+            if (!claimManager.isClaimed(currentChunk)) { 
+                claimManager.setClaim(
+                    currentChunk, 
+                    stateId, 
+                    settlement.getSettlementId().toString(), 
+                    false, 
+                    1      
+                );
+                claimedCount++; 
+            } 
+            
+            //queue nearby chunks for checking
+            ChunkPos[] neighbors = {
+                new ChunkPos(currentChunk.x(), currentChunk.z() - 1), 
+                new ChunkPos(currentChunk.x(), currentChunk.z() + 1), 
+                new ChunkPos(currentChunk.x() + 1, currentChunk.z()), 
+                new ChunkPos(currentChunk.x() - 1, currentChunk.z())  
+            };
+            
+            //new - Validate and add neighbors to the queue
+            for (ChunkPos neighbor : neighbors) {
+                if (visited.add(neighbor)) { // HashSet.add() returns true if it wasn't already in the set
+                    // Ensure we don't snake out too far from the center altar
+                    if (Math.abs(neighbor.x() - centerChunkPos.x()) <= maxRadius && Math.abs(neighbor.z() - centerChunkPos.z()) <= maxRadius) {
+                        queue.add(neighbor);
+                    }
+                }
             }
         }
         
@@ -178,7 +213,8 @@ public class StateManager extends SavedData {
         this.setDirty();
         claimManager.setDirty();
         
-        MinecraftEmpires.LOGGER.info("Established 9 automatic chunk claims for settlement: {}", settlement.getSettlementName());
+        //new - Updated log to show the dynamic count
+        MinecraftEmpires.LOGGER.info("Established {} natural chunk claims for settlement: {}", claimedCount, settlement.getSettlementName());
     }
 
     //saving and loading methods

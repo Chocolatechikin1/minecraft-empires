@@ -318,7 +318,7 @@ public final class MapScreen extends Screen {
         graphics.fill(panelX + 2, overlayTop, this.width, overlayBottom, 0xF0101820);
         graphics.fill(panelX + 2, overlayBottom, this.width, overlayBottom + 1, 0xFF485563);
 
-        // Army heading
+        // Army heading PUT ARMY NAME OR NUMBER HERE INSTEAD OF ID
         int y = overlayTop + 8;
         graphics.text(this.font, Component.literal("Selected Army"), textX, y, 0xFFFFD45A);
         y += 14;
@@ -326,9 +326,10 @@ public final class MapScreen extends Screen {
         y += 6;
 
         // Stats
-        graphics.text(this.font, Component.literal("ID:"), textX, y, 0xFFAAB4BE);
-        graphics.text(this.font, Component.literal(selectedArmyId.toString().substring(0, 8)), textX + 78, y, 0xFFF3F5F7);
-        y += 12;
+        //FUTURE: display army name or number, not the ID (PUT IT ABOVE AT "Selected Army" HEADING)
+        /*graphics.text(this.font, Component.literal("ID:"), textX, y, 0xFFAAB4BE);
+        graphics.text(this.font, Component.literal(selectedArmyId.toString().substring(0, 8)), textX + 78, y, 0xFFF3F5F7);*/
+        //y += 12;
         graphics.text(this.font, Component.literal("Troops:"), textX, y, 0xFFAAB4BE);
         graphics.text(this.font, Component.literal(Integer.toString(activeData.troops())), textX + 78, y, 0xFFF3F5F7);
         y += 12;
