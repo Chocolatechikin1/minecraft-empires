@@ -34,6 +34,7 @@ import net.neoforged.neoforge.registries.DeferredRegister;
 //custom command imports
 import com.devc.minecraftempires.commands.ClaimCommand;
 import com.devc.minecraftempires.commands.StateCommand;
+import com.devc.minecraftempires.commands.ArmyCommand;
 import com.devc.minecraftempires.state.EconomyTickHandler;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 //custom block imports
@@ -138,14 +139,15 @@ public class MinecraftEmpires {
     @SubscribeEvent
     public void onServerStarting(ServerStartingEvent event) {
         // Do something when the server starts
-        LOGGER.info("HELLO from server starting");
+        LOGGER.info("(rocky) server starting");
     }
-    //claim commands and state commands
+    //all custom commands
     @SubscribeEvent
     public void onRegisterCommands(RegisterCommandsEvent event) {
         ClaimCommand.register(event.getDispatcher());
         StateCommand.register(event.getDispatcher());
-        LOGGER.info("Registered Minecraft Empires commands!");
+        ArmyCommand.register(event.getDispatcher());
+        LOGGER.info("custom commands registered");
     }
     
 }

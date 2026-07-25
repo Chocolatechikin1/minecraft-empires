@@ -1,6 +1,8 @@
 package com.devc.minecraftempires.network.packet;
 
 import com.devc.minecraftempires.MinecraftEmpires;
+
+import net.minecraft.core.BlockPos;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
@@ -23,7 +25,7 @@ public record ArmyMapPayload(List<LegionSummary> legions) implements CustomPacke
     );
 
     //show only what the map record needs to draw the legions
-    public record LegionSummary(UUID legionId, UUID ownerStateId, long packedChunkPos) {
+    /*public record LegionSummary(UUID legionId, UUID ownerStateId, long packedChunkPos) {
         public LegionSummary(RegistryFriendlyByteBuf buffer) {
             this(buffer.readUUID(), buffer.readUUID(), buffer.readLong());
         }
@@ -32,6 +34,39 @@ public record ArmyMapPayload(List<LegionSummary> legions) implements CustomPacke
             buffer.writeUUID(legionId);
             buffer.writeUUID(ownerStateId);
             buffer.writeLong(packedChunkPos);
+        }
+    }*/
+   public record LegionSummary(UUID legionId, UUID ownerStateId, long packedChunkPos, List<BlockPos> waypoints) {
+        
+        //read and write twice to the buffer, once for the legion summary and once for the waypoints
+        public LegionSummary(RegistryFriendlyByteBuf buffer) {
+            this(
+                buffer.readUUID(), 
+                buffer.readUUID(), 
+                buffer.readLong(),
+                readWaypoints(buffer)
+            );
+        }
+
+        void write(RegistryFriendlyByteBuf buffer) {
+            buffer.writeUUID(legionId);
+            buffer.writeUUID(ownerStateId);
+            buffer.writeLong(packedChunkPos);
+            
+            // Serialize the waypoint queue
+            buffer.writeVarInt(waypoints.size());
+            for (BlockPos pos : waypoints) {
+                buffer.writeBlockPos(pos);
+            }
+        }
+
+        private static List<BlockPos> readWaypoints(RegistryFriendlyByteBuf buffer) {
+            int size = buffer.readVarInt();
+            List<BlockPos> list = new ArrayList<>(size);
+            for (int i = 0; i < size; i++) {
+                list.add(buffer.readBlockPos());
+            }
+            return list;
         }
     }
 

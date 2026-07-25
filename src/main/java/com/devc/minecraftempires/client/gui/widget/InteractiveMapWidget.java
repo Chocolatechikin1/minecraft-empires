@@ -134,6 +134,30 @@ public final class InteractiveMapWidget {
                         0xFFFFE84A,
                         2
                 );
+
+                //dotted line drawing block
+                if (!legion.waypoints().isEmpty()) {
+                    int lastX = cx; // Start from the center of the army icon
+                    int lastY = cy;
+
+                    for (BlockPos wp : legion.waypoints()) {
+                        int wpChunkX = wp.getX() >> 4;
+                        int wpChunkZ = wp.getZ() >> 4;
+                        // Calculate screen center of the target chunk
+                        int targetX = chunkToScreenX(wpChunkX) + (int)(zoom / 2.0); 
+                        int targetY = chunkToScreenY(wpChunkZ) + (int)(zoom / 2.0);
+
+                        // Draw dotted line using linear interpolation
+                        drawDottedLine(graphics, lastX, lastY, targetX, targetY, 0xAAFFE84A);
+
+                        // Draw a small target box at the waypoint destination
+                        graphics.fill(targetX - 2, targetY - 2, targetX + 2, targetY + 2, 0xFFFFE84A);
+
+                        // Update start position for the next waypoint in the queue
+                        lastX = targetX;
+                        lastY = targetY;
+                    }
+                }
             }
 
             //shows troop count label
@@ -485,8 +509,12 @@ public final class InteractiveMapWidget {
         if (snapshot.version() == loadedSnapshotVersion) {
             return;
         }
+        //check if this is teh intial load of the map
+        boolean isFirstLoad = (loadedSnapshotVersion == -1);
         loadedSnapshotVersion = snapshot.version();
-        resetView();
+        if(isFirstLoad) {
+            resetView();
+        }
     }
 
     //calculates the zoom level
@@ -571,5 +599,32 @@ public final class InteractiveMapWidget {
             current = current.substring(0, current.length() - 1);
         }
         return current + suffix;
+    }
+
+    //helper method to draw a dotted line between two points, using linear interpolation to calculate the positions of the dots
+    /*private static void drawDottedLine(GuiGraphicsExtractor graphics, int x1, int y1, int x2, int y2, int color) {
+        double distance = Math.hypot(x2 - x1, y2 - y1);
+        double step = 4.0; // Distance between dots
+        double dx = (x2 - x1) / distance * step;
+        double dy = (y2 - y1) / distance * step;
+
+        for (double d = 0; d < distance; d += step) {
+            int dotX = (int) Math.round(x1 + dx * (d / step));
+            int dotY = (int) Math.round(y1 + dy * (d / step));
+            graphics.fill(dotX - 1, dotY - 1, dotX + 2, dotY + 2, color);
+        }
+    }*/
+    private void drawDottedLine(GuiGraphicsExtractor graphics, int x1, int y1, int x2, int y2, int color) {
+        double distance = Math.hypot(x2 - x1, y2 - y1);
+        int dotSpacing = 8; //number of pixels between dots
+        int dots = (int) (distance / dotSpacing); //number of dots to draw
+
+        //draw each dot along the line using linear interpolation
+        for (int i = 1; i <= dots; i++) {
+            double t = (double) i / dots;
+            int dotX = (int) (x1 + t * (x2 - x1));
+            int dotY = (int) (y1 + t * (y2 - y1));
+            graphics.fill(dotX, dotY, dotX + 2, dotY + 2, color);
+        }
     }
 }

@@ -385,7 +385,8 @@ public final class MapDataService {
             summaries.add(new ArmyMapPayload.LegionSummary(
                     legion.getLegionId(),
                     legion.getOwningStateId(),
-                    chunkPos.pack()
+                    chunkPos.pack(),
+                    new ArrayList<>(legion.getWaypoints())
             ));
         }
 
