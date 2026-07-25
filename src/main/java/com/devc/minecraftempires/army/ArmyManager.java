@@ -12,9 +12,10 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.datafix.DataFixTypes;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
-import com.devc.minecraftempires.network.packet.DispatchArmyPayload; //new
-import net.neoforged.neoforge.network.handling.IPayloadContext; //new
-import net.minecraft.server.level.ServerPlayer; //new
+import com.devc.minecraftempires.network.packet.DispatchArmyPayload; 
+import net.neoforged.neoforge.network.handling.IPayloadContext; 
+import net.minecraft.server.level.ServerPlayer; 
+import com.devc.minecraftempires.network.packet.DisbandArmyPayload;
 
 import java.util.*;
 
@@ -291,4 +292,19 @@ public class ArmyManager extends SavedData {
         }
         return false;
     }
+
+    //method for army disbanding
+    public static void handleDisbandArmy(final DisbandArmyPayload payload, final IPayloadContext context) { 
+        context.enqueueWork(() -> { 
+            if (context.player() instanceof ServerPlayer player) { 
+                ArmyManager manager = ArmyManager.get(player.level()); 
+                
+                // Remove the legion from the active map and trigger a save
+                if (manager.activeLegions.containsKey(payload.armyId())) { 
+                    manager.activeLegions.remove(payload.armyId()); 
+                    manager.setDirty(); 
+                } 
+            } 
+        }); 
+    } 
 }

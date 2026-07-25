@@ -5,6 +5,8 @@ import com.devc.minecraftempires.client.map.ClientMapData;
 import com.devc.minecraftempires.network.packet.ArmyMapPayload;
 import com.devc.minecraftempires.network.packet.DispatchArmyPayload;
 import com.devc.minecraftempires.network.packet.MapDataPayload;
+import com.devc.minecraftempires.network.packet.DisbandArmyPayload; 
+import net.neoforged.neoforge.network.PacketDistributor; 
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.core.BlockPos;
@@ -400,10 +402,10 @@ public final class InteractiveMapWidget {
         //sidebar for army info
         if(this.selectedArmyId != null && mouseX > x + width - 150) {
             int buttonY = y + height - 40;
-            //check if disband button is clicked
+            //check if DISBAND button is clicked
             if(button == 0 && mouseY >= buttonY && mouseY <= buttonY + 20){
                 ClientPacketDistributor.sendToServer(
-                        new DispatchArmyPayload(this.selectedArmyId, null, false)
+                    new DisbandArmyPayload(this.selectedArmyId)
                 );
                 System.out.println("Disband clicked for " + this.selectedArmyId);
                 this.selectedArmyId = null;
