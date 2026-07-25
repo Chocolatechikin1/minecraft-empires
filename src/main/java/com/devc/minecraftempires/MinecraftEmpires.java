@@ -34,6 +34,7 @@ import net.neoforged.neoforge.registries.DeferredRegister;
 //custom command imports
 import com.devc.minecraftempires.commands.ClaimCommand;
 import com.devc.minecraftempires.commands.StateCommand;
+import com.devc.minecraftempires.commands.ArmyCommand;
 import com.devc.minecraftempires.state.EconomyTickHandler;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 //custom block imports
@@ -41,9 +42,11 @@ import com.devc.minecraftempires.blocks.CityAltarBlock;
 //custom network imports
 import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent; 
 import net.neoforged.neoforge.network.registration.PayloadRegistrar; 
+import net.neoforged.neoforge.event.tick.ServerTickEvent;
 //custom UI imports
 import com.devc.minecraftempires.network.packet.MapDataPayload; 
 import com.devc.minecraftempires.network.ModNetworking; 
+import com.devc.minecraftempires.army.ArmyManager;
 
 // The value here should match an entry in the META-INF/neoforge.mods.toml file
 @Mod(MinecraftEmpires.MODID)
@@ -138,14 +141,25 @@ public class MinecraftEmpires {
     @SubscribeEvent
     public void onServerStarting(ServerStartingEvent event) {
         // Do something when the server starts
-        LOGGER.info("HELLO from server starting");
+        LOGGER.info("(rocky) server starting");
     }
-    //claim commands and state commands
+    //all custom commands
     @SubscribeEvent
     public void onRegisterCommands(RegisterCommandsEvent event) {
         ClaimCommand.register(event.getDispatcher());
         StateCommand.register(event.getDispatcher());
-        LOGGER.info("Registered Minecraft Empires commands!");
+        ArmyCommand.register(event.getDispatcher());
+        LOGGER.info("custom commands registered");
+    }
+    //army movement method
+    @SubscribeEvent
+    public void onServerTick(ServerTickEvent.Post event){
+        //calculate the movement every 5 ticks, maintaining performance
+        if(event.getServer().getTickCount() % 5 == 0){
+            event.getServer().getAllLevels().forEach(level -> {
+                ArmyManager.get(level).tickArmies();
+            });
+        }
     }
     
 }

@@ -12,9 +12,10 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.util.datafix.DataFixTypes;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
-import com.devc.minecraftempires.network.packet.DispatchArmyPayload; //new
-import net.neoforged.neoforge.network.handling.IPayloadContext; //new
-import net.minecraft.server.level.ServerPlayer; //new
+import com.devc.minecraftempires.network.packet.DispatchArmyPayload; 
+import net.neoforged.neoforge.network.handling.IPayloadContext; 
+import net.minecraft.server.level.ServerPlayer; 
+import com.devc.minecraftempires.network.packet.DisbandArmyPayload;
 
 import java.util.*;
 
@@ -226,4 +227,84 @@ public class ArmyManager extends SavedData {
             }
         });
     }
+
+    //army mover - calculates the waypoints for an army to move to
+    public void tickArmies(){
+        boolean requiresSave = false;
+        for (Legion legion : activeLegions.values()) {
+            if(!legion.getWaypoints().isEmpty()){
+                BlockPos current = legion.getStoredPosition(); 
+                BlockPos target = legion.getWaypoints().peek();
+                
+                //calculate the waypoint distances using 2D vector math
+                double dx = target.getX() - current.getX();
+                double dz = target.getZ() - current.getZ();
+                double distance = Math.hypot(dx, dz);
+
+                //actual army speed (adjust here if you want to change how fast armies move)
+                double marchSpeed = 4.0; // blocks per tick
+
+                if(distance <= marchSpeed){
+                    //army is close enough to the target, snap to it and remove the waypoint
+                    legion.setStoredPosition(target);
+                    legion.getWaypoints().poll(); //pop the waypoint off the queue
+                }
+                else{
+                    //army still moving, "move" them to the target
+                    double ratio = marchSpeed / distance;
+                    int stepX = current.getX() + (int) Math.round(dx * ratio);
+                    int stepZ = current.getZ() + (int) Math.round(dz * ratio);
+                    legion.setStoredPosition(new BlockPos(stepX, current.getY(), stepZ));
+                }
+                //collision check, force save if true
+                if(checkCollisionAndEngage(legion)){
+                    requiresSave = true;
+                }
+                //save position
+                requiresSave = true;
+            }
+        }
+        //save to disk 
+        if(requiresSave){
+            setDirty();
+        }
+    }
+
+    private boolean checkCollisionAndEngage(Legion movingLegion){
+        BlockPos position = movingLegion.getStoredPosition();
+        for(Legion other : this.activeLegions.values()){
+            //if same army, skip
+            if(other.getLegionId().equals(movingLegion.getLegionId())){
+                continue;
+            }
+            //if legions are friendly, ignore
+            if(other.getOwningStateId().equals(movingLegion.getOwningStateId())){
+                continue;
+            }
+            //if legions are in engagement range (16 blocks) engage
+            if(position.distSqr(other.getStoredPosition()) < 256){
+                movingLegion.clearWaypoints();
+                other.clearWaypoints();
+                //TODO Sprint 6: initialize battle sequence and send player to battle screen, send combat alert
+
+                return true;
+            }
+        }
+        return false;
+    }
+
+    //method for army disbanding
+    public static void handleDisbandArmy(final DisbandArmyPayload payload, final IPayloadContext context) { 
+        context.enqueueWork(() -> { 
+            if (context.player() instanceof ServerPlayer player) { 
+                ArmyManager manager = ArmyManager.get(player.level()); 
+                
+                // Remove the legion from the active map and trigger a save
+                if (manager.activeLegions.containsKey(payload.armyId())) { 
+                    manager.activeLegions.remove(payload.armyId()); 
+                    manager.setDirty(); 
+                } 
+            } 
+        }); 
+    } 
 }

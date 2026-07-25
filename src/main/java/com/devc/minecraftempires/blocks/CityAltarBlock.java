@@ -40,7 +40,7 @@ public class CityAltarBlock extends Block {
             
             // Guard Clause: Check if the player is a nomadic citizen without an established country
             if (playerState == null) {
-                player.sendSystemMessage(Component.literal("§c[Empires] You must declare or join a State via commands before placing a City Altar!"));
+                player.sendSystemMessage(Component.literal("§c[Minecraft Empires] Create or join a state to place an altar."));
                 
                 // Refund the block to the player and safely break it to prevent free claims
                 level.destroyBlock(pos, true, player);
@@ -54,7 +54,7 @@ public class CityAltarBlock extends Block {
                 ChunkData chunkData = claimManager.getClaim(altarChunkPos); 
                 // If it's claimed, and the owner is NOT this player's state, block it. 
                 if (!chunkData.getOwnerUUID().equals(playerState.getStateId())) { 
-                    player.sendSystemMessage(Component.literal("§c[Empires] You cannot establish a City Altar inside another state's territory!")); 
+                    player.sendSystemMessage(Component.literal("§c[Minecraft Empires] You cannot establish a City Altar inside another state's territory!")); 
                     level.destroyBlock(pos, true, player); 
                     return; 
                 } 
@@ -62,7 +62,7 @@ public class CityAltarBlock extends Block {
 
             // 3. Initialize the unique local data model parameters
             UUID settlementId = UUID.randomUUID();
-            String settlementName = player.getName().getString() + "'s Holding";
+            String settlementName = player.getName().getString() + "'s Outpost";
             
             SettlementData freshSettlement = new SettlementData(
                 settlementId, 
@@ -79,7 +79,7 @@ public class CityAltarBlock extends Block {
             manager.establishSettlementClaims(serverLevel, freshSettlement, playerState.getStateId());
             
             // 6. Provide clear visual confirmation feedback to the player
-            player.sendSystemMessage(Component.literal("§6§l[Empires] §aCity Altar Ignited! Established §e" + settlementName + "§a linked to the realm of §b" + playerState.getStateName() + "§a."));
+            player.sendSystemMessage(Component.literal("§6§l[Minecraft Empires] §aEstablished §e" + settlementName + "§a linked to the realm of §b" + playerState.getStateName() + "§a."));
         }
     }
 }

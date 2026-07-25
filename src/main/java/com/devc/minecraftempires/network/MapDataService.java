@@ -385,7 +385,11 @@ public final class MapDataService {
             summaries.add(new ArmyMapPayload.LegionSummary(
                     legion.getLegionId(),
                     legion.getOwningStateId(),
-                    chunkPos.pack()
+                    chunkPos.pack(),
+                    new ArrayList<>(legion.getWaypoints()),
+                    legion.getTotalStrength(),       // total soldiers across all cohorts
+                    0,                              // morale: stub until per-cohort average is added
+                    Legion.DAILY_UPKEEP_EMERALDS    // maintenance cost per day
             ));
         }
 
