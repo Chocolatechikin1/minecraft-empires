@@ -7,6 +7,8 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.List;
+import net.minecraft.core.BlockPos;
 
 //CLIENT-FACING cache for army positions
 //class called with ClientArmyData.get() to retrieve the current snapshot of army positions for rendering on the map

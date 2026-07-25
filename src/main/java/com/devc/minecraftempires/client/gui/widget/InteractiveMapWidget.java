@@ -84,6 +84,11 @@ public final class InteractiveMapWidget {
         graphics.fill(x + width - 1, y, x + width, y + height, 0xFF485563);
 
         drawCoordinates(graphics, font, mouseX, mouseY);
+
+        //shows army info sidebar if an army is selected
+        if(this.selectedArmyId != null){
+            drawArmySidebar(graphics, font, mouseX, mouseY, snapshot);
+        }
     }
 
     //renders army icons on the map.
@@ -392,6 +397,21 @@ public final class InteractiveMapWidget {
             return false;
         }
 
+        //sidebar for army info
+        if(this.selectedArmyId != null && mouseX > x + width - 150) {
+            int buttonY = y + height - 40;
+            //check if disband button is clicked
+            if(button == 0 && mouseY >= buttonY && mouseY <= buttonY + 20){
+                ClientPacketDistributor.sendToServer(
+                        new DispatchArmyPayload(this.selectedArmyId, null, false)
+                );
+                System.out.println("Disband clicked for " + this.selectedArmyId);
+                this.selectedArmyId = null;
+                return true;
+            }
+            return true;
+        }
+
         int chunkX = floorChunk(screenToChunkX(mouseX));
         int chunkZ = floorChunk(screenToChunkZ(mouseY));
 
@@ -626,5 +646,35 @@ public final class InteractiveMapWidget {
             int dotY = (int) (y1 + t * (y2 - y1));
             graphics.fill(dotX, dotY, dotX + 2, dotY + 2, color);
         }
+    }
+
+    //helper method to draw the army info sidebar
+    private void drawArmySidebar(GuiGraphicsExtractor graphics, Font font, int mouseX, int mouseY, ClientMapData.Snapshot snapshot){
+        int panelWidth = 150;
+        int panelX = x + width -panelWidth;
+
+        //draw panel background and border
+        graphics.fill(panelX, y, x + width, y + height, 0xF0182430);
+        graphics.fill(panelX, y, panelX + 2, y + height, 0xFF485563);
+
+        //text headers
+        graphics.text(font, Component.literal("Info"), panelX + 10, y + 15, 0xFFFFE84A); 
+        graphics.text(font, Component.literal("#: " + this.selectedArmyId.toString().substring(0, 8)), panelX + 10, y + 35, 0xFFAAB8C0); 
+        
+        //fetch army stats from the static ClientArmyData cache by UUID
+        ArmyMapPayload.LegionSummary activeData = ClientArmyData.get().byId().get(this.selectedArmyId);
+
+        //load selected army data
+        if (activeData != null) {
+            graphics.text(font, Component.literal("Troops: " + activeData.troops()), panelX + 10, y + 60, 0xFFFFFFFF);
+            graphics.text(font, Component.literal("Morale: " + activeData.morale()), panelX + 10, y + 75, 0xFFFFFFFF);
+            graphics.text(font, Component.literal("Cost: " + activeData.maintenance() + " / day"), panelX + 10, y + 90, 0xFFFFFFFF);
+        }
+
+        //disband button
+        int button = y + height -40;
+        boolean hover = mouseX >= panelX + 10 && mouseX <= panelX + panelWidth - 10 && mouseY >= button && mouseY <= button + 20;
+        graphics.fill(panelX + 10, button, panelX + panelWidth - 10, button + 20, hover ? 0xFFFF6666 : 0xFFCC0000); //highlight red on hover
+        graphics.centeredText(font, Component.literal("Disband Army"), panelX + panelWidth / 2, button + 6, 0xFFFFFFFF); //center text
     }
 }

@@ -36,15 +36,18 @@ public record ArmyMapPayload(List<LegionSummary> legions) implements CustomPacke
             buffer.writeLong(packedChunkPos);
         }
     }*/
-   public record LegionSummary(UUID legionId, UUID ownerStateId, long packedChunkPos, List<BlockPos> waypoints) {
+   public record LegionSummary(UUID legionId, UUID ownerStateId, long packedChunkPos, List<BlockPos> waypoints, int troops, int morale, int maintenance) {
         
-        //read and write twice to the buffer, once for the legion summary and once for the waypoints
+        //read and write for however many parameters to the buffer, once for the legion summary and once for the waypoints
         public LegionSummary(RegistryFriendlyByteBuf buffer) {
             this(
                 buffer.readUUID(), 
                 buffer.readUUID(), 
                 buffer.readLong(),
-                readWaypoints(buffer)
+                readWaypoints(buffer),
+                buffer.readVarInt(), 
+                buffer.readVarInt(), 
+                buffer.readVarInt()  
             );
         }
 
@@ -58,6 +61,9 @@ public record ArmyMapPayload(List<LegionSummary> legions) implements CustomPacke
             for (BlockPos pos : waypoints) {
                 buffer.writeBlockPos(pos);
             }
+            buffer.writeVarInt(troops); 
+            buffer.writeVarInt(morale); 
+            buffer.writeVarInt(maintenance); 
         }
 
         private static List<BlockPos> readWaypoints(RegistryFriendlyByteBuf buffer) {

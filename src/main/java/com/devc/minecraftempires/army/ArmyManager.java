@@ -255,6 +255,10 @@ public class ArmyManager extends SavedData {
                     int stepZ = current.getZ() + (int) Math.round(dz * ratio);
                     legion.setStoredPosition(new BlockPos(stepX, current.getY(), stepZ));
                 }
+                //collision check, force save if true
+                if(checkCollisionAndEngage(legion)){
+                    requiresSave = true;
+                }
                 //save position
                 requiresSave = true;
             }
@@ -263,5 +267,28 @@ public class ArmyManager extends SavedData {
         if(requiresSave){
             setDirty();
         }
+    }
+
+    private boolean checkCollisionAndEngage(Legion movingLegion){
+        BlockPos position = movingLegion.getStoredPosition();
+        for(Legion other : this.activeLegions.values()){
+            //if same army, skip
+            if(other.getLegionId().equals(movingLegion.getLegionId())){
+                continue;
+            }
+            //if legions are friendly, ignore
+            if(other.getOwningStateId().equals(movingLegion.getOwningStateId())){
+                continue;
+            }
+            //if legions are in engagement range (16 blocks) engage
+            if(position.distSqr(other.getStoredPosition()) < 256){
+                movingLegion.clearWaypoints();
+                other.clearWaypoints();
+                //TODO Sprint 6: initialize battle sequence and send player to battle screen, send combat alert
+
+                return true;
+            }
+        }
+        return false;
     }
 }
