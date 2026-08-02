@@ -23,6 +23,12 @@ public class Legion {
     //variable to store the legion position
     private BlockPos storedPosition;
 
+    //variable to track legion's current battle engagement
+    private UUID currentBattleId = null;
+
+    ///variable to store legions current or last camp position
+    private BlockPos campPosition = null;
+
     //waypoint tracking
     private final Queue<BlockPos> waypoints = new LinkedList<>();
 
@@ -113,6 +119,13 @@ public class Legion {
     public UUID getOwningStateId()                 { return owningStateId; }
     public BlockPos getStoredPosition()            { return storedPosition; }
     public void setStoredPosition(BlockPos pos)    { this.storedPosition = pos; }
+    
+    public UUID getCurrentBattleId()               { return currentBattleId; }
+    public void setCurrentBattleId(UUID id)        { this.currentBattleId = id; }
+    public boolean isEngaged()                     { return currentBattleId != null; }
+
+    public BlockPos getCampPosition()              { return campPosition; }
+    public void setCampPosition(BlockPos pos)      { this.campPosition = pos; }
 
     public List<Cohort> getInfantryCohorts()       { return Collections.unmodifiableList(infantryCohorts); }
     public List<Cohort> getCavalrySquadrons()      { return Collections.unmodifiableList(cavalrySquadrons); }
@@ -120,6 +133,7 @@ public class Legion {
 
     public int getInfantryCount()                  { return infantryCohorts.size(); }
     public int getCavalrySquadronCount()           { return cavalrySquadrons.size(); }
+    public int getAuxiliaryCount()                 { return auxiliaries.size(); }
 
     //serialization methods
     public CompoundTag toNBT() {

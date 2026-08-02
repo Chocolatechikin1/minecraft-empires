@@ -1,6 +1,7 @@
 package com.devc.minecraftempires.army;
 
 import com.devc.minecraftempires.MinecraftEmpires;
+import com.devc.minecraftempires.combat.BattleManager;
 import com.devc.minecraftempires.state.StateData;
 import com.devc.minecraftempires.state.StateTier;
 import com.mojang.serialization.Codec;
@@ -229,9 +230,12 @@ public class ArmyManager extends SavedData {
     }
 
     //army mover - calculates the waypoints for an army to move to
-    public void tickArmies(){
+    public void tickArmies(ServerLevel level){
         boolean requiresSave = false;
         for (Legion legion : activeLegions.values()) {
+            //skip legions that are locked into a battle
+            if (legion.isEngaged()) continue;
+
             if(!legion.getWaypoints().isEmpty()){
                 BlockPos current = legion.getStoredPosition(); 
                 BlockPos target = legion.getWaypoints().peek();
@@ -257,7 +261,7 @@ public class ArmyManager extends SavedData {
                     legion.setStoredPosition(new BlockPos(stepX, current.getY(), stepZ));
                 }
                 //collision check, force save if true
-                if(checkCollisionAndEngage(legion)){
+                if(checkCollisionAndEngage(legion, level)){
                     requiresSave = true;
                 }
                 //save position
@@ -270,7 +274,11 @@ public class ArmyManager extends SavedData {
         }
     }
 
-    private boolean checkCollisionAndEngage(Legion movingLegion){
+    //checks if 2 armies are within engagement range, triggers battle if so
+    private boolean checkCollisionAndEngage(Legion movingLegion, ServerLevel level){
+        //skip if already in a battle
+        if (movingLegion.isEngaged()) return false;
+
         BlockPos position = movingLegion.getStoredPosition();
         for(Legion other : this.activeLegions.values()){
             //if same army, skip
@@ -281,12 +289,17 @@ public class ArmyManager extends SavedData {
             if(other.getOwningStateId().equals(movingLegion.getOwningStateId())){
                 continue;
             }
-            //if legions are in engagement range (16 blocks) engage
-            if(position.distSqr(other.getStoredPosition()) < 256){
-                movingLegion.clearWaypoints();
-                other.clearWaypoints();
-                //TODO Sprint 6: initialize battle sequence and send player to battle screen, send combat alert
-
+            //if the other legion is already engaged, skip
+            if(other.isEngaged()){
+                continue;
+            }
+            //if legions are within 50 blocks, engage (distSqr < 2500)
+            if(position.distSqr(other.getStoredPosition()) < 2500){
+                BattleManager.get(level).startBattle(movingLegion, other, level);
+                MinecraftEmpires.LOGGER.info(
+                    "[Minecraft Empires] Engagement triggered: Legion {} vs Legion {} at {}.",
+                    movingLegion.getLegionId(), other.getLegionId(), position
+                );
                 return true;
             }
         }
