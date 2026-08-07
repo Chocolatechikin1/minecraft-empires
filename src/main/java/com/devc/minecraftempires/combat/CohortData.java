@@ -24,9 +24,7 @@ public class CohortData {
     private Vector2d previousPosition; //for client-side lerp (linear interpolation)
     private final Queue<Vector2d> movementWaypoints;
 
-    public CohortData(UUID cohortId, String type, int maxHealth, int morale,
-                      double speed, int strength, int endurance,
-                      double startX, double startZ) {
+    public CohortData(UUID cohortId, String type, int maxHealth, int morale, double speed, int strength, int endurance, double startX, double startZ) {
         this.cohortId          = cohortId;
         this.type              = type;
         this.maxHealth         = maxHealth;

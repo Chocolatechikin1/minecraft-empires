@@ -1,9 +1,9 @@
 package com.devc.minecraftempires.combat;
 
 import com.devc.minecraftempires.MinecraftEmpires;
+import com.devc.minecraftempires.army.Army;
 import com.devc.minecraftempires.army.ArmyManager;
 import com.devc.minecraftempires.army.Cohort;
-import com.devc.minecraftempires.army.Legion;
 import com.devc.minecraftempires.network.packet.BattleSyncPayload;
 import com.devc.minecraftempires.network.packet.OpenBattleMapPayload;
 import net.minecraft.core.BlockPos;
@@ -16,15 +16,11 @@ import net.neoforged.neoforge.network.PacketDistributor;
 
 import java.util.*;
 
-//class tracks all active battles in the server and manages their lifecycle
-//uses a HashMap to store active battles by their UUID, and ease of garbage collection
-//tramsient state is not serialized to disk, and is cleared on server stop
-//accessed thru BattleManager.get(level)
+//battle manager class
 public final class BattleManager {
-    private static final double COHORT_SPACING = 6.0; //spacing between cohorts in battle
-    //offsets for attacker and defender cohorts in battle space
-    private static final double ATTACKER_OFFSET_Z = -20.0; 
-    private static final double DEFENDER_OFFSET_Z =  20.0; 
+    private static final double COHORT_SPACING   = 6.0;
+    private static final double ATTACKER_OFFSET_Z = -20.0;
+    private static final double DEFENDER_OFFSET_Z =  20.0;
 
     private static final Map<ResourceKey<Level>, BattleManager> INSTANCES = new HashMap<>();
 
@@ -32,229 +28,186 @@ public final class BattleManager {
         return INSTANCES.computeIfAbsent(level.dimension(), k -> new BattleManager());
     }
 
-    //clears all transient states (active battles)
-    public static void clearAll() {
-        INSTANCES.clear();
-    }
+    public static void clearAll() { INSTANCES.clear(); }
 
     private final Map<UUID, BattleSession> activeBattles = new HashMap<>();
 
     private BattleManager() {}
 
-    // Starts a new battle between two legions. attacker is the initator
-    //defender is the one standing at the engagement area
-    //level is just server level
-    public BattleSession startBattle(Legion attacker, Legion defender, ServerLevel level) {
-        BlockPos origin = attacker.getStoredPosition();
+    //start of a battle function
+    public BattleSession startBattle(Army attacker, Army defender, ServerLevel level) {
+        BlockPos origin = attacker.getStoredPosition(); 
         double originX  = origin.getX();
         double originZ  = origin.getZ();
 
-        //set a retreat point 
+        //save armies current positions to their camp
         attacker.setCampPosition(attacker.getStoredPosition());
         defender.setCampPosition(defender.getStoredPosition());
 
-        //get all legions and cohorts
         BattleSession session = new BattleSession(
-                attacker.getLegionId(), defender.getLegionId(), originX, originZ);
+            attacker.getArmyId(), defender.getArmyId(), originX, originZ
+        );
 
-        //hardcoded single line deployment for now (later, we can add more complex formations)
-        deployLegion(session, attacker, true, ATTACKER_OFFSET_Z);
-        deployLegion(session, defender, false, DEFENDER_OFFSET_Z);
+        ArmyManager armyManager = ArmyManager.get(level);
+        deployArmy(session, attacker, true,  ATTACKER_OFFSET_Z, armyManager); //deploy armies
+        deployArmy(session, defender, false, DEFENDER_OFFSET_Z, armyManager);
 
-        //lock legions into battle
+        //lock the armies into battle
         attacker.setCurrentBattleId(session.getBattleId());
         defender.setCurrentBattleId(session.getBattleId());
         attacker.clearWaypoints();
         defender.clearWaypoints();
+
         activeBattles.put(session.getBattleId(), session);
 
+        //notify all players
         MinecraftEmpires.LOGGER.info(
-                "[Minecraft Empires] Battle {} started: Legion {} (att) vs Legion {} (def) at ({}, {})",
-                session.getBattleId(), attacker.getLegionId(), defender.getLegionId(),
-                (int) originX, (int) originZ
-        );
+                "Battle {} started: Army {} (att) vs Army {} (def) at ({}, {}).",
+                session.getBattleId(), attacker.getArmyId(), defender.getArmyId(),
+                (int) originX, (int) originZ);
 
-        //notify all online players
         notifyOnlinePlayers(session, attacker, defender, level);
-
         return session;
     }
 
-    //deployer helper method. currently deploys all cohorts in a single line formation, with a fixed spacing between them
-    //adjust later to allow for more complex formations, and possibly a formation editor in the future
-    private void deployLegion(BattleSession session, Legion legion, boolean isAttacker, double offsetZ) {
-        List<Cohort> allCohorts = new ArrayList<>();
-        allCohorts.addAll(legion.getInfantryCohorts());
-        allCohorts.addAll(legion.getCavalrySquadrons());
-        allCohorts.addAll(legion.getAuxiliaries());
+    //deploy army units helper function
+    private void deployArmy(BattleSession session, Army army, boolean isAttacker, double offsetZ, ArmyManager armyManager) {
+        List<Cohort> combatCohorts = new ArrayList<>(); //arraylist of cohorts to deploy, use an arraylist for quick O(1) access by index
+        //loop through all available cohorts in the army and add them to the combatCohorts list if they are alive and not garrisoned
+        for (UUID cohortId : army.getDeployedCohortIds()) {
+            Cohort c = armyManager.resolveCohort(cohortId);
+            if (c != null && c.isAlive() && !c.isGarrisoned()) {
+                combatCohorts.add(c);
+            }
+        }
 
-        int count = allCohorts.size();
+        int count  = combatCohorts.size();
         double startX = -((count - 1) / 2.0) * COHORT_SPACING;
 
-        //iterate through all cohorts and deploy them
+        //loop through all cohorts and deploy them in a line with spacing (currently only a line formation, but can be expanded to more complex formations in the future)
         for (int i = 0; i < count; i++) {
-            Cohort cohort = allCohorts.get(i);
+            Cohort cohort = combatCohorts.get(i);
             double x = startX + i * COHORT_SPACING;
             CohortData data = CohortData.fromCohort(cohort, x, offsetZ);
-            if (isAttacker){
-                session.addAttackerCohort(data);
-            } 
-            else{
-                session.addDefenderCohort(data);
-            }
+            if (isAttacker) session.addAttackerCohort(data);
+            else            session.addDefenderCohort(data);
         }
     }
 
-    //actions handler per tick
+    //tick function to update all active battles
     public void tick(ServerLevel level) {
         if (activeBattles.isEmpty()) return;
-
+        ArmyManager armyManager = ArmyManager.get(level);
         List<UUID> toFinish = new ArrayList<>();
 
+        //loop through all active battles and update them, if they are not active anymore, add them to the toFinish list
         for (BattleSession session : activeBattles.values()) {
             if (!session.isActive()) {
                 toFinish.add(session.getBattleId());
                 continue;
             }
 
-            //if a player is spectating, tick the battle session and broadcast updates to spectators
+            //if the battle is being spectated, tick it and signal retreats for both sides, then broadcast the sync to all players (okay tf check this later that shouldnt be what the armies do)
             if (session.isSpectated()) {
                 session.tick();
 
-                //for routing legions, show retreat waypoints
-                Legion attackerLegion = ArmyManager.get(level).getLegion(session.getAttackerArmyId());
-                Legion defenderLegion = ArmyManager.get(level).getLegion(session.getDefenderArmyId());
-                if (attackerLegion != null)
-                    signalRetreatsForSide(session, true, attackerLegion.getCampPosition(), session.getMapOriginZ());
-                if (defenderLegion != null)
-                    signalRetreatsForSide(session, false, defenderLegion.getCampPosition(), session.getMapOriginZ());
+                Army attackerArmy = armyManager.getArmy(session.getAttackerArmyId());
+                Army defenderArmy = armyManager.getArmy(session.getDefenderArmyId());
+                if (attackerArmy != null)
+                    signalRetreatsForSide(session, true, attackerArmy.getCampPosition(), session.getMapOriginZ());
+                if (defenderArmy != null)
+                    signalRetreatsForSide(session, false, defenderArmy.getCampPosition(), session.getMapOriginZ());
 
-                // Broadcast updated state to spectators
                 broadcastSync(session, level);
             } else {
-                //auto resolver, currently resolves instantly, later make it time based too
-                Legion attackerLegion = ArmyManager.get(level).getLegion(session.getAttackerArmyId());
-                Legion defenderLegion = ArmyManager.get(level).getLegion(session.getDefenderArmyId());
-                if (attackerLegion != null && defenderLegion != null) {
+                //if the battle is not being spectated, resolve it automatically
+                Army attackerArmy = armyManager.getArmy(session.getAttackerArmyId());
+                Army defenderArmy = armyManager.getArmy(session.getDefenderArmyId());
+                if (attackerArmy != null && defenderArmy != null) {
                     AutoResolveEngine.BattleOutcome outcome =
-                            AutoResolveEngine.resolve(session, attackerLegion, defenderLegion);
+                            AutoResolveEngine.resolve(session, attackerArmy, defenderArmy, armyManager);
                     MinecraftEmpires.LOGGER.info(
-                            "[Minecraft Empires] Auto-resolved battle {}: {} (att -{}, def -{})",
+                            "Auto-resolved battle {}: {} (att -{}, def -{}).",
                             session.getBattleId(), outcome.result(),
-                            outcome.attackerCasualties(), outcome.defenderCasualties()
-                    );
+                            outcome.attackerCasualties(), outcome.defenderCasualties());
                 } else {
                     session.setInactive();
                 }
                 toFinish.add(session.getBattleId());
             }
 
-            //check if session ended this tick
-            if (!session.isActive()) {
-                toFinish.add(session.getBattleId());
-            }
+            if (!session.isActive()) toFinish.add(session.getBattleId());
         }
 
-        //clean up finished sessions
         for (UUID id : toFinish) {
             BattleSession finished = activeBattles.remove(id);
             if (finished != null) finalizeBattle(finished, level);
         }
     }
 
-    //retreat variable
+    //starts a retreat for a side, retreating to their camp position if it exists, otherwise retreating to the battle origin (note good autocorrect fix for campPos, suggests using army parameter and then getting the camp position from that, but this is fine)
     private void signalRetreatsForSide(BattleSession session, boolean isAttacker, BlockPos campPos, double originZ) {
         if (campPos == null) return;
-
-        // Battle-space retreat point = camp position offset from origin
         double retreatX = campPos.getX() - session.getMapOriginX();
         double retreatZ = campPos.getZ() - session.getMapOriginZ();
-
         session.signalRetreat(retreatX, retreatZ, isAttacker);
     }
 
-    //post battle stat adjuster variale
+    //finalize battle function, called when a battle ends
     private void finalizeBattle(BattleSession session, ServerLevel level) {
         ArmyManager armyManager = ArmyManager.get(level);
-        Legion attacker = armyManager.getLegion(session.getAttackerArmyId());
-        Legion defender = armyManager.getLegion(session.getDefenderArmyId());
+        Army attacker = armyManager.getArmy(session.getAttackerArmyId());
+        Army defender = armyManager.getArmy(session.getDefenderArmyId());
 
-        if (attacker != null) finalizeLegion(attacker, session.getResult() == BattleSession.BattleResult.ATTACKER_WINS, session, level, armyManager);
-        if (defender != null) finalizeLegion(defender, session.getResult() == BattleSession.BattleResult.DEFENDER_WINS, session, level, armyManager);
+        if (attacker != null) finalizeArmy(attacker, session.getResult() == BattleSession.BattleResult.ATTACKER_WINS, session);
+        if (defender != null) finalizeArmy(defender, session.getResult() == BattleSession.BattleResult.DEFENDER_WINS, session);
 
-        armyManager.setDirty();
-
-        MinecraftEmpires.LOGGER.info(
-                "[Minecraft Empires] Battle {} concluded: {}", session.getBattleId(), session.getResult()
-        );
+        armyManager.setDirty(); //mark dirty so next tick saves to disk
+        MinecraftEmpires.LOGGER.info("Battle {} concluded: {}.", session.getBattleId(), session.getResult());
     }
 
-    //apply adjustments variable
-    private void finalizeLegion(Legion legion, boolean isWinner, BattleSession session, ServerLevel level, ArmyManager armyManager) {
-        // Clear battle lock
-        legion.setCurrentBattleId(null);
+    //finalize army function, called when a battle ends, sets the army's current battle to null, and sets their stored position to their camp position if they won, or to the battle origin if they lost
+    private void finalizeArmy(Army army, boolean isWinner, BattleSession session) {
+        // Clear battle lock — Army continues its campaign
+        army.setCurrentBattleId(null);
 
-        if (isWinner) {
-            //winner remainds in position, they "won the field"
-            legion.setStoredPosition(new BlockPos(
-                    (int) session.getMapOriginX(),
-                    64,
-                    (int) session.getMapOriginZ()
-            ));
-        } else {
-            //loser retreat to their campPosition (or origin if camp is null)
-            BlockPos camp = legion.getCampPosition();
-            legion.setStoredPosition(camp != null ? camp : new BlockPos(
-                    (int) session.getMapOriginX(), 64, (int) session.getMapOriginZ()));
+        //logic was flipped here, CHECK IF IT IS RIGHT
+        if (isWinner) { //if the army won, they remain on the field
+            BlockPos camp = army.getCampPosition();
+            army.setStoredPosition(camp != null ? camp : new BlockPos((int) session.getMapOriginX(), 64, (int) session.getMapOriginZ()));
+        } else { //if the army lost, they retreat to their camp position
+            army.setStoredPosition(new BlockPos((int) session.getMapOriginX(), 64, (int) session.getMapOriginZ()));
         }
 
-        legion.setCampPosition(null);
-        legion.clearWaypoints();
-
-        //check if legion is still standing, disband if no longer viable after attrition
-        armyManager.runGarbageCollection();
+        army.setCampPosition(null);
+        army.clearWaypoints();
     }
 
-    //network functions
-    //player notification system
-    private void notifyOnlinePlayers(BattleSession session, Legion attacker, Legion defender, ServerLevel level) {
-        OpenBattleMapPayload payload = new OpenBattleMapPayload(
-            session.getBattleId(), attacker.getLegionId(), defender.getLegionId()
-        );
+    //network function to notify all online players in the battle's states that a battle has started, sending them the OpenBattleMapPayload packet
+    private void notifyOnlinePlayers(BattleSession session, Army attacker, Army defender, ServerLevel level) {
+        OpenBattleMapPayload payload = new OpenBattleMapPayload(session.getBattleId(), attacker.getArmyId(), defender.getArmyId());
 
         for (ServerPlayer player : level.getServer().getPlayerList().getPlayers()) {
-            UUID stateId = null;
-            //determine if this player is in the attacker or defender state
-            com.devc.minecraftempires.state.StateManager sm =
-                    com.devc.minecraftempires.state.StateManager.get(level);
+            com.devc.minecraftempires.state.StateManager sm = com.devc.minecraftempires.state.StateManager.get(level);
             com.devc.minecraftempires.state.StateData sd = sm.getStateByPlayer(player.getUUID());
-            if (sd != null) stateId = sd.getStateId();
-
-            if (stateId != null &&
-               (stateId.equals(attacker.getOwningStateId()) ||
-                stateId.equals(defender.getOwningStateId()))) {
-                PacketDistributor.sendToPlayer(player, payload); //send notification to player that battle is active
-            }
-        }
-    }
-
-    //notify players the current state of the battle
-    public void broadcastSync(BattleSession session, ServerLevel level) {
-        if (session.getSpectatingPlayerIds().isEmpty()) return;
-
-        BattleSyncPayload payload = BattleSyncPayload.fromSession(session);
-        MinecraftServer server    = level.getServer();
-
-        for (UUID playerId : session.getSpectatingPlayerIds()) {
-            ServerPlayer player = server.getPlayerList().getPlayer(playerId);
-            if (player != null) {
+            if (sd != null && (sd.getStateId().equals(attacker.getOwningStateId()) || sd.getStateId().equals(defender.getOwningStateId()))) {
                 PacketDistributor.sendToPlayer(player, payload);
             }
         }
     }
 
+    public void broadcastSync(BattleSession session, ServerLevel level) {
+        if (session.getSpectatingPlayerIds().isEmpty()) return;
+        BattleSyncPayload payload = BattleSyncPayload.fromSession(session);
+        MinecraftServer server = level.getServer();
+        for (UUID playerId : session.getSpectatingPlayerIds()) {
+            ServerPlayer player = server.getPlayerList().getPlayer(playerId);
+            if (player != null) PacketDistributor.sendToPlayer(player, payload);
+        }
+    }
+
     //getters
-    public BattleSession getBattle(UUID battleId) { return activeBattles.get(battleId); }
-    public Collection<BattleSession> getAllBattles() { return Collections.unmodifiableCollection(activeBattles.values()); }
-    public boolean hasBattle(UUID battleId) { return activeBattles.containsKey(battleId); }
+    public BattleSession getBattle(UUID battleId)           { return activeBattles.get(battleId); }
+    public Collection<BattleSession> getAllBattles()        { return Collections.unmodifiableCollection(activeBattles.values()); }
+    public boolean hasBattle(UUID battleId)                 { return activeBattles.containsKey(battleId); }
 }
