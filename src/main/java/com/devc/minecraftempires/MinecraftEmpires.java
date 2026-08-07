@@ -36,6 +36,8 @@ import com.devc.minecraftempires.commands.ClaimCommand;
 import com.devc.minecraftempires.commands.StateCommand;
 import com.devc.minecraftempires.commands.ArmyCommand;
 import com.devc.minecraftempires.state.EconomyTickHandler;
+import com.devc.minecraftempires.combat.BattleManager;
+import com.devc.minecraftempires.combat.BattleTickHandler;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 //custom block imports
 import com.devc.minecraftempires.blocks.CityAltarBlock;
@@ -47,6 +49,7 @@ import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import com.devc.minecraftempires.network.packet.MapDataPayload; 
 import com.devc.minecraftempires.network.ModNetworking; 
 import com.devc.minecraftempires.army.ArmyManager;
+import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 
 // The value here should match an entry in the META-INF/neoforge.mods.toml file
 @Mod(MinecraftEmpires.MODID)
@@ -109,6 +112,7 @@ public class MinecraftEmpires {
         // Do not add this line if there are no @SubscribeEvent-annotated functions in this class, like onServerStarting() below.
         NeoForge.EVENT_BUS.register(this);
         NeoForge.EVENT_BUS.register(new EconomyTickHandler());
+        NeoForge.EVENT_BUS.register(new BattleTickHandler());
 
         // Register the item to a creative tab
         modEventBus.addListener(this::addCreative);
@@ -157,9 +161,16 @@ public class MinecraftEmpires {
         //calculate the movement every 5 ticks, maintaining performance
         if(event.getServer().getTickCount() % 5 == 0){
             event.getServer().getAllLevels().forEach(level -> {
-                ArmyManager.get(level).tickArmies();
+                ArmyManager.get(level).tickArmies(level);
             });
         }
+    }
+
+    //clears BattleManager state when the server shuts down
+    @SubscribeEvent
+    public void onServerStopping(ServerStoppingEvent event) {
+        BattleManager.clearAll();
+        LOGGER.info("[Minecraft Empires] BattleManager cleared on server stop.");
     }
     
 }
