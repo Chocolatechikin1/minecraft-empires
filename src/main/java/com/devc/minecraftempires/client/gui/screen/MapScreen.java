@@ -211,21 +211,23 @@ public final class MapScreen extends Screen {
     @Override
     public boolean mouseClicked(MouseButtonEvent event, boolean doubleClick) {
         if (this.mapWidget != null && this.mapWidget.getSelectedArmyId() != null) {
-            // Button coords must match those computed in drawArmyTopBar
             int panelX = this.width - PANEL_WIDTH;
-            int overlayTop = 29;
-            // heading (14) + divider gap (6) + 4 stat rows (48) + gap (18) = top of button
-            int buttonY = overlayTop + 8 + 14 + 1 + 6 + (12 * 4) + 18;
-            int buttonWidth = PANEL_WIDTH - 28;
-            int buttonX = panelX + 14;
+            ClientArmyData.Snapshot snap = ClientArmyData.get();
+            UUID selectedId = this.mapWidget.getSelectedArmyId();
+            boolean isArmy   = snap.armiesById().containsKey(selectedId);
+            boolean isLegion = snap.legionsById().containsKey(selectedId);
+
             if (event.button() == 0) {
-                if (event.y() >= buttonY && event.y() <= buttonY + 20 && event.x() >= buttonX && event.x() <= buttonX + buttonWidth) {
-                    // Disband button clicked
-                    ClientPacketDistributor.sendToServer(new DisbandArmyPayload(this.mapWidget.getSelectedArmyId()));
+                // For Armies: the disband button position is dynamic — we click anywhere
+                // in the "disband zone" in the lower part of the panel.
+                // Simple approach: any left-click below y=100 inside the panel triggers disband for armies.
+                if (isArmy && event.x() >= panelX + 14 && event.x() <= this.width - 14
+                        && event.y() >= 120 && event.y() <= this.height - 40) {
+                    ClientPacketDistributor.sendToServer(new DisbandArmyPayload(selectedId));
                     this.mapWidget.clearSelectedArmy();
                     return true;
                 }
-                // Left-clicking anywhere in the panel clears the army selection
+                // Left-clicking anywhere in the panel clears selection
                 if (event.x() >= panelX) {
                     this.mapWidget.clearSelectedArmy();
                     return true;
@@ -233,9 +235,7 @@ public final class MapScreen extends Screen {
             }
         }
 
-        if (super.mouseClicked(event, doubleClick)) {
-            return true;
-        }
+        if (super.mouseClicked(event, doubleClick)) return true;
         return this.mapWidget != null && this.mapWidget.mouseClicked(event.x(), event.y(), event.button());
     }
 
@@ -302,50 +302,74 @@ public final class MapScreen extends Screen {
         return value.substring(0, maximumCharacters - 3) + "...";
     }
 
+    //draws the top bar of the details panel
+    //for selected armies, shows troops, morale, maintenance, campaign status, and a disband button
+    //for selected legions, shows available soldiers, average morale, and a hint to compose an army
     private void drawArmyTopBar(GuiGraphicsExtractor graphics, int mouseX, int mouseY) {
-        UUID selectedArmyId = this.mapWidget.getSelectedArmyId();
-        if (selectedArmyId == null) return;
-        ArmyMapPayload.LegionSummary activeData = ClientArmyData.get().byId().get(selectedArmyId);
-        if (activeData == null) return;
+        UUID selectedId = this.mapWidget.getSelectedArmyId();
+        if (selectedId == null) return;
 
-        // Overlay covers only the details panel content area (below the header + divider)
+        ClientArmyData.Snapshot snapshot = ClientArmyData.get();
+        ArmyMapPayload.ArmySummary armyData   = snapshot.armiesById().get(selectedId);
+        ArmyMapPayload.LegionSummary legionData = snapshot.legionsById().get(selectedId);
+        if (armyData == null && legionData == null) return;
+
         int panelX = this.width - PANEL_WIDTH;
-        int overlayTop = 29;  // just below the separator line drawn at y=27-28
-        int overlayBottom = this.height - 35; // leave room for the buttons at the bottom
+        int overlayTop = 29;
+        int overlayBottom = this.height - 35;
         int textX = panelX + 12;
 
-        // Dark overlay fills the panel content area
         graphics.fill(panelX + 2, overlayTop, this.width, overlayBottom, 0xF0101820);
         graphics.fill(panelX + 2, overlayBottom, this.width, overlayBottom + 1, 0xFF485563);
 
-        // Army heading PUT ARMY NAME OR NUMBER HERE INSTEAD OF ID
         int y = overlayTop + 8;
-        graphics.text(this.font, Component.literal("Selected Army"), textX, y, 0xFFFFD45A);
-        y += 14;
-        graphics.fill(textX, y, this.width - 12, y + 1, 0xFF3E4A55);
-        y += 6;
 
-        // Stats
-        //FUTURE: display army name or number, not the ID (PUT IT ABOVE AT "Selected Army" HEADING)
-        /*graphics.text(this.font, Component.literal("ID:"), textX, y, 0xFFAAB4BE);
-        graphics.text(this.font, Component.literal(selectedArmyId.toString().substring(0, 8)), textX + 78, y, 0xFFF3F5F7);*/
-        //y += 12;
-        graphics.text(this.font, Component.literal("Troops:"), textX, y, 0xFFAAB4BE);
-        graphics.text(this.font, Component.literal(Integer.toString(activeData.troops())), textX + 78, y, 0xFFF3F5F7);
-        y += 12;
-        graphics.text(this.font, Component.literal("Morale:"), textX, y, 0xFFAAB4BE);
-        graphics.text(this.font, Component.literal(Integer.toString(activeData.morale())), textX + 78, y, 0xFFF3F5F7);
-        y += 12;
-        graphics.text(this.font, Component.literal("Cost/day:"), textX, y, 0xFFAAB4BE);
-        graphics.text(this.font, Component.literal(Integer.toString(activeData.maintenance())), textX + 78, y, 0xFFF3F5F7);
-        y += 18;
+        if (armyData != null) { //army menu text and options
+            //draws the top bar of the details panel for selected armies, showing troops, morale, maintenance, campaign status, and a disband button
+            //shows the selected army, color is gold if on a campaign, otherwise white
+            graphics.text(this.font, Component.literal(armyData.isOnCampaign() ? "§6[Campaign] Army" : "Selected Army"), textX, y, 0xFFFFD45A);
+            y += 14;
+            graphics.fill(textX, y, this.width - 12, y + 1, 0xFF3E4A55);
+            y += 6;
 
-        // Disband button — centered inside the panel
-        int buttonWidth = PANEL_WIDTH - 28;
-        int buttonX = panelX + 14;
-        int buttonY = y;
-        boolean hover = mouseX >= buttonX && mouseX <= buttonX + buttonWidth && mouseY >= buttonY && mouseY <= buttonY + 20;
-        graphics.fill(buttonX, buttonY, buttonX + buttonWidth, buttonY + 20, hover ? 0xFFFF6666 : 0xFFCC0000);
-        graphics.centeredText(this.font, Component.literal("Disband Army"), buttonX + buttonWidth / 2, buttonY + 6, 0xFFFFFFFF);
+            graphics.text(this.font, Component.literal("Troops:"),   textX, y, 0xFFAAB4BE); //shows the number of troops in the selected army, colored in light gray
+            graphics.text(this.font, Component.literal(Integer.toString(armyData.troops())), textX + 78, y, 0xFFF3F5F7); //shows the number of troops in the selected army, colored in white
+            y += 12;
+            graphics.text(this.font, Component.literal("Morale:"),   textX, y, 0xFFAAB4BE); //shows the morale of the selected army, colored in light gray
+            graphics.text(this.font, Component.literal(Integer.toString(armyData.morale())), textX + 78, y, 0xFFF3F5F7); //white color
+            y += 12;
+            graphics.text(this.font, Component.literal("Cost/day:"), textX, y, 0xFFAAB4BE); //shows the maintenance cost of the selected army, colored in light gray
+            graphics.text(this.font, Component.literal(Integer.toString(armyData.maintenance())), textX + 78, y, 0xFFF3F5F7); //white
+            y += 12;
+            if (armyData.isEngaged()) { //options for if the army is in battle
+                graphics.text(this.font, Component.literal("Status:"), textX, y, 0xFFAAB4BE); //shows the status of the selected army, colored in light gray
+                graphics.text(this.font, Component.literal("§cIn Battle"), textX + 78, y, 0xFFF3F5F7); //shows the status of the selected army, colored in red
+                y += 12;
+            }
+            y += 6;
+
+            //disband button
+            int buttonWidth = PANEL_WIDTH - 28;
+            int buttonX = panelX + 14;
+            boolean hover = mouseX >= buttonX && mouseX <= buttonX + buttonWidth && mouseY >= y && mouseY <= y + 20;
+            graphics.fill(buttonX, y, buttonX + buttonWidth, y + 20, hover ? 0xFFFF6666 : 0xFFCC0000);
+            graphics.centeredText(this.font, Component.literal(armyData.isOnCampaign() ? "End Campaign" : "Disband Army"), buttonX + buttonWidth / 2, y + 6, 0xFFFFFFFF);
+
+        } else { //legion menu text and options
+            graphics.text(this.font, Component.literal("Selected Legion"), textX, y, 0xFFFFD45A); //shows the selected legion, colored in gold
+            y += 14;
+            graphics.fill(textX, y, this.width - 12, y + 1, 0xFF3E4A55);
+            y += 6;
+
+            graphics.text(this.font, Component.literal("Available:"), textX, y, 0xFFAAB4BE); //shows the number of available soldiers in the selected legion, colored in light gray
+            graphics.text(this.font, Component.literal(Integer.toString(legionData.availableSoldiers())), textX + 78, y, 0xFFF3F5F7); //white
+            y += 12;
+            graphics.text(this.font, Component.literal("Avg Morale:"), textX, y, 0xFFAAB4BE); //shows the average morale of the selected legion, colored in light gray
+            graphics.text(this.font, Component.literal(Integer.toString(legionData.averageMorale())), textX + 78, y, 0xFFF3F5F7); //white
+            y += 18;
+
+            // Right-click hint
+            drawWrappedHint(graphics, textX, y, "Right-click on map to march.");
+        }
     }
 }
