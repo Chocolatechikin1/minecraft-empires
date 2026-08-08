@@ -32,21 +32,11 @@ import net.minecraft.core.BlockPos;
  *   logic will then propagate a morale debuff to adjacent cohorts in the array.
  */
 public class Cohort {
-    /** Max soldiers for INFANTRY and AUXILIARY cohorts. */
-    public static final int MAX_SOLDIERS_STANDARD = 50;
-
-    /** Max soldiers per CAVALRY squadron (5 squadrons = 1 full 50-man wing). */
-    public static final int MAX_SOLDIERS_CAVALRY = 10;
-
-    /** XP required per individual stat point gained (distributed round-robin). */
+    public static final int MAX_SOLDIERS_STANDARD = 50; //applies to both normal cohorts and auxiliaries
+    public static final int MAX_SOLDIERS_CAVALRY = 10; //base per squadron, can form up to 5 squadrons
     private static final int STAT_XP_PER_POINT = 50;
-
-    /** How much morale debuff this cohort broadcasts when it routes. */
     private static final int ROUTE_PANIC_DEBUFF = 15;
-
-    /** XP multiplier scaling based on battles survived — rewards veterans. */
-    private static final double BATTLE_XP_SCALE = 0.1;
-
+    private static final double BATTLE_XP_SCALE = 0.1; //battle xp scaling - more battles = more xp per battle
     private final UUID cohortId;
     private final CohortType type;
 
@@ -71,6 +61,10 @@ public class Cohort {
     //round robin index tracking: 0=endurance, 1=strength, 2=health, 3=speed, 4=morale
     private int statLevelIndex;
     private boolean isRouting;
+
+    private UUID assignedArmyId = null; //null=not deployed, otherwise the Army's UUID
+    private boolean isGarrisoned = false;
+    private UUID garrisonedSettlementId = null;
 
     //waypoint tracking
     private final Queue<BlockPos> waypoints = new LinkedList<>();
@@ -191,6 +185,17 @@ public class Cohort {
     public boolean isRouting()         { return isRouting; }
     public void setRouting(boolean v)  { this.isRouting = v; }
 
+    // ── Deployment tracking getters/setters ───────────────────────────────────
+    public UUID getAssignedArmyId()                    { return assignedArmyId; }
+    public void setAssignedArmyId(UUID id)             { this.assignedArmyId = id; }
+    public boolean isDeployed()                        { return assignedArmyId != null; }
+
+    public boolean isGarrisoned()                      { return isGarrisoned; }
+    public void setIsGarrisoned(boolean garrisoned)    { this.isGarrisoned = garrisoned; }
+
+    public UUID getGarrisonedSettlementId()            { return garrisonedSettlementId; }
+    public void setGarrisonedSettlementId(UUID id)     { this.garrisonedSettlementId = id; }
+
     //serialization methods
     public CompoundTag toNBT() {
         CompoundTag tag = new CompoundTag();
@@ -208,6 +213,10 @@ public class Cohort {
         tag.putInt("Battles",       battlesParticipated);
         tag.putInt("StatLevelIdx",  statLevelIndex);
         tag.putBoolean("IsRouting", isRouting);
+        // Deployment tracking
+        tag.putString("AssignedArmyId",         assignedArmyId != null ? assignedArmyId.toString() : "");
+        tag.putBoolean("IsGarrisoned",           isGarrisoned);
+        tag.putString("GarrisonedSettlementId",  garrisonedSettlementId != null ? garrisonedSettlementId.toString() : "");
         return tag;
     }
 
@@ -228,6 +237,12 @@ public class Cohort {
         c.battlesParticipated = tag.getInt("Battles").orElse(0);
         c.statLevelIndex     = tag.getInt("StatLevelIdx").orElse(0);
         c.isRouting          = tag.getBoolean("IsRouting").orElse(false);
+        // Deployment tracking
+        String assignedArmyStr = tag.getString("AssignedArmyId").orElse("");
+        c.assignedArmyId = assignedArmyStr.isEmpty() ? null : UUID.fromString(assignedArmyStr);
+        c.isGarrisoned   = tag.getBoolean("IsGarrisoned").orElse(false);
+        String garrisonStr = tag.getString("GarrisonedSettlementId").orElse("");
+        c.garrisonedSettlementId = garrisonStr.isEmpty() ? null : UUID.fromString(garrisonStr);
         return c;
     }
 

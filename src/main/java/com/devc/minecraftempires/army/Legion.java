@@ -20,16 +20,10 @@ public class Legion {
     private final UUID legionId;
     private final UUID owningStateId;
 
-    //variable to store the legion position
+    //variable to store the legion position (used for map display and friendly-territory movement)
     private BlockPos storedPosition;
 
-    //variable to track legion's current battle engagement
-    private UUID currentBattleId = null;
-
-    ///variable to store legions current or last camp position
-    private BlockPos campPosition = null;
-
-    //waypoint tracking
+    //waypoint tracking (for independent movement in friendly territory)
     private final Queue<BlockPos> waypoints = new LinkedList<>();
 
     private final List<Cohort> infantryCohorts;    // max MAX_INFANTRY_COHORTS
@@ -119,13 +113,6 @@ public class Legion {
     public UUID getOwningStateId()                 { return owningStateId; }
     public BlockPos getStoredPosition()            { return storedPosition; }
     public void setStoredPosition(BlockPos pos)    { this.storedPosition = pos; }
-    
-    public UUID getCurrentBattleId()               { return currentBattleId; }
-    public void setCurrentBattleId(UUID id)        { this.currentBattleId = id; }
-    public boolean isEngaged()                     { return currentBattleId != null; }
-
-    public BlockPos getCampPosition()              { return campPosition; }
-    public void setCampPosition(BlockPos pos)      { this.campPosition = pos; }
 
     public List<Cohort> getInfantryCohorts()       { return Collections.unmodifiableList(infantryCohorts); }
     public List<Cohort> getCavalrySquadrons()      { return Collections.unmodifiableList(cavalrySquadrons); }
@@ -135,17 +122,52 @@ public class Legion {
     public int getCavalrySquadronCount()           { return cavalrySquadrons.size(); }
     public int getAuxiliaryCount()                 { return auxiliaries.size(); }
 
+    // ── Computed stat helpers (averages across all owned cohorts) ──────────────────
+    private List<Cohort> allCohorts() {
+        List<Cohort> all = new ArrayList<>(infantryCohorts.size() + cavalrySquadrons.size() + auxiliaries.size());
+        all.addAll(infantryCohorts);
+        all.addAll(cavalrySquadrons);
+        all.addAll(auxiliaries);
+        return all;
+    }
+
+    private int average(java.util.function.ToIntFunction<Cohort> stat) {
+        List<Cohort> all = allCohorts();
+        if (all.isEmpty()) return 0;
+        return (int) all.stream().mapToInt(stat).average().orElse(0);
+    }
+
+    //getters
+    public int getAverageEndurance() { return average(Cohort::getEndurance); }
+    public int getAverageMorale()    { return average(Cohort::getMorale); }
+    public int getAverageStrength()  { return average(Cohort::getStrength); }
+    public int getTotalSoldiers() {
+        return allCohorts().stream().mapToInt(Cohort::getSoldierCount).sum();
+    }
+
+    /** Soldiers from cohorts that are NOT yet assigned to any Army. */
+    public int getAvailableSoldiers() {
+        return allCohorts().stream()
+                .filter(c -> !c.isDeployed())
+                .mapToInt(Cohort::getSoldierCount)
+                .sum();
+    }
+
+    //cohort availability check (for army deployment)
+    public boolean hasAvailableCohorts() {
+        return allCohorts().stream().anyMatch(c -> !c.isDeployed());
+    }
+
     //serialization methods
     public CompoundTag toNBT() {
         CompoundTag tag = new CompoundTag();
         tag.putString("LegionId",      legionId.toString());
         tag.putString("OwningStateId", owningStateId.toString());
         tag.putLong("StoredPos",       storedPosition.asLong());
-
+        // Note: campPosition and currentBattleId removed — now live on Army.
         tag.put("InfantryCohorts",  serializeCohortList(infantryCohorts));
         tag.put("CavalrySquadrons", serializeCohortList(cavalrySquadrons));
         tag.put("Auxiliaries",      serializeCohortList(auxiliaries));
-
         return tag;
     }
 
