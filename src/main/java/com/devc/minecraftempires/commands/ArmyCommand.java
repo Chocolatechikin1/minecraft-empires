@@ -47,17 +47,25 @@ public class ArmyCommand {
                 Legion activeLegion = newLegion.get();
                 
                 // 2. Inject troops to make it viable (survives Garbage Collection)
-                activeLegion.addInfantryCohort(Cohort.createInfantry());
-                activeLegion.addInfantryCohort(Cohort.createInfantry());
-                activeLegion.addCavalrySquadron(Cohort.createCavalrySquadron());
-                
-                // 3. Save the newly populated army to disk
+                Cohort inf1 = Cohort.createInfantry();
+                Cohort inf2 = Cohort.createInfantry();
+                Cohort cav  = Cohort.createCavalrySquadron();
+                activeLegion.addInfantryCohort(inf1);
+                activeLegion.addInfantryCohort(inf2);
+                activeLegion.addCavalrySquadron(cav);
+
+                // 3. Register cohorts in the flat lookup registry
+                armyManager.registerCohort(inf1);
+                armyManager.registerCohort(inf2);
+                armyManager.registerCohort(cav);
+
+                // 4. Save the newly populated legion to disk
                 armyManager.setDirty();
 
-                player.sendSystemMessage(Component.literal("§a[Minecraft Empires] Test Legion raised! (2 Infantry, 1 Cavalry)"));
+                player.sendSystemMessage(Component.literal("§a[Minecraft Empires] Test Legion raised! (2 Cohorts, 1 Squadron)"));
                 return 1;
             } else {
-                player.sendSystemMessage(Component.literal("§c[Minecraft Empires] Failed to raise Legion. Army cap reached."));
+                player.sendSystemMessage(Component.literal("§c[Minecraft Empires] Failed to raise Legion. Legion cap reached."));
                 return 0;
             }
 
