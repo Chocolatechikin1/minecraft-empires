@@ -1,6 +1,7 @@
 package com.devc.minecraftempires.state;
 
 import com.devc.minecraftempires.army.ArmyManager;
+import com.devc.minecraftempires.army.Legion;
 import net.minecraft.server.level.ServerLevel;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
@@ -81,9 +82,9 @@ public class EconomyTickHandler {
         int ownedChunks = claimManager.getClaimCountForState(state.getStateId());
         double chunkCost = ownedChunks * 2.0; //2 emeralds per chunk per day
 
-        //legion upkeep variables: 750 emeralds per active Legion per day (can be adjusted)
-        int legionCount = armyManager.getLegionCountForState(state.getStateId());
-        double legionCost = legionCount * 750.0;
+        //legion upkeep: 1.5 emeralds per soldier per day (750 per full 500-soldier legion) (fix this, shouldnt have decimals for emeralds)
+        int totalSoldiers = armyManager.getLegionsForState(state.getStateId()).stream().mapToInt(Legion::getTotalSoldiers).sum();
+        double legionCost = totalSoldiers * 1.5;
 
         return baseMaintenance + chunkCost + legionCost;
     }

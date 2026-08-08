@@ -1,5 +1,6 @@
 package com.devc.minecraftempires.network;
 
+import com.devc.minecraftempires.army.Army;
 import com.devc.minecraftempires.army.ArmyManager;
 import com.devc.minecraftempires.army.Legion;
 import com.devc.minecraftempires.network.packet.ArmyMapPayload;
@@ -26,373 +27,263 @@ import java.util.Set;
 import java.util.UUID;
 
 //this class will build a map *snapshot* (prevents constant server calling and recalculating) and applies the fog-of-war filter to only show what the player is allowed to see
+//gathers all data from ArmyManager, ClaimManager, and StateManager to build the map snapshot
 public final class MapDataService {
-    private static final int[][] CARDINAL_DIRECTIONS = { //2D array of cardinal directions for checking neighboring chunks
+    private static final int[][] CARDINAL_DIRECTIONS = {
             {0, -1},
             {1, 0},
             {0, 1},
             {-1, 0}
     };
 
-    //constructor
     private MapDataService() {}
 
-    //builds the map data payload for a given player, applying the fog-of-war filter to only show what the player is allowed to see
+    //builds the map data payload for a given player, applying fog-of-war
     public static MapDataPayload buildPayload(ServerPlayer player) {
-        //get state info first
+        //get all player details and managers
         ServerLevel level = player.level();
         StateManager stateManager = StateManager.get(level);
         ClaimManager claimManager = ClaimManager.get(level);
         StateData viewerState = stateManager.getStateByPlayer(player.getUUID());
 
-        if (viewerState == null) {
-            return MapDataPayload.empty();
-        }
+        if (viewerState == null) return MapDataPayload.empty();
 
-        //get user info and claims
+        //get the viewer's state ID and all claims, then determine which states are visible due to war or scouting
         UUID viewerStateId = viewerState.getStateId();
         Map<ChunkPos, ChunkData> allClaims = claimManager.getClaimsView();
         Set<UUID> warVisibleStateIds = getWarVisibleStateIds(viewerState);
         ScoutingResult scouting = findScoutedForeignChunks(allClaims, viewerStateId);
 
-        //determine which states and chunks are visible to the player, we'll use a hashset to store the visible state IDs and a list to store the visible chunks
         Set<UUID> visibleStateIds = new HashSet<>();
         visibleStateIds.add(viewerStateId);
         visibleStateIds.addAll(scouting.borderingStateIds());
         visibleStateIds.addAll(warVisibleStateIds);
 
-        //build the list of visible chunks, and also keep track of the number of visible chunks per state, as well as settlement information
-        //utilizing hash  maps for quick lookups and avoiding duplicates and an arraylist for the visible chunks to maintain order and allow for easy iteration
-        List<MapDataPayload.MapChunkData> visibleChunks = new ArrayList<>(); //we can use an arraylist as we already know the number of visible chunks
+        //build the visible chunk list, settlement summaries, and state summaries, utilizing ArrayLists and HashMaps for efficient data storage and retrieval (O(1) average complexity for get/put operations)
+        List<MapDataPayload.MapChunkData> visibleChunks = new ArrayList<>();
         Map<UUID, Integer> visibleChunkCounts = new HashMap<>();
         Map<String, Boolean> settlementGarrisonStatus = new HashMap<>();
         Map<String, UUID> settlementOwners = new HashMap<>();
         Map<String, Integer> settlementTiers = new HashMap<>();
         Set<Long> visibleChunkPositions = new HashSet<>();
 
-        //for each claim, check if the player is allowed to see it, and if so, add it to the list of visible chunks and update the counts and settlement information
-        for (Map.Entry<ChunkPos, ChunkData> entry : allClaims.entrySet()) {
+        for (Map.Entry<ChunkPos, ChunkData> entry : allClaims.entrySet()) { //while iterating through all claims, check if the chunk is visible to the player based on ownership, war visibility, or scouting
             ChunkPos position = entry.getKey();
             ChunkData data = entry.getValue();
             UUID ownerStateId = data.getOwnerUUID();
-            if (ownerStateId == null || !isChunkVisible(
-                    position,
-                    ownerStateId,
-                    viewerStateId,
-                    warVisibleStateIds,
-                    scouting.scoutedForeignChunks()
-            )) {
-                continue;
-            }
+            if (ownerStateId == null || !isChunkVisible(position, ownerStateId, viewerStateId, warVisibleStateIds, scouting.scoutedForeignChunks())) continue;
 
+            //add the visible chunk to the list, along with its metadata (owner state ID, settlement ID, garrison status, settlement tier, and contested status)
             String settlementId = normalizeSettlementId(data.getSettlementID());
-            visibleChunks.add(new MapDataPayload.MapChunkData(
-                    position.pack(),
-                    1,
-                    ownerStateId,
-                    settlementId,
-                    data.isGarrisoned(),
-                    data.getSettlementTier(),
-                    false
-            ));
+            visibleChunks.add(new MapDataPayload.MapChunkData(position.pack(), 1, ownerStateId, settlementId, data.isGarrisoned(), data.getSettlementTier(), false));
             visibleChunkPositions.add(position.pack());
             visibleChunkCounts.merge(ownerStateId, 1, Integer::sum);
 
-            if (!settlementId.isEmpty()) {
+            if (!settlementId.isEmpty()) { //for each visible chunk, if it belongs to a settlement, record the settlement's owner state ID, tier, and garrison status (if applicable)
                 settlementOwners.putIfAbsent(settlementId, ownerStateId);
                 settlementTiers.merge(settlementId, data.getSettlementTier(), Math::max);
-                if (data.isGarrisoned()) {
-                    settlementGarrisonStatus.put(settlementId, true);
-                }
+                if (data.isGarrisoned()) settlementGarrisonStatus.put(settlementId, true);
             }
         }
 
-        //compress horizontal runs of chunks to reduce the size of the payload
         visibleChunks = compressHorizontalRuns(visibleChunks);
 
-        //build the list of state summaries, which will include the state name, tier, number of visible chunks, and other relevant information
-        //arraylist as we know the parameter sizes that we're feeding it
         List<MapDataPayload.StateSummary> stateSummaries = new ArrayList<>();
         for (UUID visibleStateId : visibleStateIds) {
             StateData state = stateManager.getState(visibleStateId);
-            if (state == null) {
-                continue;
-            }
-
+            if (state == null) continue;
             boolean isViewerState = visibleStateId.equals(viewerStateId);
             stateSummaries.add(new MapDataPayload.StateSummary(
-                    visibleStateId,
-                    state.getStateName(),
-                    state.getCurrentTier().name(),
+                    visibleStateId, state.getStateName(), state.getCurrentTier().name(),
                     visibleChunkCounts.getOrDefault(visibleStateId, 0),
                     isViewerState ? state.getTotalPopulation() : 0,
                     isViewerState ? state.getTreasuryBalance() : 0.0,
-                    isViewerState,
-                    scouting.borderingStateIds().contains(visibleStateId)
-            ));
+                    isViewerState, scouting.borderingStateIds().contains(visibleStateId)));
         }
-        stateSummaries.sort(Comparator.comparing(MapDataPayload.StateSummary::stateName, String.CASE_INSENSITIVE_ORDER));
+        stateSummaries.sort(Comparator.comparing(MapDataPayload.StateSummary::stateName,
+                String.CASE_INSENSITIVE_ORDER));
 
-        //gets all settlements and chooses the capital settlement for each state, then builds the list of settlement summaries, which will include the settlement name, tier, center chunk position, and other relevant information
         Collection<SettlementData> allSettlements = stateManager.getAllSettlements();
-        Map<UUID, UUID> capitalSettlementByState = chooseCapitalSettlements(allSettlements, visibleStateIds); //not sure how i feel about auto selecting capitals, may adjust later
+        Map<UUID, UUID> capitalSettlementByState = chooseCapitalSettlements(allSettlements, visibleStateIds);
         List<MapDataPayload.SettlementSummary> settlementSummaries = new ArrayList<>();
         Set<String> summarizedSettlementIds = new HashSet<>();
 
         for (SettlementData settlement : allSettlements) {
             UUID owningStateId = settlement.getOwningStateId();
-            if (!visibleStateIds.contains(owningStateId)) {
-                continue;
-            }
+            if (!visibleStateIds.contains(owningStateId)) continue;
 
             BlockPos altar = settlement.getCenterAltarPos();
             ChunkPos centerChunk = new ChunkPos(altar.getX() >> 4, altar.getZ() >> 4);
-            boolean revealFullSettlement = owningStateId.equals(viewerStateId)
-                    || warVisibleStateIds.contains(owningStateId);
-            if (!revealFullSettlement && !visibleChunkPositions.contains(centerChunk.pack())) {
-                continue;
-            }
+            boolean revealFull = owningStateId.equals(viewerStateId) || warVisibleStateIds.contains(owningStateId);
+            if (!revealFull && !visibleChunkPositions.contains(centerChunk.pack())) continue;
 
             String settlementId = settlement.getSettlementId().toString();
-            boolean isViewerSettlement = owningStateId.equals(viewerStateId);
+            boolean isViewer = owningStateId.equals(viewerStateId);
             settlementSummaries.add(new MapDataPayload.SettlementSummary(
-                    settlementId,
-                    owningStateId,
-                    settlement.getSettlementName(),
-                    centerChunk.pack(),
+                    settlementId, owningStateId, settlement.getSettlementName(), centerChunk.pack(),
                     settlement.getSettlementTier(),
-                    isViewerSettlement ? settlement.getLocalPopulation() : 0,
-                    isViewerSettlement ? settlement.getGarrisonCapacity() : 0,
+                    isViewer ? settlement.getLocalPopulation() : 0,
+                    isViewer ? settlement.getGarrisonCapacity() : 0,
                     settlement.getSettlementId().equals(capitalSettlementByState.get(owningStateId)),
-                    settlementGarrisonStatus.getOrDefault(settlementId, false)
-            ));
+                    settlementGarrisonStatus.getOrDefault(settlementId, false)));
             summarizedSettlementIds.add(settlementId);
         }
 
-        // Phase 1 worlds may have a registered City Altar center before Sprint 2B has a full
-        // SettlementData object. Preserve that useful anchor without exposing hidden locations.
+        // Phase 1 legacy: fallback for settlements without full SettlementData
         for (Map.Entry<String, ChunkPos> centerEntry : claimManager.getSettlementCentersView().entrySet()) {
             String settlementId = centerEntry.getKey();
             UUID owningStateId = settlementOwners.get(settlementId);
             ChunkPos centerChunk = centerEntry.getValue();
-            if (owningStateId == null
-                    || summarizedSettlementIds.contains(settlementId)
-                    || !visibleChunkPositions.contains(centerChunk.pack())) {
-                continue;
-            }
+            if (owningStateId == null || summarizedSettlementIds.contains(settlementId)
+                    || !visibleChunkPositions.contains(centerChunk.pack())) continue;
 
             settlementSummaries.add(new MapDataPayload.SettlementSummary(
-                    settlementId,
-                    owningStateId,
-                    fallbackProvinceName(settlementId),
-                    centerChunk.pack(),
-                    settlementTiers.getOrDefault(settlementId, 0),
-                    0,
-                    0,
-                    false,
-                    settlementGarrisonStatus.getOrDefault(settlementId, false)
-            ));
+                    settlementId, owningStateId, fallbackProvinceName(settlementId), centerChunk.pack(),
+                    settlementTiers.getOrDefault(settlementId, 0), 0, 0, false,
+                    settlementGarrisonStatus.getOrDefault(settlementId, false)));
         }
 
-        settlementSummaries.sort(Comparator.comparing(
-                MapDataPayload.SettlementSummary::settlementName,
-                String.CASE_INSENSITIVE_ORDER
-        ));
+        settlementSummaries.sort(Comparator.comparing(MapDataPayload.SettlementSummary::settlementName,
+                String.CASE_INSENSITIVE_ORDER));
 
-        return new MapDataPayload(
-                viewerStateId,
-                viewerState.getStateName(),
-                visibleChunks,
-                stateSummaries,
-                settlementSummaries,
-                BreachAlertService.getVisibleRecentAlerts(
-                        level,
-                        viewerStateId,
-                        visibleChunkPositions
-                )
-        );
+        return new MapDataPayload(viewerStateId, viewerState.getStateName(), visibleChunks,
+                stateSummaries, settlementSummaries,
+                BreachAlertService.getVisibleRecentAlerts(level, viewerStateId, visibleChunkPositions));
     }
 
-    //helper method to compress horizontal runs of chunks with the same metadata into a single entry with a run length, to reduce the size of the payload
-    private static List<MapDataPayload.MapChunkData> compressHorizontalRuns(
-            List<MapDataPayload.MapChunkData> individualChunks
-    ) {
-        individualChunks.sort(
-                Comparator.<MapDataPayload.MapChunkData>comparingInt(
-                        chunk -> ChunkPos.unpack(chunk.packedChunkPos()).z()
-                ).thenComparingInt(chunk -> ChunkPos.unpack(chunk.packedChunkPos()).x())
-        );
+    //chunk function for compressing horizontal runs of chunks with the same metadata into a single entry with a run length, improving network efficiency
+    private static List<MapDataPayload.MapChunkData> compressHorizontalRuns(List<MapDataPayload.MapChunkData> individualChunks) {
+        //we first sort the chunks by their z-coordinate, then by their x-coordinate, to ensure that we process them in a left-to-right, top-to-bottom order
+        individualChunks.sort(Comparator.<MapDataPayload.MapChunkData>comparingInt(
+                chunk -> ChunkPos.unpack(chunk.packedChunkPos()).z()
+        ).thenComparingInt(chunk -> ChunkPos.unpack(chunk.packedChunkPos()).x()));
 
+        //then we can go through the list and put together the chuinks that have the same metadata and adjacent, reducing data sent over the network
         List<MapDataPayload.MapChunkData> runs = new ArrayList<>();
         MapDataPayload.MapChunkData current = null;
         ChunkPos currentStart = null;
 
+        //now we iterate through the list, checking to see if the current chunk can be combined with the previous one
         for (MapDataPayload.MapChunkData chunk : individualChunks) {
             ChunkPos position = ChunkPos.unpack(chunk.packedChunkPos());
-            if (current != null
-                    && currentStart.z() == position.z()
+            if (current != null && currentStart.z() == position.z()
                     && currentStart.x() + current.runLength() == position.x()
-                    && sameChunkMetadata(current, chunk)) {
-                current = new MapDataPayload.MapChunkData(
-                        current.packedChunkPos(),
-                        current.runLength() + 1,
-                        current.ownerStateId(),
-                        current.settlementId(),
-                        current.garrisoned(),
-                        current.settlementTier(),
-                        current.contested()
-                );
+                    && sameChunkMetadata(current, chunk)) { //if statement checks chunks in the same row for same metadata/adjacency then combines them into one entry
+                current = new MapDataPayload.MapChunkData(current.packedChunkPos(),
+                        current.runLength() + 1, current.ownerStateId(), current.settlementId(),
+                        current.garrisoned(), current.settlementTier(), current.contested()); //add the current chunk and update the current entry in the list
                 runs.set(runs.size() - 1, current);
                 continue;
             }
-
             current = chunk;
             currentStart = position;
             runs.add(chunk);
         }
-
         return runs;
     }
 
-    //helper method to check if two chunks have the same metadata, used for compressing horizontal runs of chunks
-    private static boolean sameChunkMetadata(
-            MapDataPayload.MapChunkData left,
-            MapDataPayload.MapChunkData right
-    ) {
-        return left.ownerStateId().equals(right.ownerStateId())
-                && left.settlementId().equals(right.settlementId())
-                && left.garrisoned() == right.garrisoned()
-                && left.settlementTier() == right.settlementTier()
-                && left.contested() == right.contested();
+    private static boolean sameChunkMetadata(MapDataPayload.MapChunkData l, MapDataPayload.MapChunkData r) {
+        return l.ownerStateId().equals(r.ownerStateId())
+                && l.settlementId().equals(r.settlementId())
+                && l.garrisoned() == r.garrisoned()
+                && l.settlementTier() == r.settlementTier()
+                && l.contested() == r.contested();
     }
 
-    //helper method to determine if a chunk is visible to the player, based on the owner state ID, viewer state ID, fog of war, and scouted foreign chunks
-    private static boolean isChunkVisible(
-            ChunkPos position,
-            UUID ownerStateId,
-            UUID viewerStateId,
-            Set<UUID> warVisibleStateIds,
-            Set<Long> scoutedForeignChunks
-    ) {
-        return ownerStateId.equals(viewerStateId)
-                || warVisibleStateIds.contains(ownerStateId)
-                || scoutedForeignChunks.contains(position.pack());
+    //visibility helper function to determine if a chunk is visible to the player based on ownership, war visibility, or scouting
+    private static boolean isChunkVisible(ChunkPos position, UUID ownerStateId, UUID viewerStateId, Set<UUID> warVisible, Set<Long> scouted) {
+        return ownerStateId.equals(viewerStateId) || warVisible.contains(ownerStateId) || scouted.contains(position.pack());
     }
 
-    //helper method to find all foreign chunks that are adjacent to the player's own chunks, and return a set of their positions and the IDs of the bordering states
-    private static ScoutingResult findScoutedForeignChunks(
-            Map<ChunkPos, ChunkData> claims,
-            UUID viewerStateId
-    ) {
-        Set<Long> scoutedForeignChunks = new HashSet<>();
-        Set<UUID> borderingStates = new HashSet<>();
-
+    //helper function to find all scouted foreign chunks and their bordering state IDs, used for fog-of-war and visibility calculations
+    private static ScoutingResult findScoutedForeignChunks(Map<ChunkPos, ChunkData> claims, UUID viewerStateId) {
+        Set<Long> scouted = new HashSet<>();
+        Set<UUID> bordering = new HashSet<>();
         for (Map.Entry<ChunkPos, ChunkData> entry : claims.entrySet()) {
-            ChunkData ownData = entry.getValue();
-            if (!viewerStateId.equals(ownData.getOwnerUUID())) {
-                continue;
-            }
-
+            if (!viewerStateId.equals(entry.getValue().getOwnerUUID())) continue;
             ChunkPos position = entry.getKey();
-            for (int[] direction : CARDINAL_DIRECTIONS) {
-                ChunkPos neighborPosition = new ChunkPos(
-                        position.x() + direction[0],
-                        position.z() + direction[1]
-                );
-                ChunkData neighbor = claims.get(neighborPosition);
-                if (neighbor != null
-                        && neighbor.getOwnerUUID() != null
-                        && !viewerStateId.equals(neighbor.getOwnerUUID())) {
-                    scoutedForeignChunks.add(neighborPosition.pack());
-                    borderingStates.add(neighbor.getOwnerUUID());
+            for (int[] d : CARDINAL_DIRECTIONS) {
+                ChunkPos neighbor = new ChunkPos(position.x() + d[0], position.z() + d[1]);
+                ChunkData nd = claims.get(neighbor);
+                if (nd != null && nd.getOwnerUUID() != null && !viewerStateId.equals(nd.getOwnerUUID())) {
+                    scouted.add(neighbor.pack());
+                    bordering.add(nd.getOwnerUUID());
                 }
             }
         }
-
-        return new ScoutingResult(Set.copyOf(scoutedForeignChunks), Set.copyOf(borderingStates));
+        return new ScoutingResult(Set.copyOf(scouted), Set.copyOf(bordering));
     }
 
-    //method for storing "enemy" states, to be modified in sprint 4 and 5
     private static Set<UUID> getWarVisibleStateIds(StateData viewerState) {
-        return Set.of();
+        return Set.of(); // expanded in sprint 6+
     }
 
-    //this method will choose the capital settlement for each state, based on the highest tier and then alphabetically by name, and return a map of state ID to capital settlement ID
-    //not too sure if this is what i want, know to look here to adjust if needed
-    private static Map<UUID, UUID> chooseCapitalSettlements(
-            Collection<SettlementData> settlements,
-            Set<UUID> visibleStateIds
-    ) {
-        Map<UUID, SettlementData> bestByState = new HashMap<>();
-
-        for (SettlementData settlement : settlements) {
-            if (!visibleStateIds.contains(settlement.getOwningStateId())) {
-                continue;
-            }
-
-            bestByState.merge(
-                    settlement.getOwningStateId(),
-                    settlement,
-                    (left, right) -> {
-                        if (right.getSettlementTier() != left.getSettlementTier()) {
-                            return right.getSettlementTier() > left.getSettlementTier() ? right : left;
-                        }
-                        return right.getSettlementName().compareToIgnoreCase(left.getSettlementName()) < 0 ? right : left;
-                    }
-            );
+    //capital selection logic: for each state, choose the settlement with the highest tier, and if tied, the name that comes first alphabetically
+    private static Map<UUID, UUID> chooseCapitalSettlements(Collection<SettlementData> settlements, Set<UUID> visibleStateIds) {
+        Map<UUID, SettlementData> best = new HashMap<>();
+        for (SettlementData s : settlements) {
+            if (!visibleStateIds.contains(s.getOwningStateId())) continue;
+            best.merge(s.getOwningStateId(), s, (l, r) -> {
+                if (r.getSettlementTier() != l.getSettlementTier()) {
+                    return r.getSettlementTier() > l.getSettlementTier() ? r : l;
+                }
+                return r.getSettlementName().compareToIgnoreCase(l.getSettlementName()) < 0 ? r : l;
+            });
         }
-
         Map<UUID, UUID> result = new HashMap<>();
-        bestByState.forEach((stateId, settlement) -> result.put(stateId, settlement.getSettlementId()));
+        best.forEach((sid, s) -> result.put(sid, s.getSettlementId()));
         return result;
     }
 
-    //default names for provinces and settlements
+    //fallback province name generator for settlements without a name, using the first 8 characters of the settlement ID
     private static String fallbackProvinceName(String settlementId) {
-        if (settlementId == null || settlementId.isBlank()) {
-            return "Unnamed Province";
-        }
+        if (settlementId == null || settlementId.isBlank()) return "Unnamed Province";
         String shortId = settlementId.length() <= 8 ? settlementId : settlementId.substring(0, 8);
         return "Province " + shortId;
     }
 
-    private static String normalizeSettlementId(String settlementId) {
-        return settlementId == null ? "" : settlementId;
-    }
+    //normalizes a settlement ID, returning an empty string if it's null or blank
+    private static String normalizeSettlementId(String s) { return s == null ? "" : s; }
 
-    private record ScoutingResult(
-            Set<Long> scoutedForeignChunks,
-            Set<UUID> borderingStateIds
-    ) {}
+    private record ScoutingResult(Set<Long> scoutedForeignChunks, Set<UUID> borderingStateIds) {}
 
-    //builds an army map payload for a given player, which includes the positions of all legions owned by the player's state, and is used for displaying army icons on the map
-    // Phase 1 scope: only the viewer's own legions are included.
-    // Enemy visibility will be added in Sprint 6 alongside war-state logic.
+    //builds the netwoek army map payload
+    //gives 2 lists: a legion summary and an army summary, which are used to display the player's own units on the map
     public static ArmyMapPayload buildArmyPayload(ServerPlayer player) {
         ServerLevel level = player.level();
-        StateManager stateManager = StateManager.get(level);
         ArmyManager armyManager = ArmyManager.get(level);
+        StateData viewerState = StateManager.get(level).getStateByPlayer(player.getUUID());
+        if (viewerState == null) return ArmyMapPayload.empty();
 
-        StateData viewerState = stateManager.getStateByPlayer(player.getUUID());
-        if (viewerState == null) {
-            return ArmyMapPayload.empty();
-        }
+        UUID viewerStateId = viewerState.getStateId();
 
-        List<ArmyMapPayload.LegionSummary> summaries = new ArrayList<>();
-        for (Legion legion : armyManager.getLegionsForState(viewerState.getStateId())) {
+        //legion cohort list for legions wiith free cohorts, including their position, available soldiers, and average morale
+        List<ArmyMapPayload.LegionSummary> legionSummaries = new ArrayList<>();
+        for (Legion legion : armyManager.getLegionsForState(viewerStateId)) {
+            if (!legion.hasAvailableCohorts()) continue;
             BlockPos pos = legion.getStoredPosition();
-            ChunkPos chunkPos = new ChunkPos(pos.getX() >> 4, pos.getZ() >> 4);
-            summaries.add(new ArmyMapPayload.LegionSummary(
-                    legion.getLegionId(),
-                    legion.getOwningStateId(),
-                    chunkPos.pack(),
-                    new ArrayList<>(legion.getWaypoints()),
-                    legion.getTotalStrength(),       // total soldiers across all cohorts
-                    0,                              // morale: stub until per-cohort average is added
-                    Legion.DAILY_UPKEEP_EMERALDS    // maintenance cost per day
-            ));
+            ChunkPos cp = new ChunkPos(pos.getX() >> 4, pos.getZ() >> 4);
+            legionSummaries.add(new ArmyMapPayload.LegionSummary(
+                    legion.getLegionId(), legion.getOwningStateId(), cp.pack(),
+                    legion.getAvailableSoldiers(), legion.getAverageMorale()));
         }
 
-        return new ArmyMapPayload(summaries);
+        // Army summaries — all active Armies for this state
+        // Per-soldier upkeep: 750 emeralds per full 500-soldier legion = 1.5 per soldier/day (fix this, shouldnt have decimals for emeralds)
+        final double UPKEEP_PER_SOLDIER = 1.5;
+        List<ArmyMapPayload.ArmySummary> armySummaries = new ArrayList<>();
+        for (Army army : armyManager.getArmiesForState(viewerStateId)) {
+            BlockPos pos = army.getStoredPosition();
+            ChunkPos cp = new ChunkPos(pos.getX() >> 4, pos.getZ() >> 4);
+            int maintenance = (int) Math.round(army.getTotalStrength(armyManager) * UPKEEP_PER_SOLDIER);
+            armySummaries.add(new ArmyMapPayload.ArmySummary(
+                    army.getArmyId(), army.getOwningStateId(), cp.pack(),
+                    new ArrayList<>(army.getWaypoints()),
+                    army.getTotalStrength(armyManager),
+                    army.getBattleMorale(armyManager),
+                    maintenance, army.isEngaged(), army.getCurrentBattleId(), army.isOnCampaign()));
+        }
+
+        return new ArmyMapPayload(legionSummaries, armySummaries);
     }
 }

@@ -24,6 +24,13 @@ public class SettlementData {
     //siege protection variable
     private int localSiegeImmunityTicks;
 
+    /** note to either add or remove this feature later
+     * STUB — Martial Law flag set when an Army cohort garrisons this settlement during a campaign.
+     * Intended to grant a loyalty buff preventing revolts while loyalty levels stabilise.
+     * Loyalty system is not yet implemented; this flag has no game effect until then.
+     */
+    private boolean isMartialLaw = false;
+
     //biome tally system
     private final Map<String, Integer> biomeTallies;
 
@@ -46,7 +53,7 @@ public class SettlementData {
         this.guardTowerNodes = new ArrayList<>(); //arraylist for easy addition/removal of guard tower nodes
     }
 
-    // --- Getters & Setters ---
+    //getters and setters
     public UUID getSettlementId() { return settlementId; }
     public UUID getOwningStateId() { return owningStateId; }
     public String getSettlementName() { return settlementName; }
@@ -65,6 +72,10 @@ public class SettlementData {
         }
     }
     public boolean isLocallyImmune() { return this.localSiegeImmunityTicks > 0; }
+
+    // Martial Law stub (loyalty system pending)
+    public boolean isMartialLaw()                  { return isMartialLaw; }
+    public void setMartialLaw(boolean martialLaw)  { this.isMartialLaw = martialLaw; }
 
     //progression logic
     public void upgradeSettlement() {
@@ -127,6 +138,7 @@ public class SettlementData {
         tag.putInt("GarrisonCap", garrisonCapacity);
         tag.putInt("Radius", protectiveRadius);
         tag.putInt("LocalImmunity", localSiegeImmunityTicks);
+        tag.putBoolean("MartialLaw", isMartialLaw);
 
         // Biome tallies
         CompoundTag biomesTag = new CompoundTag();
@@ -158,6 +170,7 @@ public class SettlementData {
         settlement.garrisonCapacity = tag.getInt("GarrisonCap").orElse(50);
         settlement.localSiegeImmunityTicks = tag.getInt("LocalImmunity").orElse(0);
         settlement.protectiveRadius = tag.getInt("Radius").orElse(100);
+        settlement.isMartialLaw     = tag.getBoolean("MartialLaw").orElse(false);
 
         // Load biome tallies
         if (tag.contains("BiomeTallies")) {
