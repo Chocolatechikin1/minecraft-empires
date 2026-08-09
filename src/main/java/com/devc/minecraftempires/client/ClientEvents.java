@@ -1,6 +1,7 @@
 package com.devc.minecraftempires.client;
 
 import com.devc.minecraftempires.client.gui.screen.MapScreen;
+import com.devc.minecraftempires.client.map.ClientBattleData;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.inventory.InventoryScreen;
@@ -22,6 +23,8 @@ public final class ClientEvents {
                 minecraft.gui.setScreen(new MapScreen());
             }
         }
+
+        ClientBattleData.advanceTick(); //linear interpolation (lerp) for troop positions between server updates
 
         if (minecraft.gui.screen() instanceof MapScreen) {
             liveMapRefreshTicks++;

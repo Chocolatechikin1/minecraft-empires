@@ -11,6 +11,9 @@ import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
 import net.minecraft.util.datafix.DataFixTypes;
+import net.minecraft.tags.BiomeTags;
+import net.minecraft.core.Holder;
+import net.minecraft.world.level.biome.Biome;
 
 import java.util.Collection;
 import java.util.HashMap;
@@ -91,7 +94,7 @@ public class StateManager extends SavedData {
         this.setDirty();
     }
 
-    public void addFunds(UUID stateId, double amount) {
+    public void addFunds(UUID stateId, long amount) {
         StateData state = getState(stateId);
         if (state != null) {
             state.addFunds(amount);
@@ -141,44 +144,49 @@ public class StateManager extends SavedData {
 
     public void establishSettlementClaims(ServerLevel level, SettlementData settlement, UUID stateId) {
         BlockPos altarPos = settlement.getCenterAltarPos(); 
-        
-        // Convert the altar's block coordinates to chunk coordinates
-        int centerChunkX = altarPos.getX() >> 4;
-        int centerChunkZ = altarPos.getZ() >> 4;
-        ChunkPos centerChunkPos = new ChunkPos(centerChunkX, centerChunkZ);
-        
-        // Fetch the ClaimManager for this world to handle the chunk map
+        ChunkPos centerChunkPos = ChunkPos.containing(altarPos); 
         ClaimManager claimManager = ClaimManager.get(level);
 
-        //register the core chunk of the settlement in the ClaimManager
+        // Register the core chunk as the province centre
         claimManager.registerSettlementCenter(settlement.getSettlementId().toString(), centerChunkPos);
         
-        // Loop through a 3x3 chunk radius centered on the City Altar
-        for (int xOffset = -1; xOffset <= 1; xOffset++) {
-            for (int zOffset = -1; zOffset <= 1; zOffset++) {
-                int currentX = centerChunkX + xOffset;
-                int currentZ = centerChunkZ + zOffset;
-                
-                ChunkPos chunkPos = new ChunkPos(currentX, currentZ);
-                
-                //claim chunk, only if it is not already claimed 
-                if (!claimManager.isClaimed(chunkPos)) { 
+        int claimedCount = 0;
+
+        // Claim a 3×3 square (±1 chunk in both axes) around the altar.
+        // BFS was removed because 4-directional expansion produces a diamond/cross shape,
+        // not a square. A direct double-loop always gives exactly the 9 intended chunks.
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                ChunkPos candidate = new ChunkPos(centerChunkPos.x() + dx, centerChunkPos.z() + dz);
+
+                // Honour the water-biome stop (always claim the altar chunk itself regardless)
+                if (dx != 0 || dz != 0) {
+                    BlockPos checkPos = candidate.getMiddleBlockPosition(level.getSeaLevel());
+                    Holder<Biome> biomeHolder = level.getBiome(checkPos);
+                    if (biomeHolder.is(BiomeTags.IS_OCEAN) || biomeHolder.is(BiomeTags.IS_RIVER)) {
+                        continue; // skip water chunks
+                    }
+                }
+
+                // Only claim chunks that are not already owned by another state
+                if (!claimManager.isClaimed(candidate)) {
                     claimManager.setClaim(
-                        chunkPos, 
-                        stateId, 
-                        settlement.getSettlementId().toString(), 
-                        false, 
-                        1      
+                        candidate,
+                        stateId,
+                        settlement.getSettlementId().toString(),
+                        false,
+                        1
                     );
-                } 
+                    claimedCount++;
+                }
             }
         }
         
-        // Mark State data as dirty, and tell ClaimManager to mark its data as dirty too!
+        // Mark State data as dirty, and tell ClaimManager to mark its data as dirty too
         this.setDirty();
         claimManager.setDirty();
         
-        MinecraftEmpires.LOGGER.info("Established 9 automatic chunk claims for settlement: {}", settlement.getSettlementName());
+        MinecraftEmpires.LOGGER.info("Established {} chunk claims for settlement: {}", claimedCount, settlement.getSettlementName());
     }
 
     //saving and loading methods
