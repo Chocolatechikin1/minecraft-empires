@@ -35,26 +35,23 @@ public class BattleSession {
     }
 
     //stat constants (adjust as needed) - this will need rework
-    private static final double MELEE_RANGE          = 3.0;
-    private static final int    BASE_MELEE_DAMAGE    = 3;
-    private static final int    MELEE_MORALE_SHOCK   = 2;
-    private static final int    ROUT_CHAIN_SHOCK     = 10; // morale shock applied to adjacent cohorts when a cohort routs
+    private static final double MELEE_RANGE = 3.0;
+    private static final int BASE_MELEE_DAMAGE = 3;
+    private static final int MELEE_MORALE_SHOCK = 2;
+    private static final int ROUT_CHAIN_SHOCK = 10; // morale shock applied to adjacent cohorts when a cohort routs
 
-    /** Radius (in battle units) within which a routing cohort's aura drains friendly morale. */
-    private static final double MORALE_AURA_RADIUS   = 10.0;
-    private static final int    MORALE_AURA_DRAIN    = 1;  // morale drained per combat tick per nearby routing unit
+    private static final double MORALE_AURA_RADIUS = 10.0;
+    private static final int MORALE_AURA_DRAIN = 1;  // morale drained per combat tick per nearby routing unit
 
-    /** Deployment phase length — 30 seconds at 20 ticks/s. */
-    private static final int DEPLOYMENT_TICKS_MAX    = 600;
+    private static final int DEPLOYMENT_TICKS_MAX = 120;
 
-    /** After creation, auto-resolve is blocked for 60 s (players can open the map). */
-    private static final int INITIAL_GRACE_TICKS     = 1200;
+    private static final int INITIAL_GRACE_TICKS = 240;
 
-    /** After a spectating player leaves, auto-resolve is blocked for only 10 s. */
+    //auto resolve grace period after a player spectated and leaves is 10 seconds rather than 60
     private static final int ABANDONMENT_GRACE_TICKS = 200;
 
-    /** Melee clashes fire once every 40 ticks (2 s) to slow down combat. */
-    private static final int MELEE_TICK_INTERVAL     = 40;
+    /** Melee clashes fire once every 8 engine ticks (2 s) to slow down combat. */
+    private static final int MELEE_TICK_INTERVAL = 8;
 
     private final UUID battleId;
     private final UUID attackerArmyId;
