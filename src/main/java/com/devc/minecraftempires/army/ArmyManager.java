@@ -312,7 +312,8 @@ public class ArmyManager extends SavedData {
         double dx = target.getX() - current.getX();
         double dz = target.getZ() - current.getZ();
         double distance = Math.hypot(dx, dz);
-        double marchSpeed = 4.0; // blocks per tick (note: may be too fast, and could be adjusted based on terrain or other factors, adjust later)
+        // 0.2 blocks/tick = 4 blocks/second at 20 ticks/s (modify if needed later)
+        double marchSpeed = 0.2;
 
         if (distance <= marchSpeed) {
             setPos.accept(target);
@@ -363,6 +364,8 @@ public class ArmyManager extends SavedData {
             }
         }
 
+        // TODO: Once Detachments / Garrison Cohorts can leave a settlement as their own map entity,
+        //       this method must also check for Detachment-vs-Army and Detachment-vs-Legion collisions.
         //add the other military unit checkers here
         return false;
     }
@@ -483,8 +486,30 @@ public class ArmyManager extends SavedData {
                 return;
             }
 
-            // Try Legion (note: so campaigns should not disband legions, check this)
-            if (manager.activeLegions.containsKey(payload.armyId())) {
+            // Try Legion
+            Legion legion = manager.activeLegions.get(payload.armyId());
+            if (legion != null) {
+                // Block disbanding a Legion whose cohorts are actively deployed in a Campaign.
+                // Players must end the Campaign first before the Legion can be dissolved.
+                boolean inActiveCampaign = legion.getInfantryCohorts().stream().anyMatch(c -> {
+                    if (c.getAssignedArmyId() == null) return false;
+                    Army a = manager.activeArmies.get(c.getAssignedArmyId());
+                    return a != null && a.isOnCampaign();
+                }) || legion.getCavalrySquadrons().stream().anyMatch(c -> {
+                    if (c.getAssignedArmyId() == null) return false;
+                    Army a = manager.activeArmies.get(c.getAssignedArmyId());
+                    return a != null && a.isOnCampaign();
+                }) || legion.getAuxiliaries().stream().anyMatch(c -> {
+                    if (c.getAssignedArmyId() == null) return false;
+                    Army a = manager.activeArmies.get(c.getAssignedArmyId());
+                    return a != null && a.isOnCampaign();
+                });
+
+                if (inActiveCampaign) {
+                    player.sendSystemMessage(Component.literal("§cCannot disband a Legion that is actively deployed in a Campaign. End the Campaign first."));
+                    return;
+                }
+
                 manager.disbandLegion(payload.armyId());
                 manager.setDirty();
                 player.sendSystemMessage(Component.literal("§aLegion disbanded."));

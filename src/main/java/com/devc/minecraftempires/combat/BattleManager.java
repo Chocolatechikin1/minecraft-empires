@@ -120,20 +120,24 @@ public final class BattleManager {
 
                 broadcastSync(session, level);
             } else {
-                //if the battle is not being spectated, resolve it automatically
-                Army attackerArmy = armyManager.getArmy(session.getAttackerArmyId());
-                Army defenderArmy = armyManager.getArmy(session.getDefenderArmyId());
-                if (attackerArmy != null && defenderArmy != null) {
-                    AutoResolveEngine.BattleOutcome outcome =
-                            AutoResolveEngine.resolve(session, attackerArmy, defenderArmy, armyManager);
-                    MinecraftEmpires.LOGGER.info(
-                            "Auto-resolved battle {}: {} (att -{}, def -{}).",
-                            session.getBattleId(), outcome.result(),
-                            outcome.attackerCasualties(), outcome.defenderCasualties());
-                } else {
-                    session.setInactive();
+                //no spectator advances the idle timer.
+                //auto-resolve is blocked during the grace period so players have time to open the specator view
+                session.tickIdle();
+
+                if (session.isAutoResolveAllowed()) {
+                    //grace period has elapsed: resolve the battle automatically
+                    Army attackerArmy = armyManager.getArmy(session.getAttackerArmyId());
+                    Army defenderArmy = armyManager.getArmy(session.getDefenderArmyId());
+                    if (attackerArmy != null && defenderArmy != null) {
+                        AutoResolveEngine.BattleOutcome outcome = AutoResolveEngine.resolve(session, attackerArmy, defenderArmy, armyManager);
+                        MinecraftEmpires.LOGGER.info( "Auto-resolved battle {}: {} (att -{}, def -{}).", session.getBattleId(), outcome.result(), outcome.attackerCasualties(), outcome.defenderCasualties());
+                    }
+                    else{
+                        session.setInactive();
+                    }
+                    toFinish.add(session.getBattleId());
                 }
-                toFinish.add(session.getBattleId());
+                // else: still within the grace period — do nothing this tick
             }
 
             if (!session.isActive()) toFinish.add(session.getBattleId());

@@ -13,7 +13,7 @@ import java.util.List;
 import java.util.UUID;
 
 //position, morale and health tracking for all cohorts in a battle. server to client
-public record BattleSyncPayload(UUID battleId, List<CohortSnapshot> attackerCohorts, List<CohortSnapshot> defenderCohorts) implements CustomPacketPayload {
+public record BattleSyncPayload(UUID battleId, List<CohortSnapshot> attackerCohorts, List<CohortSnapshot> defenderCohorts, String battlePhase, int deploymentTicksRemaining) implements CustomPacketPayload {
     public static final Type<BattleSyncPayload> TYPE = new Type<>(Identifier.fromNamespaceAndPath(MinecraftEmpires.MODID, "battle_sync"));
     public static final StreamCodec<RegistryFriendlyByteBuf, BattleSyncPayload> STREAM_CODEC = StreamCodec.ofMember(BattleSyncPayload::write, BattleSyncPayload::new);
 
@@ -21,7 +21,9 @@ public record BattleSyncPayload(UUID battleId, List<CohortSnapshot> attackerCoho
         this(
             buf.readUUID(),
             readSnapshots(buf),
-            readSnapshots(buf)
+            readSnapshots(buf),
+            buf.readUtf(),
+            buf.readVarInt()
         );
     }
 
@@ -30,6 +32,8 @@ public record BattleSyncPayload(UUID battleId, List<CohortSnapshot> attackerCoho
         buf.writeUUID(battleId);
         writeSnapshots(buf, attackerCohorts);
         writeSnapshots(buf, defenderCohorts);
+        buf.writeUtf(battlePhase);
+        buf.writeVarInt(deploymentTicksRemaining);
     }
 
     //helper methods for encoding/decoding lists of CohortSnapshot objects
@@ -54,7 +58,9 @@ public record BattleSyncPayload(UUID battleId, List<CohortSnapshot> attackerCoho
         return new BattleSyncPayload(
                 session.getBattleId(),
                 snapshotList(session.getAttackerCohorts()),
-                snapshotList(session.getDefenderCohorts())
+                snapshotList(session.getDefenderCohorts()),
+                session.getPhase().name(),
+                session.getDeploymentTicksRemaining()
         );
     }
 

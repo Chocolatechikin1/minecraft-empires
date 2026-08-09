@@ -18,7 +18,7 @@ public class StateData {
     private final List<UUID> ownedSettlements;
     
     //economy variables
-    private double treasuryBalance;
+    private long treasuryBalance;
     private int totalPopulation;
 
     //state war data
@@ -32,7 +32,7 @@ public class StateData {
         this.leaderId = leaderId;
         this.currentTier = startingTier;
         this.ownedSettlements = new ArrayList<>();
-        this.treasuryBalance = 0.0;
+        this.treasuryBalance = 0L;
         this.totalPopulation = 0;
         this.siegeImmunityTicks = 0;
         this.campaignMomentumTicks = 0;
@@ -59,18 +59,18 @@ public class StateData {
     public void removeSettlement(UUID settlementId) { ownedSettlements.remove(settlementId); }
 
     //economy and tier methods
-    public double getTreasuryBalance(){ 
+    public long getTreasuryBalance(){ 
         return treasuryBalance; 
     }
     
     //add emeralds
-    public void addFunds(double amount){ 
+    public void addFunds(long amount){ 
         this.treasuryBalance += amount; 
     }
     
     //deduct emeralds and ensure it doesn't go below 0
-    public void deductFunds(double amount){ 
-        this.treasuryBalance = Math.max(0, this.treasuryBalance - amount); 
+    public void deductFunds(long amount){ 
+        this.treasuryBalance = Math.max(0L, this.treasuryBalance - amount); 
     }
 
     //get population
@@ -135,7 +135,7 @@ public class StateData {
             tag.putString("LeaderId", leaderId.toString());
         }
         tag.putString("StateTier", currentTier.name());
-        tag.putDouble("Treasury", treasuryBalance);
+        tag.putLong("Treasury", treasuryBalance);
         tag.putInt("Population", totalPopulation);
         tag.putInt("SiegeImmunity", siegeImmunityTicks);
         tag.putInt("CampaignMomentum", campaignMomentumTicks);
@@ -162,7 +162,7 @@ public class StateData {
         StateTier tier = StateTier.valueOf(tierName);
         
         StateData state = new StateData(sId, sName, lId, tier);
-        state.treasuryBalance = tag.getDouble("Treasury").orElse(0.0);
+        state.treasuryBalance = tag.getLong("Treasury").orElse(0L);
         state.totalPopulation = tag.getInt("Population").orElse(0);
         state.siegeImmunityTicks = tag.getInt("SiegeImmunity").orElse(0);
         state.campaignMomentumTicks = tag.getInt("CampaignMomentum").orElse(0);

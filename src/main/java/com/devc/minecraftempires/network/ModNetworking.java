@@ -19,9 +19,17 @@ import com.devc.minecraftempires.network.packet.ComposeArmyPayload;
 import com.devc.minecraftempires.network.packet.DispatchLegionPayload;
 import com.devc.minecraftempires.network.packet.GarrisonCohortPayload;
 
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
+
 //registering and handling the custom packets for requesting and sending map data between the client and server
 public final class ModNetworking {
     private ModNetworking() {}
+
+    //tracks the last time a player opened the map, done to prevent spamming
+    private static final Map<UUID, Long> mapRequestCooldowns = new HashMap<>();
+    private static final long MAP_REQUEST_COOLDOWN_MS = 2000L; // 2 seconds between map refreshes
 
     public static void registerPayloads(RegisterPayloadHandlersEvent event) {
         PayloadRegistrar registrar = event.registrar("1");
@@ -80,6 +88,14 @@ public final class ModNetworking {
         if (!(context.player() instanceof ServerPlayer player)) {
             return;
         }
+
+        //checks to see last time player requested map data, if it was less than 2 seconds ago, ignore the request
+        long now = System.currentTimeMillis();
+        Long lastRequest = mapRequestCooldowns.get(player.getUUID());
+        if (lastRequest != null && (now - lastRequest) < MAP_REQUEST_COOLDOWN_MS) {
+            return; // still within cooldown — silently drop the request
+        }
+        mapRequestCooldowns.put(player.getUUID(), now);
 
         PacketDistributor.sendToPlayer(player, MapDataService.buildPayload(player));
         PacketDistributor.sendToPlayer(player, MapDataService.buildArmyPayload(player));

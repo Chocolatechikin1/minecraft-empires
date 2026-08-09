@@ -35,12 +35,12 @@ public class EconomyTickHandler {
         
         for (StateData state : manager.getAllStates()) {
             
-            //calculates tax revenue
-            double taxRevenue = calculateTax(state);
-            //calculates maintenance costs (now includes Legion upkeep)
-            double maintenanceCost = calculateMaintenance(state, claimManager, armyManager);
+            //calculates tax revenue (whole-number emeralds)
+            long taxRevenue = calculateTax(state);
+            //calculates maintenance costs — whole-number emeralds, no decimals
+            long maintenanceCost = calculateMaintenance(state, claimManager, armyManager);
             //applies net to treasury
-            double netProfit = taxRevenue - maintenanceCost;
+            long netProfit = taxRevenue - maintenanceCost;
             
             if (netProfit > 0) {
                 state.addFunds(netProfit);
@@ -64,27 +64,27 @@ public class EconomyTickHandler {
     }
 
     //all math formulas for economy are here, can be adjusted later for balance
-    private static double calculateTax(StateData state) {
+    private static long calculateTax(StateData state) {
         //base income per tier (e.g. Empire yields more base tax than a County)
-        double baseIncome = state.getCurrentTier().ordinal() * 50.0; 
-        
-        //income scaled strictly by population (e.g., 0.5 emeralds/coins per citizen)
-        double popIncome = state.getTotalPopulation() * 0.5; 
-        
+        long baseIncome = (long)(state.getCurrentTier().ordinal() * 50);
+
+        //income scaled by population: 1 emerald per 2 citizens (integer math, no decimals)
+        long popIncome = state.getTotalPopulation() / 2;
+
         return baseIncome + popIncome;
     }
 
-    private static double calculateMaintenance(StateData state, ClaimManager claimManager, ArmyManager armyManager) {
+    private static long calculateMaintenance(StateData state, ClaimManager claimManager, ArmyManager armyManager) {
         //higher tiers cost more inherently to maintain
-        double baseMaintenance = state.getCurrentTier().ordinal() * 75.0;
+        long baseMaintenance = (long)(state.getCurrentTier().ordinal() * 75);
 
         //get land upkeep costs
         int ownedChunks = claimManager.getClaimCountForState(state.getStateId());
-        double chunkCost = ownedChunks * 2.0; //2 emeralds per chunk per day
+        long chunkCost = ownedChunks * 2L; //2 emeralds per chunk per day
 
-        //legion upkeep: 1.5 emeralds per soldier per day (750 per full 500-soldier legion) (fix this, shouldnt have decimals for emeralds)
+        //legion upkeep: flat 1 emerald per soldier per day (no decimal math)
         int totalSoldiers = armyManager.getLegionsForState(state.getStateId()).stream().mapToInt(Legion::getTotalSoldiers).sum();
-        double legionCost = totalSoldiers * 1.5;
+        long legionCost = totalSoldiers * 1L;
 
         return baseMaintenance + chunkCost + legionCost;
     }

@@ -86,6 +86,22 @@ public final class BattleGridWidget {
 
         // Coordinates display
         drawCoordinates(graphics, font, mouseX, mouseY);
+
+        //check if we are in the deployment phase, if we are draw a timer
+        if("DEPLOYMENT".equals(data.battlePhase())){
+            //convert the ticks into seconds (note 20 ticks is one second)
+            int seconds = data.deploymentTicksRemaining() / 20;
+            String banner = "Deployment Phase: " + seconds + "s remaining";
+
+            //render banner
+            int textWidth = font.width(banner);
+            int bannerX = x + (width - textWidth) / 2;
+            int bannerY = y + 10;
+
+            //semi transparent black background box
+            graphics.fill(bannerX - 5, bannerY - 2, bannerX + textWidth + 5, bannerY + font.lineHeight + 2, 0xAA000000);
+            graphics.text(font, Component.literal(banner), bannerX, bannerY, 0xFFFFDD55);
+        }
     }
 
     //window grid function, draws the grid lines for the battle map, based on the current zoom level and center position

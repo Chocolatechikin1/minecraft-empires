@@ -12,6 +12,13 @@ import java.util.*;
  *
  * Lifecycle: created by BattleManager.startBattle() → ticked by BattleTickHandler every few server ticks
  *            → resolved (ATTACKER_WINS / DEFENDER_WINS) → cleaned up by BattleManager.
+ *
+ * Pacing notes:
+ *  - DEPLOYMENT phase lasts 30 s (600 ticks). Cohorts accept waypoints but don't march or fight.
+ *  - Idle grace period: 60 s (1200 ticks) on first creation; drops to 10 s (200 ticks) if a player
+ *    spectates and then leaves. BattleManager auto-resolves only after this threshold is exceeded.
+ *  - Melee damage fires every 40 ticks (2 s) to slow down combat. Movement still ticks every 5 ticks.
+ *  - Routing cohorts passively drain -1 morale per combat tick from nearby friendly units (morale aura).
  */
 //okay explanation ill keep it
 public class BattleSession {
@@ -21,11 +28,33 @@ public class BattleSession {
         DEFENDER_WINS
     }
 
+    /** Two-phase battle flow: troops deploy first, then engage. */
+    public enum BattlePhase {
+        DEPLOYMENT,
+        ENGAGEMENT
+    }
+
     //stat constants (adjust as needed) - this will need rework
-    private static final double MELEE_RANGE = 3.0;
-    private static final int BASE_MELEE_DAMAGE = 3;
-    private static final int MELEE_MORALE_SHOCK = 2;
-    private static final int ROUT_CHAIN_SHOCK = 10; // morale shock applied to adjacent cohorts when a cohort routs
+    private static final double MELEE_RANGE          = 3.0;
+    private static final int    BASE_MELEE_DAMAGE    = 3;
+    private static final int    MELEE_MORALE_SHOCK   = 2;
+    private static final int    ROUT_CHAIN_SHOCK     = 10; // morale shock applied to adjacent cohorts when a cohort routs
+
+    /** Radius (in battle units) within which a routing cohort's aura drains friendly morale. */
+    private static final double MORALE_AURA_RADIUS   = 10.0;
+    private static final int    MORALE_AURA_DRAIN    = 1;  // morale drained per combat tick per nearby routing unit
+
+    /** Deployment phase length — 30 seconds at 20 ticks/s. */
+    private static final int DEPLOYMENT_TICKS_MAX    = 600;
+
+    /** After creation, auto-resolve is blocked for 60 s (players can open the map). */
+    private static final int INITIAL_GRACE_TICKS     = 1200;
+
+    /** After a spectating player leaves, auto-resolve is blocked for only 10 s. */
+    private static final int ABANDONMENT_GRACE_TICKS = 200;
+
+    /** Melee clashes fire once every 40 ticks (2 s) to slow down combat. */
+    private static final int MELEE_TICK_INTERVAL     = 40;
 
     private final UUID battleId;
     private final UUID attackerArmyId;
@@ -41,6 +70,13 @@ public class BattleSession {
     private boolean isActive;
     private BattleResult result = BattleResult.ONGOING;
 
+    //deployment phase tracking
+    private BattlePhase phase = BattlePhase.DEPLOYMENT;
+    private int deploymentTicks  = 0;
+    private int  idleTicks = 0;
+    private boolean wasEverSpectated = false;
+    private int combatTickCounter = 0;
+
     //set that tracks number of spectating players
     private final Set<UUID> spectatingPlayerIds = new HashSet<>();
 
@@ -55,23 +91,59 @@ public class BattleSession {
         this.isActive        = true;
     }
 
+    //grace period checker function, returns true if the battle is still in the grace period and cannot be auto-resolved
+    public boolean isAutoResolveAllowed() {
+        int threshold = wasEverSpectated ? ABANDONMENT_GRACE_TICKS : INITIAL_GRACE_TICKS;
+        return idleTicks >= threshold;
+    }
+
+    //resets if a player returns to spectate
+    public void resetIdleTicks() {
+        idleTicks = 0;
+    }
+
     //tick simulator for when a player is spectating
     public void tick() {
         if (!isActive) return;
 
-        //move all non-routing cohorts toward their next waypoint
+        //deplyoment phase: cohorts can be moved but do not march or fight, after 30 seconds the battle enters engagement phase
+        if (phase == BattlePhase.DEPLOYMENT) {
+            deploymentTicks++;
+            if (deploymentTicks >= DEPLOYMENT_TICKS_MAX) {
+                phase = BattlePhase.ENGAGEMENT;
+            }
+            return; // skip movement and combat until ENGAGEMENT
+        }
+
+        //start of engagement phase
         attackerCohorts.forEach(CohortData::tickMovement);
         defenderCohorts.forEach(CohortData::tickMovement);
 
-        //melee clash: check for overlapping cohorts across sides
-        processMeleeClashes();
+        //combat tick counter, melee clashes and morale auras only happen every 40 ticks (2 seconds) to slow down combat
+        combatTickCounter++;
+        if (combatTickCounter >= MELEE_TICK_INTERVAL) {
+            combatTickCounter = 0;
 
-        //propagate morale chain-panic for newly routed cohorts (ensure this isnt actually being done each tick, pretty much instant rout here)
+            //melee clash: check for overlapping cohorts across sides
+            processMeleeClashes();
+
+            //morale aura: routing cohorts drain morale from nearby friendly units
+            //TODO: make sure that morale loss aura isnt applied every time for some reason
+            processMoraleAuras(attackerCohorts);
+            processMoraleAuras(defenderCohorts);
+        }
+
+        //propagate morale chain-panic for newly routed cohorts (ensure this isn't actually being done each tick, pretty much instant rout here)
         processNewlyRouted(attackerCohorts);
         processNewlyRouted(defenderCohorts);
 
         //check end conditions
         checkBattleEnd();
+    }
+
+    //idle tick counter function, called when no players are spectating the battle, increments idleTicks by 1
+    public void tickIdle() {
+        idleTicks++;
     }
 
     //combat damage function
@@ -87,6 +159,27 @@ public class BattleSession {
                     int dDmg = Math.max(1, (int)(defender.getStrength() / 50.0 * BASE_MELEE_DAMAGE));
                     attacker.applyDamage(dDmg, MELEE_MORALE_SHOCK);
                     defender.applyDamage(aDmg, MELEE_MORALE_SHOCK);
+                }
+            }
+        }
+    }
+
+    /** keep for now, remove this comment later
+     * Morale aura: any routing cohort continuously drains -1 morale per combat tick
+     * from all friendly units within MORALE_AURA_RADIUS. This implements the
+     * "chain-panic" mechanic as a spatial Aura effect rather than a one-time neighbour shock.
+     *
+     * @param cohorts The list of cohorts on one side (attackers or defenders).
+     */
+    private void processMoraleAuras(List<CohortData> cohorts) {
+        for (CohortData routing : cohorts) {
+            if (!routing.isRouting() || !routing.isAlive()) continue;
+
+            for (CohortData friendly : cohorts) {
+                if (friendly == routing || !friendly.isAlive() || friendly.isRouting()) continue;
+
+                if (routing.getPosition().distance(friendly.getPosition()) <= MORALE_AURA_RADIUS) {
+                    friendly.applyMoraleShock(MORALE_AURA_DRAIN);
                 }
             }
         }
@@ -154,8 +247,12 @@ public class BattleSession {
         return Optional.empty();
     }
 
-    //specrator management getters
-    public void addSpectator(UUID playerId)    { spectatingPlayerIds.add(playerId); }
+    //spectator management getters
+    public void addSpectator(UUID playerId) {
+        spectatingPlayerIds.add(playerId);
+        wasEverSpectated = true; // once a player has joined, abandonment threshold applies on leave
+        idleTicks = 0;           // reset idle counter while someone is watching
+    }
     public void removeSpectator(UUID playerId) { spectatingPlayerIds.remove(playerId); }
     public boolean isSpectated()               { return !spectatingPlayerIds.isEmpty(); }
     public Set<UUID> getSpectatingPlayerIds()  { return Collections.unmodifiableSet(spectatingPlayerIds); }
@@ -170,5 +267,7 @@ public class BattleSession {
     public List<CohortData> getDefenderCohorts()  { return Collections.unmodifiableList(defenderCohorts); }
     public boolean          isActive()            { return isActive; }
     public BattleResult     getResult()           { return result; }
+    public BattlePhase      getPhase()            { return phase; }
+    public int              getDeploymentTicksRemaining() { return Math.max(0, DEPLOYMENT_TICKS_MAX - deploymentTicks); }
     public void             setInactive()         { isActive = false; }
 }

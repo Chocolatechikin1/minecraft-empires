@@ -98,7 +98,7 @@ public class StateManager extends SavedData {
         this.setDirty();
     }
 
-    public void addFunds(UUID stateId, double amount) {
+    public void addFunds(UUID stateId, long amount) {
         StateData state = getState(stateId);
         if (state != null) {
             state.addFunds(amount);

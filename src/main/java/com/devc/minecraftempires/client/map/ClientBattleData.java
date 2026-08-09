@@ -32,13 +32,17 @@ public final class ClientBattleData {
         snapshot = Snapshot.from(payload, prev);
     }
 
+    public static void advanceTick() {
+        snapshot = snapshot.advanceTick();
+    }
+
     public static void clear() {
         snapshot = Snapshot.empty();
     }
 
-    public record Snapshot(UUID battleId, Map<UUID, CohortRenderState> cohorts) {
+    public record Snapshot(UUID battleId, Map<UUID, CohortRenderState> cohorts, String battlePhase, int deploymentTicksRemaining, int ticksSinceLastPacket) {
         static Snapshot empty() {
-            return new Snapshot(null, Map.of());
+            return new Snapshot(null, Map.of(), "DEPLOYMENT", 0, 0);
         }
 
         //if no previous snapshot is available, create a new snapshot from the given payload with no previous positions for lerp
@@ -54,23 +58,34 @@ public final class ClientBattleData {
                 map.put(s.cohortId(), CohortRenderState.from(s, old, false));
             }
 
-            return new Snapshot(payload.battleId(), Collections.unmodifiableMap(map));
+            return new Snapshot(payload.battleId(), Collections.unmodifiableMap(map), payload.battlePhase(), payload.deploymentTicksRemaining(), 0);
+        }
+
+        //called each client tick to advance the snapshot's tick counter, used for lerp calculations
+        public Snapshot advanceTick() {
+            return new Snapshot(battleId, cohorts, battlePhase, deploymentTicksRemaining, ticksSinceLastPacket + 1);
         }
 
         public boolean hasData() { return battleId != null && !cohorts.isEmpty(); }
+
+        public boolean isDeploymentPhase() { return "DEPLOYMENT".equals(battlePhase); }
 
        //x coordinate lerp function, returns the interpolated X coordinate for a cohort at a given partialTick (0.0 – 1.0)
         public double getRenderX(UUID cohortId, float partialTick) {
             CohortRenderState state = cohorts.get(cohortId);
             if (state == null) return 0;
-            return state.prevX + (state.currentX - state.prevX) * partialTick;
+            //lerp spans the full 5-tick server update window for smooth 60fps rendering.
+            float t = (ticksSinceLastPacket + partialTick) / 5.0f;
+            return state.prevX + (state.currentX - state.prevX) * t;
         }
 
         //z coordinate lerp function, returns the interpolated Z coordinate for a cohort at a given partialTick (0.0 – 1.0)
         public double getRenderZ(UUID cohortId, float partialTick) {
             CohortRenderState state = cohorts.get(cohortId);
             if (state == null) return 0;
-            return state.prevZ + (state.currentZ - state.prevZ) * partialTick;
+            //lerp spans the full 5-tick server update window for smooth 60fps rendering.
+            float t = (ticksSinceLastPacket + partialTick) / 5.0f;
+            return state.prevZ + (state.currentZ - state.prevZ) * t;
         }
     }
 
