@@ -1,5 +1,6 @@
 package com.devc.minecraftempires.combat;
 
+import com.devc.minecraftempires.army.ArmyManager;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 
@@ -14,8 +15,10 @@ public final class BattleTickHandler {
         int tick = event.getServer().getTickCount();
         if (tick % TICK_INTERVAL != 0) return;
 
-        event.getServer().getAllLevels().forEach(level ->
-                BattleManager.get(level).tick(level)
-        );
+        event.getServer().getAllLevels().forEach(level -> {
+            BattleManager.get(level).tick(level);
+            // Advance Legion and Army waypoint movement each tick interval
+            ArmyManager.get(level).tickArmies(level);
+        });
     }
 }

@@ -62,7 +62,14 @@ public final class MapScreen extends Screen {
         ClientNetworking.requestMapData();
     }
 
-
+    @Override
+    public void tick() {
+        super.tick();
+        // Request map data every 1 second (20 ticks) to animate army movement
+        if (this.minecraft != null && this.minecraft.level != null && this.minecraft.level.getGameTime() % 20 == 0) {
+            ClientNetworking.requestMapData();
+        }
+    }
 
     //renders the map widget and the details panel, which shows information about the selected chunk, settlement, and state
     @Override

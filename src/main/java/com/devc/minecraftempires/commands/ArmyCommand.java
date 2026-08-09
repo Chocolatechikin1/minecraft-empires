@@ -24,6 +24,9 @@ public class ArmyCommand {
                         .executes(ArmyCommand::executeRaise)
                     )
                 )
+                .then(Commands.literal("testbattle")
+                    .executes(BattleTestCommand::executeTestBattle)
+                )
         );
     }
 

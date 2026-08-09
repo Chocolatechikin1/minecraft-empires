@@ -49,8 +49,11 @@ public final class ClientNetworking {
         Minecraft.getInstance().execute(() -> { //executes a client thread to host the battle
             Minecraft mc = Minecraft.getInstance(); //get the instance of the Minecraft client
             if (mc.player != null) { //creates a new battle map screen and sets it as the current screen for the player
-                mc.gui.setScreen(new BattleMapScreen(payload.battleId(),payload.attackerArmyId(),payload.defenderArmyId()
-                ));
+                if (mc.gui.screen() instanceof BattleMapScreen) return; // Break the infinite open loop
+                ClientBattleData.clear(); //clear any stale data
+                mc.gui.setScreen(new BattleMapScreen(payload.battleId(),payload.attackerArmyId(),payload.defenderArmyId()));
+                //sends request to server to request a packet to spectate the battle, which will send the client the current state of the battle
+                requestSpectate(payload.battleId());
             }
         });
     }

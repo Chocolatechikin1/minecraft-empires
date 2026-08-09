@@ -2,12 +2,14 @@ package com.devc.minecraftempires.client.gui.screen;
 
 import com.devc.minecraftempires.client.map.ClientBattleData;
 import com.devc.minecraftempires.client.gui.widget.BattleGridWidget;
+import com.devc.minecraftempires.network.packet.RequestSpectatePayload;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.input.KeyEvent;
 import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.network.chat.Component;
+import net.neoforged.neoforge.client.network.ClientPacketDistributor;
 import org.lwjgl.glfw.GLFW;
 
 import java.util.List;
@@ -20,9 +22,10 @@ import java.util.UUID;
  * ┌──────────────────┬────────────────────────────┬──────────────────┐
  * │  LEFT PANE       │   CENTER — BattleGridWidget │  RIGHT PANE      │
  * │  (micro-mgmt)    │   (tactical canvas)         │  (macro-mgmt)    │
- * │  160px           │   fills remaining space     │  180px           │
+ * │  130px           │   fills remaining space     │  150px           │
  * └──────────────────┴────────────────────────────┴──────────────────┘
- *                         ↑ Control tooltips (bottom-right corner)
+ *  ↑ Both side panels stop at height-20 so the bottom bar is never covered.
+ *                         ↑ Control tooltips (bottom bar)
  *
  * Left pane:  Stats for the selected cohort (Endurance, Strength, Health, Speed, Morale)
  *             + "Move Cohort" and "Auto-Resolve" action buttons.
@@ -31,19 +34,22 @@ import java.util.UUID;
  *             collapsible unit tree (Cohorts 1–N, Squadrons 1–N).
  */
 public final class BattleMapScreen extends Screen {
-    private static final int LEFT_PANE_W = 160;
-    private static final int RIGHT_PANE_W = 180;
+    private static final int LEFT_PANE_W  = 130;
+    private static final int RIGHT_PANE_W = 150;
     private static final int MARGIN = 0;
 
     // ── Dark / accent palette (matches MapScreen aesthetic) ───────────────────
-    private static final int BG_PANEL = 0xEE0D1218; //dark red
-    private static final int DIVIDER = 0xFF657381; //gray
+    private static final int BG_PANEL    = 0xEE0D1218; //dark panel
+    private static final int DIVIDER     = 0xFF657381; //gray
     private static final int ACCENT_GOLD = 0xFFFFD45A; //gold
-    private static final int TEXT_LABEL = 0xFFAAB4BE; //light gray
-    private static final int TEXT_VALUE = 0xFFF3F5F7; //white
-    private static final int TEXT_HINT = 0xFF87939E; //medium gray
-    private static final int TEXT_RED = 0xFFFF4444; //red
-    private static final int TEXT_GREEN = 0xFF44FF44; //green
+    private static final int TEXT_LABEL  = 0xFFAAB4BE; //light gray
+    private static final int TEXT_VALUE  = 0xFFF3F5F7; //white
+    private static final int TEXT_HINT   = 0xFF87939E; //medium gray
+    private static final int TEXT_RED    = 0xFFFF4444; //red
+    private static final int TEXT_GREEN  = 0xFF44FF44; //green
+
+    // Height of the bottom control bar — panels must not extend below this boundary
+    private static final int BOTTOM_BAR_H = 20;
 
     private final UUID battleId;
     private final UUID attackerLegionId;
@@ -64,27 +70,35 @@ public final class BattleMapScreen extends Screen {
     protected void init() {
         super.init();
 
+        // Automatically register this player as a spectator so the server starts
+        // ticking the BattleSession and streaming BattleSyncPayload packets.
+        // Without this, the deployment timer never appears and the phase never transitions.
+        ClientPacketDistributor.sendToServer(new RequestSpectatePayload(battleId));
+
         int centerX = LEFT_PANE_W;
         int centerW = this.width - LEFT_PANE_W - RIGHT_PANE_W;
-        int centerH = this.height - 30; // leave room for bottom bar
+        int centerH = this.height - BOTTOM_BAR_H; // leave room for bottom bar
 
         grid = new BattleGridWidget(centerX, 0, centerW, centerH, battleId, attackerLegionId, defenderLegionId);
 
+        // Buttons sit above the bottom bar: moved up by 20 px relative to the old positions
         //auto resolve button in the left pane
-        this.addRenderableWidget(Button.builder(Component.literal("Auto-Resolve"), btn -> autoResolve()).bounds(8, this.height - 54, LEFT_PANE_W - 16, 20).build());
+        this.addRenderableWidget(Button.builder(Component.literal("Auto-Resolve"), btn -> autoResolve()).bounds(8, this.height - 74, LEFT_PANE_W - 16, 20).build());
 
         //close button in left pane
-        this.addRenderableWidget(Button.builder(Component.literal("Close"), btn -> this.onClose()).bounds(8, this.height - 30, LEFT_PANE_W - 16, 20).build());
+        this.addRenderableWidget(Button.builder(Component.literal("Close"), btn -> this.onClose()).bounds(8, this.height - 50, LEFT_PANE_W - 16, 20).build());
 
         //toggle composition tree in right pane
-        this.addRenderableWidget(Button.builder(Component.literal("▶ By Unit"), btn -> { compositionExpanded = !compositionExpanded; }).bounds(this.width - RIGHT_PANE_W + 8, 120, RIGHT_PANE_W - 16, 16).build());
+        this.addRenderableWidget(Button.builder(Component.literal("▶ By Unit"), btn -> { compositionExpanded = !compositionExpanded; }).bounds(this.width - RIGHT_PANE_W + 8, 140, RIGHT_PANE_W - 16, 16).build());
     }
 
     @Override
     public void extractRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {
-        // Left pane
-        graphics.fill(0, 0, LEFT_PANE_W, this.height, BG_PANEL);
-        graphics.fill(LEFT_PANE_W - 2, 0, LEFT_PANE_W, this.height, DIVIDER);
+        int panelH = this.height - BOTTOM_BAR_H; // panels stop before the bottom bar
+
+        // Left pane — capped at panelH so it never covers the bottom bar
+        graphics.fill(0, 0, LEFT_PANE_W, panelH, BG_PANEL);
+        graphics.fill(LEFT_PANE_W - 2, 0, LEFT_PANE_W, panelH, DIVIDER);
         drawLeftPane(graphics, mouseX, mouseY);
 
         // Center tactical canvas
@@ -92,12 +106,12 @@ public final class BattleMapScreen extends Screen {
             grid.render(graphics, this.font, mouseX, mouseY, partialTick);
         }
 
-        // Right pane
-        graphics.fill(this.width - RIGHT_PANE_W, 0, this.width, this.height, BG_PANEL);
-        graphics.fill(this.width - RIGHT_PANE_W, 0, this.width - RIGHT_PANE_W + 2, this.height, DIVIDER);
+        // Right pane — capped at panelH so it never covers the bottom bar
+        graphics.fill(this.width - RIGHT_PANE_W, 0, this.width, panelH, BG_PANEL);
+        graphics.fill(this.width - RIGHT_PANE_W, 0, this.width - RIGHT_PANE_W + 2, panelH, DIVIDER);
         drawRightPane(graphics);
 
-        // Bottom control hint bar
+        // Bottom control hint bar — drawn last so it always wins
         drawBottomBar(graphics);
 
         super.extractRenderState(graphics, mouseX, mouseY, partialTick);
@@ -144,8 +158,8 @@ public final class BattleMapScreen extends Screen {
 
         // Stats display
         y = drawStatRow(graphics, x, y, "Troops",  cohort.currentHealth + "/" + cohort.maxHealth);
-        y = drawStatBar(graphics, x, y, "Morale",  cohort.morale,  100, cohort.morale > 50 ? 0xFF55CC55 : cohort.morale > 25 ? 0xFFDDCC33 : 0xFFCC3333);
-        y = drawStatBar(graphics, x, y, "HP",      cohort.currentHealth, cohort.maxHealth, 0xFF4499CC);
+        y = drawStatBar(graphics, x, y, "Morale",  cohort.morale,  100, cohort.morale > 50 ? 0xFF55CC55 : cohort.morale > 25 ? 0xFFDDCC33 : 0xFFCC3333, LEFT_PANE_W - 16);
+        y = drawStatBar(graphics, x, y, "HP",      cohort.currentHealth, cohort.maxHealth, 0xFF4499CC, LEFT_PANE_W - 16);
         y += 6;
 
         // Status
@@ -157,18 +171,20 @@ public final class BattleMapScreen extends Screen {
     //helper function to draw a label-value pair in the left pane, returning the next y position
     private int drawStatRow(GuiGraphicsExtractor graphics, int x, int y, String label, String value) {
         graphics.text(this.font, Component.literal(label + ":"), x, y, TEXT_LABEL);
-        graphics.text(this.font, Component.literal(value),  x + 78, y, TEXT_VALUE);
+        graphics.text(this.font, Component.literal(value),  x + 65, y, TEXT_VALUE);
         return y + 12;
     }
 
     //helper function to draw a label-value pair with a progress bar in the left pane, returning the next y position
-    private int drawStatBar(GuiGraphicsExtractor graphics, int x, int y, String label, int current, int max, int barColor) {
+    private int drawStatBar(GuiGraphicsExtractor graphics, int x, int y, String label, int current, int max, int barColor, int paneWidth) {
         graphics.text(this.font, Component.literal(label + ":"), x, y, TEXT_LABEL);
-        int barX = x + 60;
-        int barW = LEFT_PANE_W - barX - 10;
+        int barX = x + 50;
+        int barW = paneWidth - 50 - 28; // reserve space for the numeric value on the right
         int fillW = (int)((double) current / Math.max(1, max) * barW);
         graphics.fill(barX, y + 1, barX + barW, y + 7, 0xFF1A2530);
-        graphics.fill(barX, y + 1, barX + fillW, y + 7, barColor);
+        if (fillW > 0) {
+            graphics.fill(barX, y + 1, barX + fillW, y + 7, barColor);
+        }
         graphics.text(this.font, Component.literal(current + "/" + max), barX + barW + 2, y, TEXT_HINT);
         return y + 12;
     }
@@ -210,7 +226,7 @@ public final class BattleMapScreen extends Screen {
         y += 12;
         y = drawStatRow(graphics, px, y, "Strength", aTotal + " men");
         int aMorale = attackerCount > 0 ? attackerMoraleSum / attackerCount : 0;
-        y = drawStatBar(graphics, px, y, "Morale", aMorale, 100, aMorale > 50 ? 0xFF55CC55 : aMorale > 25 ? 0xFFDDCC33 : 0xFFCC3333);
+        y = drawStatBar(graphics, px, y, "Morale", aMorale, 100, aMorale > 50 ? 0xFF55CC55 : aMorale > 25 ? 0xFFDDCC33 : 0xFFCC3333, RIGHT_PANE_W - 16);
         y += 8;
 
         // Defender side
@@ -218,14 +234,14 @@ public final class BattleMapScreen extends Screen {
         y += 12;
         y = drawStatRow(graphics, px, y, "Strength", dTotal + " men");
         int dMorale = defenderCount > 0 ? defenderMoraleSum / defenderCount : 0;
-        y = drawStatBar(graphics, px, y, "Morale", dMorale, 100, dMorale > 50 ? 0xFF55CC55 : dMorale > 25 ? 0xFFDDCC33 : 0xFFCC3333);
+        y = drawStatBar(graphics, px, y, "Morale", dMorale, 100, dMorale > 50 ? 0xFF55CC55 : dMorale > 25 ? 0xFFDDCC33 : 0xFFCC3333, RIGHT_PANE_W - 16);
         y += 12;
         graphics.fill(this.width - RIGHT_PANE_W + 6, y, this.width - 6, y + 1, 0xFF3E4A55);
         y += 8;
 
         // Collapsible unit tree (label is rendered by the Button widget above)
         graphics.text(this.font, Component.literal("Composition:"), px, y, ACCENT_GOLD);
-        y += 12;
+        y = 160; // Start list below the "By Unit" button which is at y=140
 
         if (compositionExpanded) {
             int attackerIdx = 1, defenderIdx = 1;
@@ -249,14 +265,15 @@ public final class BattleMapScreen extends Screen {
 
     //bottom bar class: displays control hints for the player, including how to select multiple units
     private void drawBottomBar(GuiGraphicsExtractor graphics) {
-        int barY = this.height - 20;
-        graphics.fill(LEFT_PANE_W, barY, this.width - RIGHT_PANE_W, this.height, 0xDD0A0F14);
-        graphics.fill(LEFT_PANE_W, barY, this.width - RIGHT_PANE_W, barY + 1, 0xFF485563);
+        int barY = this.height - BOTTOM_BAR_H;
+        // Full-width background so neither panel bleeds through
+        graphics.fill(0, barY, this.width, this.height, 0xDD0A0F14);
+        graphics.fill(0, barY, this.width, barY + 1, 0xFF485563);
 
         int tx = LEFT_PANE_W + 8;
         int ty = barY + 5;
         graphics.text(this.font, Component.literal("● Normal View"), tx, ty, TEXT_HINT);
-        graphics.text(this.font, Component.literal("Shift + Left Click to select multiple units"), tx + 100, ty, TEXT_HINT);
+        graphics.text(this.font, Component.literal("Shift + Left Click to select multiple units"), tx + 110, ty, TEXT_HINT);
     }
 
    //input handles

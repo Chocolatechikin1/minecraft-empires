@@ -19,10 +19,6 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
-import java.util.Queue;
-import java.util.ArrayDeque;
-import java.util.HashSet;
-import java.util.Set;
 
 import com.devc.minecraftempires.MinecraftEmpires;
 import com.devc.minecraftempires.territory.ChunkData;
@@ -151,70 +147,46 @@ public class StateManager extends SavedData {
         ChunkPos centerChunkPos = ChunkPos.containing(altarPos); 
         ClaimManager claimManager = ClaimManager.get(level);
 
-        //register the core chunk of the settlement in the ClaimManager
+        // Register the core chunk as the province centre
         claimManager.registerSettlementCenter(settlement.getSettlementId().toString(), centerChunkPos);
         
-        //BFS variables
-        int maxClaims = 9; // The maximum amount of chunks an initial outpost can claim
         int claimedCount = 0;
-        int maxRadius = 2; //used to prevent flood fill algo from claiming chunks too far away
-        
-        Queue<ChunkPos> queue = new ArrayDeque<>(); //queue for BFS
-        Set<ChunkPos> visited = new HashSet<>(); //set to track visited chunks and prevent reprocessing
-        
-        queue.add(centerChunkPos); 
-        visited.add(centerChunkPos); 
-        
-        //use BFS to claim chunks around the altar, stopping at water biomes and respecting maxClaims
-        while (!queue.isEmpty() && claimedCount < maxClaims) {
-            ChunkPos currentChunk = queue.poll();
-            
-            //get altar biome
-            BlockPos checkPos = currentChunk.getMiddleBlockPosition(level.getSeaLevel());
-            Holder<Biome> biomeHolder = level.getBiome(checkPos);
-            
-            //if theres water around, stop claiming (though altar chunk is always claimed, MAY NEED BUG FIX)
-            if (!currentChunk.equals(centerChunkPos) && (biomeHolder.is(BiomeTags.IS_OCEAN) || biomeHolder.is(BiomeTags.IS_RIVER))) {
-                continue; 
-            }
 
-            //claim chunk, only if it is not already claimed 
-            if (!claimManager.isClaimed(currentChunk)) { 
-                claimManager.setClaim(
-                    currentChunk, 
-                    stateId, 
-                    settlement.getSettlementId().toString(), 
-                    false, 
-                    1      
-                );
-                claimedCount++; 
-            } 
-            
-            //queue nearby chunks for checking
-            ChunkPos[] neighbors = {
-                new ChunkPos(currentChunk.x(), currentChunk.z() - 1), 
-                new ChunkPos(currentChunk.x(), currentChunk.z() + 1), 
-                new ChunkPos(currentChunk.x() + 1, currentChunk.z()), 
-                new ChunkPos(currentChunk.x() - 1, currentChunk.z())  
-            };
-            
-            //new - Validate and add neighbors to the queue
-            for (ChunkPos neighbor : neighbors) {
-                if (visited.add(neighbor)) { // HashSet.add() returns true if it wasn't already in the set
-                    // Ensure we don't snake out too far from the center altar
-                    if (Math.abs(neighbor.x() - centerChunkPos.x()) <= maxRadius && Math.abs(neighbor.z() - centerChunkPos.z()) <= maxRadius) {
-                        queue.add(neighbor);
+        // Claim a 3×3 square (±1 chunk in both axes) around the altar.
+        // BFS was removed because 4-directional expansion produces a diamond/cross shape,
+        // not a square. A direct double-loop always gives exactly the 9 intended chunks.
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                ChunkPos candidate = new ChunkPos(centerChunkPos.x() + dx, centerChunkPos.z() + dz);
+
+                // Honour the water-biome stop (always claim the altar chunk itself regardless)
+                if (dx != 0 || dz != 0) {
+                    BlockPos checkPos = candidate.getMiddleBlockPosition(level.getSeaLevel());
+                    Holder<Biome> biomeHolder = level.getBiome(checkPos);
+                    if (biomeHolder.is(BiomeTags.IS_OCEAN) || biomeHolder.is(BiomeTags.IS_RIVER)) {
+                        continue; // skip water chunks
                     }
+                }
+
+                // Only claim chunks that are not already owned by another state
+                if (!claimManager.isClaimed(candidate)) {
+                    claimManager.setClaim(
+                        candidate,
+                        stateId,
+                        settlement.getSettlementId().toString(),
+                        false,
+                        1
+                    );
+                    claimedCount++;
                 }
             }
         }
         
-        // Mark State data as dirty, and tell ClaimManager to mark its data as dirty too!
+        // Mark State data as dirty, and tell ClaimManager to mark its data as dirty too
         this.setDirty();
         claimManager.setDirty();
         
-        //new - Updated log to show the dynamic count
-        MinecraftEmpires.LOGGER.info("Established {} natural chunk claims for settlement: {}", claimedCount, settlement.getSettlementName());
+        MinecraftEmpires.LOGGER.info("Established {} chunk claims for settlement: {}", claimedCount, settlement.getSettlementName());
     }
 
     //saving and loading methods
