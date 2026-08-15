@@ -1,5 +1,6 @@
 package com.devc.minecraftempires.client.gui.screen;
 
+import com.devc.minecraftempires.client.ClientNetworking;
 import com.devc.minecraftempires.client.map.ClientBattleData;
 import com.devc.minecraftempires.client.gui.widget.BattleGridWidget;
 import com.devc.minecraftempires.network.packet.RequestSpectatePayload;
@@ -333,6 +334,7 @@ public final class BattleMapScreen extends Screen {
 
     @Override
     public void onClose() {
+        ClientNetworking.leaveSpectate(battleId); // tell server to remove us from spectating set
         ClientBattleData.clear();
         super.onClose();
     }

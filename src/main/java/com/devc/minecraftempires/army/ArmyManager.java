@@ -194,7 +194,7 @@ public class ArmyManager extends SavedData {
         return true;
     }
 
-    private void registerArmy(Army army) {
+    public void registerArmy(Army army) {
         activeArmies.put(army.getArmyId(), army);
         stateToArmyIndex
                 .computeIfAbsent(army.getOwningStateId(), k -> new ArrayList<>())

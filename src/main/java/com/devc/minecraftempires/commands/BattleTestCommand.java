@@ -36,6 +36,7 @@ public class BattleTestCommand {
             armyManager.registerCohort(a2);
             attacker.addCohortId(a1.getCohortId());
             attacker.addCohortId(a2.getCohortId());
+            armyManager.registerArmy(attacker); // register so armyManager.getArmy() resolves during tick/auto-resolve
 
             // 2. Mock Data: Generate Enemy Army (random state ID)
             Army defender = new Army(UUID.randomUUID(), UUID.randomUUID(), player.blockPosition());
@@ -45,6 +46,7 @@ public class BattleTestCommand {
             armyManager.registerCohort(d2);
             defender.addCohortId(d1.getCohortId());
             defender.addCohortId(d2.getCohortId());
+            armyManager.registerArmy(defender); // register so armyManager.getArmy() resolves during tick/auto-resolve
 
             // 3. Force the Engine: Inject them into BattleManager
             // This will automatically call notifyOnlinePlayers which sends the OpenBattleMapPayload

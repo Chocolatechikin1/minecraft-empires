@@ -6,6 +6,7 @@ import com.devc.minecraftempires.network.packet.BattleSyncPayload;
 import com.devc.minecraftempires.network.packet.MapDataPayload;
 import com.devc.minecraftempires.network.packet.OpenBattleMapPayload;
 import com.devc.minecraftempires.network.packet.RequestMapDataPayload;
+import com.devc.minecraftempires.network.packet.LeaveSpectatePayload;
 import com.devc.minecraftempires.network.packet.RequestSpectatePayload;
 import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.neoforge.network.PacketDistributor;
@@ -81,6 +82,11 @@ public final class ModNetworking {
                 RequestSpectatePayload.TYPE,
                 RequestSpectatePayload.STREAM_CODEC,
                 RequestSpectatePayload::handle
+        );
+        registrar.playToServer(
+                LeaveSpectatePayload.TYPE,
+                LeaveSpectatePayload.STREAM_CODEC,
+                LeaveSpectatePayload::handle
         );
     }
 

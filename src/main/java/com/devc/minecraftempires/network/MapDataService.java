@@ -247,6 +247,17 @@ public final class MapDataService {
 
     private record ScoutingResult(Set<Long> scoutedForeignChunks, Set<UUID> borderingStateIds) {}
 
+    // Converts 1->'1st', 2->'2nd', 3->'3rd', 4->'4th', etc.
+    private static String ordinalName(int n) {
+        if (n % 100 >= 11 && n % 100 <= 13) return n + "th";
+        return switch (n % 10) {
+            case 1 -> n + "st";
+            case 2 -> n + "nd";
+            case 3 -> n + "rd";
+            default -> n + "th";
+        };
+    }
+
     //builds the netwoek army map payload
     //gives 2 lists: a legion summary and an army summary, which are used to display the player's own units on the map
     public static ArmyMapPayload buildArmyPayload(ServerPlayer player) {
@@ -272,13 +283,16 @@ public final class MapDataService {
         // Per-soldier upkeep: 750 emeralds per full 500-soldier legion = 1.5 per soldier/day (fix this, shouldnt have decimals for emeralds)
         final double UPKEEP_PER_SOLDIER = 1.5;
         List<ArmyMapPayload.ArmySummary> armySummaries = new ArrayList<>();
+        int armyOrdinal = 1;
         for (Army army : armyManager.getArmiesForState(viewerStateId)) {
             BlockPos pos = army.getStoredPosition();
             ChunkPos cp = new ChunkPos(pos.getX() >> 4, pos.getZ() >> 4);
             int maintenance = (int) Math.round(army.getTotalStrength(armyManager) * UPKEEP_PER_SOLDIER);
+            String displayName = ordinalName(armyOrdinal++) + " Army";
             armySummaries.add(new ArmyMapPayload.ArmySummary(
                     army.getArmyId(), army.getOwningStateId(), cp.pack(),
                     new ArrayList<>(army.getWaypoints()),
+                    displayName,
                     army.getTotalStrength(armyManager),
                     army.getBattleMorale(armyManager),
                     maintenance, army.isEngaged(), army.getCurrentBattleId(), army.isOnCampaign()));

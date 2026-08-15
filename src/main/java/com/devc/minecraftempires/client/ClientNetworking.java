@@ -8,6 +8,7 @@ import com.devc.minecraftempires.network.packet.ArmyMapPayload;
 import com.devc.minecraftempires.network.packet.BattleSyncPayload;
 import com.devc.minecraftempires.network.packet.MapDataPayload;
 import com.devc.minecraftempires.network.packet.OpenBattleMapPayload;
+import com.devc.minecraftempires.network.packet.LeaveSpectatePayload;
 import com.devc.minecraftempires.network.packet.RequestMapDataPayload;
 import com.devc.minecraftempires.network.packet.RequestSpectatePayload;
 import net.minecraft.client.Minecraft;
@@ -51,8 +52,11 @@ public final class ClientNetworking {
             if (mc.player != null) { //creates a new battle map screen and sets it as the current screen for the player
                 if (mc.gui.screen() instanceof BattleMapScreen) return; // Break the infinite open loop
                 ClientBattleData.clear(); //clear any stale data
+                // Note: mc.gui.setScreen() is the correct API for MC 26.2 (screen management moved to the Gui class).
+                // mc.setScreen() was tested and caused issues in this version — do not switch back.
                 mc.gui.setScreen(new BattleMapScreen(payload.battleId(),payload.attackerArmyId(),payload.defenderArmyId()));
-                //sends request to server to request a packet to spectate the battle, which will send the client the current state of the battle
+                // Note: requestSpectate is also sent by BattleMapScreen.init() — this call fires it a second time.
+                // Low priority: the duplicate is harmless but can be removed if the server starts logging double-spectate warnings.
                 requestSpectate(payload.battleId());
             }
         });
@@ -66,6 +70,11 @@ public final class ClientNetworking {
     //getter for spectating
     public static void requestSpectate(UUID battleId) {
         ClientPacketDistributor.sendToServer(new RequestSpectatePayload(battleId));
+    }
+
+    //notifies the server that the player has closed the battle map screen
+    public static void leaveSpectate(UUID battleId) {
+        ClientPacketDistributor.sendToServer(new LeaveSpectatePayload(battleId));
     }
 }
 

@@ -190,7 +190,7 @@ public final class InteractiveMapWidget {
 
             // Troop count label
             if (zoom >= 12.0 && font != null) {
-                String label = "A" + army.troops();
+                String label = army.displayName() + " \u00b7 " + army.troops(); //army.troops might be unncessary, mark for now TODO: 
                 int labelX = screenX + iconSize + 2;
                 int labelY = screenY + (iconSize / 2) - 4;
                 graphics.fill(labelX - 1, labelY - 1, labelX + font.width(label) + 2, labelY + 10, 0xAA111820);
