@@ -15,9 +15,13 @@ import net.minecraft.tags.BiomeTags;
 import net.minecraft.core.Holder;
 import net.minecraft.world.level.biome.Biome;
 
+import java.util.ArrayDeque;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Queue;
+import java.util.Set;
 import java.util.UUID;
 
 import com.devc.minecraftempires.MinecraftEmpires;
@@ -149,43 +153,88 @@ public class StateManager extends SavedData {
 
         // Register the core chunk as the province centre
         claimManager.registerSettlementCenter(settlement.getSettlementId().toString(), centerChunkPos);
-        
-        int claimedCount = 0;
 
-        // Claim a 3×3 square (±1 chunk in both axes) around the altar.
-        // BFS was removed because 4-directional expansion produces a diamond/cross shape,
-        // not a square. A direct double-loop always gives exactly the 9 intended chunks.
+        int claimedCount = 0;
+        int waterSlotsSkipped = 0;
+        //tracks what this pass has claimed so subsequent BFS passes don't re-select the same chunk.
+        Set<ChunkPos> claimedInPass = new HashSet<>();
+
+        // Claim every land chunk; count water slots, BFS algo not ran here
         for (int dx = -1; dx <= 1; dx++) {
             for (int dz = -1; dz <= 1; dz++) {
                 ChunkPos candidate = new ChunkPos(centerChunkPos.x() + dx, centerChunkPos.z() + dz);
 
-                // Honour the water-biome stop (always claim the altar chunk itself regardless)
+                // Altar chunk (dx==0, dz==0) is always claimed — skip water check for it (TODO: add it so that player cannot place the altar in water)
                 if (dx != 0 || dz != 0) {
                     BlockPos checkPos = candidate.getMiddleBlockPosition(level.getSeaLevel());
                     Holder<Biome> biomeHolder = level.getBiome(checkPos);
                     if (biomeHolder.is(BiomeTags.IS_OCEAN) || biomeHolder.is(BiomeTags.IS_RIVER)) {
-                        continue; // skip water chunks
+                        waterSlotsSkipped++;
+                        continue;
                     }
                 }
 
-                // Only claim chunks that are not already owned by another state
                 if (!claimManager.isClaimed(candidate)) {
-                    claimManager.setClaim(
-                        candidate,
-                        stateId,
-                        settlement.getSettlementId().toString(),
-                        false,
-                        1
-                    );
+                    claimManager.setClaim(candidate, stateId, settlement.getSettlementId().toString(), false, 1);
+                    claimedInPass.add(candidate);
                     claimedCount++;
                 }
             }
         }
-        
+        // If we have skipped water slots, we need to find replacements for them.
+        final int replacementMaxRadius = 8;
+        //pre-mark the entire 3×3 as visited so BFS cannot return any of them as replacements.
+        Set<ChunkPos> squareChunks = new HashSet<>();
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dz = -1; dz <= 1; dz++) {
+                squareChunks.add(new ChunkPos(centerChunkPos.x() + dx, centerChunkPos.z() + dz));
+            }
+        }
+
+        for (int slot = 0; slot < waterSlotsSkipped; slot++) {
+            // Seed queue from all land chunks claimed so far (both 3×3 and prior replacements).
+            // This expands outward from the settlement boundary, not from the center.
+            Queue<ChunkPos> bfsQueue = new ArrayDeque<>(claimedInPass);
+            Set<ChunkPos> bfsVisited = new HashSet<>(squareChunks);
+            bfsVisited.addAll(claimedInPass); //don't re-select previously found replacements
+            ChunkPos replacement = null;
+
+            outer:
+            while (!bfsQueue.isEmpty()) {
+                ChunkPos curr = bfsQueue.poll();
+                ChunkPos[] neighbors = {
+                    new ChunkPos(curr.x(), curr.z() - 1),
+                    new ChunkPos(curr.x(), curr.z() + 1),
+                    new ChunkPos(curr.x() + 1, curr.z()),
+                    new ChunkPos(curr.x() - 1, curr.z())
+                };
+                for (ChunkPos neighbor : neighbors) {
+                    if (!bfsVisited.add(neighbor)) continue;
+                    if (Math.abs(neighbor.x() - centerChunkPos.x()) > replacementMaxRadius
+                            || Math.abs(neighbor.z() - centerChunkPos.z()) > replacementMaxRadius) continue;
+                    BlockPos nCheck = neighbor.getMiddleBlockPosition(level.getSeaLevel());
+                    Holder<Biome> nBiome = level.getBiome(nCheck);
+                    if (nBiome.is(BiomeTags.IS_OCEAN) || nBiome.is(BiomeTags.IS_RIVER)) {
+                        continue; 
+                    }
+                    if (!claimManager.isClaimed(neighbor)) { //found a valid land replacement outside the square, set to claim
+                        replacement = neighbor;
+                        break outer; 
+                    }
+                    bfsQueue.add(neighbor); //claimed land — keep searching further out
+                }
+            }
+
+            if (replacement != null) {
+                claimManager.setClaim(replacement, stateId, settlement.getSettlementId().toString(), false, 1);
+                claimedInPass.add(replacement);
+                claimedCount++;
+            }
+        }
+
         // Mark State data as dirty, and tell ClaimManager to mark its data as dirty too
         this.setDirty();
         claimManager.setDirty();
-        
         MinecraftEmpires.LOGGER.info("Established {} chunk claims for settlement: {}", claimedCount, settlement.getSettlementName());
     }
 
