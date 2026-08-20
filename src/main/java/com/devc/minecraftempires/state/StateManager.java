@@ -131,6 +131,9 @@ public class StateManager extends SavedData {
         return false;
     }
 
+    //method to handle settlement abandonment here
+
+    
     //all settlement methods
     
     public SettlementData getSettlement(UUID settlementId) {
