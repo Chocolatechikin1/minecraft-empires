@@ -255,4 +255,23 @@ public class ClaimManager extends SavedData {
             this.setDirty(); // CRITICAL: Tells the server to save the cleared map to disk!
         }
     }
+
+    // Removes all chunk claims that belong to a specific settlement.
+    // Used when a settlement is disbanded so the territory reverts to unclaimed.
+    public void clearAllClaimsForSettlement(String settlementId) {
+        boolean removed = this.claims.entrySet().removeIf(entry -> settlementId.equals(entry.getValue().getSettlementID()));
+        if (removed) {
+            setDirty();
+        }
+    }
+
+    // Removes a settlement's altar anchor from the center registry.
+    // This entry is used for protective radius calculations — it is NOT the same as a province.
+    // Provinces are a broader territorial concept and may span multiple settlements and open land.
+    // Always call this alongside clearAllClaimsForSettlement when disbanding a settlement.
+    public void removeSettlementCenter(String settlementId) {
+        if (settlementCenters.remove(settlementId) != null){
+            setDirty();
+        }
+    }
 }

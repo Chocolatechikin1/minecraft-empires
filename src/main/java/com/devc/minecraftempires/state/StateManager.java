@@ -176,16 +176,35 @@ public class StateManager extends SavedData {
     /**
      * Removes a single settlement and all its chunk claims from the world.
      * The owning state is left intact regardless of remaining settlement count.
-     *
-     * TODO (Phase 2): implement body
      */
     public void disbandSettlement(UUID settlementId, ServerLevel level) {
-        // TODO: look up SettlementData by settlementId
-        // TODO: remove all ClaimManager claims whose settlementId string matches
-        // TODO: call owningState.removeSettlement(settlementId)
-        // TODO: remove entry from activeSettlements
-        // TODO: setDirty()
-        MinecraftEmpires.LOGGER.warn("disbandSettlement() called but not yet implemented for: {}", settlementId);
+        SettlementData settlement = activeSettlements.remove(settlementId);
+        if (settlement == null) {
+            MinecraftEmpires.LOGGER.warn("disbandSettlement() called for unknown settlementId: {}", settlementId);
+            return;
+        }
+
+        // Remove from owning state's settlement list — state itself stays intact
+        StateData owningState = activeStates.get(settlement.getOwningStateId());
+        if (owningState != null) {
+            owningState.removeSettlement(settlementId);
+        }
+
+        // Wipe all chunk claims and the province anchor from ClaimManager
+        ClaimManager claimManager = ClaimManager.get(level);
+        claimManager.clearAllClaimsForSettlement(settlementId.toString());
+        claimManager.removeSettlementCenter(settlementId.toString());
+
+        setDirty();
+        MinecraftEmpires.LOGGER.info("[Minecraft Empires] Disbanded settlement '{}' ({}).",settlement.getSettlementName(), settlementId);
+    }
+
+    /**
+     * Finds the settlement whose City Altar is at the given block position.
+     * Returns null if no settlement is linked to that position (orphan altar).
+     */
+    public SettlementData getSettlementByAltarPos(BlockPos pos) {
+        return activeSettlements.values().stream().filter(s -> s.getCenterAltarPos().equals(pos)).findFirst().orElse(null);
     }
 
     public void establishSettlementClaims(ServerLevel level, SettlementData settlement, UUID stateId) {

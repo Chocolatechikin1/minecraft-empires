@@ -177,8 +177,10 @@ public class MinecraftEmpires {
 
     // ── Settlement altar protection (Phase 1) ─────────────────────────────────
     // Cancels breaking a City Altar while it is linked to an active settlement.
-    // Creative players bypass the protection but still trigger settlement cleanup.
-    // TODO (Phase 1 implementation): fill in the body
+    // Creative players bypass the protection but still wipe the settlement data
+    // so no ghost entries are left on the map.
+    // Orphan altars (placed before this system existed, no settlement linked) are
+    // always breakable so existing worlds aren't soft-locked.
     @SubscribeEvent
     public void onBlockBreak(BlockEvent.BreakEvent event) {
         if (!(event.getLevel() instanceof net.minecraft.server.level.ServerLevel serverLevel)) return;
@@ -188,9 +190,36 @@ public class MinecraftEmpires {
         StateManager stateManager = StateManager.get(serverLevel);
         net.minecraft.world.entity.player.Player player = event.getPlayer();
 
-        // TODO: if player.isCreative() → disbandSettlementAtAltar(pos, serverLevel, stateManager) and return
-        // TODO: if !stateManager.isAltarAbandoned(pos) → event.setCanceled(true) + send chat message
-        // TODO: else (abandoned) → stateManager.clearAltarAbandoned(pos) and allow break
+        if (player.isCreative()) {
+            // Creative bypass: wipe the linked settlement (if any) then allow the break
+            com.devc.minecraftempires.territory.SettlementData settlement =
+                    stateManager.getSettlementByAltarPos(pos);
+            if (settlement != null) {
+                stateManager.disbandSettlement(settlement.getSettlementId(), serverLevel);
+            }
+            stateManager.clearAltarAbandoned(pos); // tidy up any leftover abandoned marker
+            return; // allow the break
+        }
+
+        // Survival path: protect the altar if a settlement is linked to it
+        com.devc.minecraftempires.territory.SettlementData settlement =
+                stateManager.getSettlementByAltarPos(pos);
+
+        if (settlement == null) {
+            // Orphan altar — no settlement data, always allow the break
+            return;
+        }
+
+        if (!stateManager.isAltarAbandoned(pos)) {
+            // Settlement is active — block the break
+            event.setCanceled(true);
+            player.sendSystemMessage(net.minecraft.network.chat.Component.literal(
+                    "§c[Minecraft Empires] This altar is linked to '" + settlement.getSettlementName()
+                    + "'. Right-click it to manage or abandon the settlement first."));
+        } else {
+            // Player completed the abandon flow — clear the marker and allow the break
+            stateManager.clearAltarAbandoned(pos);
+        }
     }
     
 }

@@ -10,7 +10,7 @@ import net.neoforged.neoforge.network.handling.IPayloadContext;
 
 import java.util.UUID;
 
-/**
+/** good desc ill keep
  * CLIENT → SERVER.
  * Sent when a player confirms "Abandon Settlement" in SettlementManagementScreen.
  *
