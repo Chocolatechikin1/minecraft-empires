@@ -19,6 +19,7 @@ import com.devc.minecraftempires.network.packet.DisbandArmyPayload;
 import com.devc.minecraftempires.network.packet.ComposeArmyPayload;
 import com.devc.minecraftempires.network.packet.DispatchLegionPayload;
 import com.devc.minecraftempires.network.packet.GarrisonCohortPayload;
+import com.devc.minecraftempires.network.packet.AbandonSettlementPayload;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -87,6 +88,14 @@ public final class ModNetworking {
                 LeaveSpectatePayload.TYPE,
                 LeaveSpectatePayload.STREAM_CODEC,
                 LeaveSpectatePayload::handle
+        );
+
+        // ── Settlement Management ──────────────────────────────────────────────
+        // Client → Server
+        registrar.playToServer(
+                AbandonSettlementPayload.TYPE,
+                AbandonSettlementPayload.STREAM_CODEC,
+                AbandonSettlementPayload::handle
         );
     }
 

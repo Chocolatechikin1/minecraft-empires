@@ -6,12 +6,14 @@ import com.devc.minecraftempires.territory.SettlementData;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.BlockHitResult;
 import org.jetbrains.annotations.Nullable;
 import java.util.UUID;
 
@@ -81,5 +83,22 @@ public class CityAltarBlock extends Block {
             // 6. Provide clear visual confirmation feedback to the player
             player.sendSystemMessage(Component.literal("§6§l[Minecraft Empires] §aEstablished §e" + settlementName + "§a linked to the realm of §b" + playerState.getStateName() + "§a."));
         }
+    }
+
+    // ── Settlement management screen (Phase 2) ────────────────────────────────
+    // Right-clicking the altar opens SettlementManagementScreen.
+    // The client looks up the settlement from its ClientMapData cache using the altar's
+    // chunk position — no server roundtrip is needed just to open the screen.
+    // TODO (Phase 2 implementation): fill in the client-side lookup and screen open.
+    @Override
+    protected InteractionResult useWithoutItem(BlockState state, Level level,
+            BlockPos pos, Player player, BlockHitResult hitResult) {
+        if (level.isClientSide()) {
+            // TODO: look up settlement from ClientMapData by ChunkPos(pos).toLong()
+            // TODO: if found → open SettlementManagementScreen(id, name, pos)
+            // TODO: if not found → send chat message asking player to open the Empire Map first
+        }
+        // Consume the interaction on both sides so vanilla doesn't cancel the client's screen open
+        return InteractionResult.sidedSuccess(level.isClientSide());
     }
 }

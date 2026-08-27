@@ -50,6 +50,8 @@ import com.devc.minecraftempires.network.packet.MapDataPayload;
 import com.devc.minecraftempires.network.ModNetworking; 
 import com.devc.minecraftempires.army.ArmyManager;
 import net.neoforged.neoforge.event.server.ServerStoppingEvent;
+import net.neoforged.neoforge.event.level.BlockEvent;
+import com.devc.minecraftempires.state.StateManager;
 
 // The value here should match an entry in the META-INF/neoforge.mods.toml file
 @Mod(MinecraftEmpires.MODID)
@@ -171,6 +173,24 @@ public class MinecraftEmpires {
     public void onServerStopping(ServerStoppingEvent event) {
         BattleManager.clearAll();
         LOGGER.info("[Minecraft Empires] BattleManager cleared on server stop.");
+    }
+
+    // ── Settlement altar protection (Phase 1) ─────────────────────────────────
+    // Cancels breaking a City Altar while it is linked to an active settlement.
+    // Creative players bypass the protection but still trigger settlement cleanup.
+    // TODO (Phase 1 implementation): fill in the body
+    @SubscribeEvent
+    public void onBlockBreak(BlockEvent.BreakEvent event) {
+        if (!(event.getLevel() instanceof net.minecraft.server.level.ServerLevel serverLevel)) return;
+        net.minecraft.core.BlockPos pos = event.getPos();
+        if (!serverLevel.getBlockState(pos).is(MinecraftEmpires.CITY_ALTAR.get())) return;
+
+        StateManager stateManager = StateManager.get(serverLevel);
+        net.minecraft.world.entity.player.Player player = event.getPlayer();
+
+        // TODO: if player.isCreative() → disbandSettlementAtAltar(pos, serverLevel, stateManager) and return
+        // TODO: if !stateManager.isAltarAbandoned(pos) → event.setCanceled(true) + send chat message
+        // TODO: else (abandoned) → stateManager.clearAltarAbandoned(pos) and allow break
     }
     
 }

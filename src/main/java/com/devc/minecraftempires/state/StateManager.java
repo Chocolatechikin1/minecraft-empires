@@ -39,6 +39,9 @@ public class StateManager extends SavedData {
     private final Map<UUID, UUID> playerToStateMap = new HashMap<>();
     //all settlements
     private final Map<UUID, SettlementData> activeSettlements = new HashMap<>();
+    // Altar positions whose settlements have been abandoned — these blocks may now be broken.
+    // Persisted to disk so a server restart doesn't permanently lock players out.
+    private final Set<BlockPos> abandonedAltarPositions = new HashSet<>();
 
     public StateManager() {}
 
@@ -147,6 +150,42 @@ public class StateManager extends SavedData {
     public void registerSettlement(UUID settlementId, SettlementData data) {
         activeSettlements.put(settlementId, data);
         this.setDirty(); //tells server to save this new town to disk
+    }
+
+    // ── Altar abandonment state ───────────────────────────────────────────────
+
+    /** Returns true if this altar's settlement has been abandoned and the block may be broken. */
+    public boolean isAltarAbandoned(BlockPos pos) {
+        return abandonedAltarPositions.contains(pos);
+    }
+
+    /** Marks an altar position as abandoned so the block-break event allows it. */
+    public void markAltarAbandoned(BlockPos pos) {
+        abandonedAltarPositions.add(pos);
+        setDirty();
+    }
+
+    /** Clears the abandoned marker once the block has actually been broken. */
+    public void clearAltarAbandoned(BlockPos pos) {
+        abandonedAltarPositions.remove(pos);
+        setDirty();
+    }
+
+    // ── Settlement disbanding ─────────────────────────────────────────────────
+
+    /**
+     * Removes a single settlement and all its chunk claims from the world.
+     * The owning state is left intact regardless of remaining settlement count.
+     *
+     * TODO (Phase 2): implement body
+     */
+    public void disbandSettlement(UUID settlementId, ServerLevel level) {
+        // TODO: look up SettlementData by settlementId
+        // TODO: remove all ClaimManager claims whose settlementId string matches
+        // TODO: call owningState.removeSettlement(settlementId)
+        // TODO: remove entry from activeSettlements
+        // TODO: setDirty()
+        MinecraftEmpires.LOGGER.warn("disbandSettlement() called but not yet implemented for: {}", settlementId);
     }
 
     public void establishSettlementClaims(ServerLevel level, SettlementData settlement, UUID stateId) {
@@ -266,6 +305,15 @@ public class StateManager extends SavedData {
         }
         tag.put("PlayerStates", playerMapTag);
 
+        // 4. Save Abandoned Altar Positions
+        ListTag abandonedList = new ListTag();
+        for (BlockPos pos : abandonedAltarPositions) {
+            CompoundTag posTag = new CompoundTag();
+            posTag.putLong("Pos", pos.asLong());
+            abandonedList.add(posTag);
+        }
+        tag.put("AbandonedAltars", abandonedList);
+
         return tag;
     }
 
@@ -300,6 +348,15 @@ public class StateManager extends SavedData {
                 if (!valueStr.isEmpty()) {
                     manager.playerToStateMap.put(UUID.fromString(key), UUID.fromString(valueStr));
                 }
+            }
+        }
+
+        // 4. Load Abandoned Altar Positions
+        if (tag.contains("AbandonedAltars")) {
+            ListTag abandonedList = tag.getList("AbandonedAltars").orElse(new ListTag());
+            for (int i = 0; i < abandonedList.size(); i++) {
+                CompoundTag posTag = abandonedList.getCompound(i).orElse(new CompoundTag());
+                posTag.getLong("Pos").ifPresent(l -> manager.abandonedAltarPositions.add(BlockPos.of(l)));
             }
         }
         
