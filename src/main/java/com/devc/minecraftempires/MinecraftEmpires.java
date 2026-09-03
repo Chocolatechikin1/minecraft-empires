@@ -50,7 +50,7 @@ import com.devc.minecraftempires.network.packet.MapDataPayload;
 import com.devc.minecraftempires.network.ModNetworking; 
 import com.devc.minecraftempires.army.ArmyManager;
 import net.neoforged.neoforge.event.server.ServerStoppingEvent;
-import net.neoforged.neoforge.event.level.BlockEvent;
+import net.neoforged.neoforge.event.level.block.BreakBlockEvent;
 import com.devc.minecraftempires.state.StateManager;
 
 // The value here should match an entry in the META-INF/neoforge.mods.toml file
@@ -175,14 +175,9 @@ public class MinecraftEmpires {
         LOGGER.info("[Minecraft Empires] BattleManager cleared on server stop.");
     }
 
-    // ── Settlement altar protection (Phase 1) ─────────────────────────────────
-    // Cancels breaking a City Altar while it is linked to an active settlement.
-    // Creative players bypass the protection but still wipe the settlement data
-    // so no ghost entries are left on the map.
-    // Orphan altars (placed before this system existed, no settlement linked) are
-    // always breakable so existing worlds aren't soft-locked.
+    //settlement altar protection logic
     @SubscribeEvent
-    public void onBlockBreak(BlockEvent.BreakEvent event) {
+    public void onBlockBreak(BreakBlockEvent event) {
         if (!(event.getLevel() instanceof net.minecraft.server.level.ServerLevel serverLevel)) return;
         net.minecraft.core.BlockPos pos = event.getPos();
         if (!serverLevel.getBlockState(pos).is(MinecraftEmpires.CITY_ALTAR.get())) return;
@@ -190,32 +185,27 @@ public class MinecraftEmpires {
         StateManager stateManager = StateManager.get(serverLevel);
         net.minecraft.world.entity.player.Player player = event.getPlayer();
 
-        if (player.isCreative()) {
-            // Creative bypass: wipe the linked settlement (if any) then allow the break
+        if (player.isCreative()) { //if player is in creative, allow breaks
             com.devc.minecraftempires.territory.SettlementData settlement =
                     stateManager.getSettlementByAltarPos(pos);
             if (settlement != null) {
                 stateManager.disbandSettlement(settlement.getSettlementId(), serverLevel);
             }
-            stateManager.clearAltarAbandoned(pos); // tidy up any leftover abandoned marker
+            stateManager.clearAltarAbandoned(pos); //tidy up any leftover abandoned marker
             return; // allow the break
         }
 
-        // Survival path: protect the altar if a settlement is linked to it
-        com.devc.minecraftempires.territory.SettlementData settlement =
-                stateManager.getSettlementByAltarPos(pos);
+        //survival mode logic below
+        com.devc.minecraftempires.territory.SettlementData settlement = stateManager.getSettlementByAltarPos(pos);
 
-        if (settlement == null) {
-            // Orphan altar — no settlement data, always allow the break
+        if (settlement == null) { //orphan altar, break
             return;
         }
 
-        if (!stateManager.isAltarAbandoned(pos)) {
-            // Settlement is active — block the break
+        if (!stateManager.isAltarAbandoned(pos)) { //prevent active settlement from being broken
             event.setCanceled(true);
-            player.sendSystemMessage(net.minecraft.network.chat.Component.literal(
-                    "§c[Minecraft Empires] This altar is linked to '" + settlement.getSettlementName()
-                    + "'. Right-click it to manage or abandon the settlement first."));
+            event.setNotifyClient(true);
+            player.sendSystemMessage(net.minecraft.network.chat.Component.literal("§c[Minecraft Empires] This altar is linked to '" + settlement.getSettlementName()+ "'. Right-click it to manage or abandon the settlement first."));
         } else {
             // Player completed the abandon flow — clear the marker and allow the break
             stateManager.clearAltarAbandoned(pos);
