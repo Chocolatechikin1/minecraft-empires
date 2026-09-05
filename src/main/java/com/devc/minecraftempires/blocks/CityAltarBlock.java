@@ -85,20 +85,9 @@ public class CityAltarBlock extends Block {
         }
     }
 
-    // ── Settlement management screen (Phase 2) ────────────────────────────────
-    // Right-clicking the altar opens SettlementManagementScreen.
-    // The client looks up the settlement from its ClientMapData cache using the altar's
-    // chunk position — no server roundtrip is needed just to open the screen.
-    // TODO (Phase 2 implementation): fill in the client-side lookup and screen open.
+    //settlement management screen opening call
     @Override
-    protected InteractionResult useWithoutItem(BlockState state, Level level,
-            BlockPos pos, Player player, BlockHitResult hitResult) {
-        if (level.isClientSide()) {
-            // TODO: look up settlement from ClientMapData by ChunkPos(pos).toLong()
-            // TODO: if found → open SettlementManagementScreen(id, name, pos)
-            // TODO: if not found → send chat message asking player to open the Empire Map first
-        }
-        // Consume the interaction on both sides so vanilla doesn't cancel the client's screen open
-        return InteractionResult.sidedSuccess(level.isClientSide());
+    protected InteractionResult useWithoutItem(BlockState state, Level level, BlockPos pos, Player player, BlockHitResult hitResult) {
+        return InteractionResult.SUCCESS;
     }
 }
