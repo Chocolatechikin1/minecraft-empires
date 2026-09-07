@@ -21,11 +21,9 @@ import java.util.UUID;
  *  4. Sends the player a confirmation message.
  */
 public record AbandonSettlementPayload(UUID settlementId, BlockPos altarPos) implements CustomPacketPayload {
-    public static final Type<AbandonSettlementPayload> TYPE = new Type<>(
-            Identifier.fromNamespaceAndPath(MinecraftEmpires.MODID, "abandon_settlement"));
+    public static final Type<AbandonSettlementPayload> TYPE = new Type<>(Identifier.fromNamespaceAndPath(MinecraftEmpires.MODID, "abandon_settlement"));
 
-    public static final StreamCodec<RegistryFriendlyByteBuf, AbandonSettlementPayload> STREAM_CODEC =
-            StreamCodec.ofMember(AbandonSettlementPayload::write, AbandonSettlementPayload::new);
+    public static final StreamCodec<RegistryFriendlyByteBuf, AbandonSettlementPayload> STREAM_CODEC = StreamCodec.ofMember(AbandonSettlementPayload::write, AbandonSettlementPayload::new);
 
     public AbandonSettlementPayload(RegistryFriendlyByteBuf buf) {
         this(buf.readUUID(), buf.readBlockPos());

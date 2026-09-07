@@ -1,5 +1,6 @@
 package com.devc.minecraftempires.commands;
 
+import com.devc.minecraftempires.army.Army;
 import com.devc.minecraftempires.army.ArmyManager;
 import com.devc.minecraftempires.army.Cohort;
 import com.devc.minecraftempires.army.Legion;
@@ -48,8 +49,8 @@ public class ArmyCommand {
 
             if (newLegion.isPresent()) {
                 Legion activeLegion = newLegion.get();
-                
-                // 2. Inject troops to make it viable (survives Garbage Collection)
+
+                //inject troops to make it viable (survives Garbage Collection)
                 Cohort inf1 = Cohort.createInfantry();
                 Cohort inf2 = Cohort.createInfantry();
                 Cohort cav  = Cohort.createCavalrySquadron();
@@ -57,15 +58,22 @@ public class ArmyCommand {
                 activeLegion.addInfantryCohort(inf2);
                 activeLegion.addCavalrySquadron(cav);
 
-                // 3. Register cohorts in the flat lookup registry
+                //register the cohorts and cavalry squadron with the ArmyManager so they are tracked and not garbage collected
                 armyManager.registerCohort(inf1);
                 armyManager.registerCohort(inf2);
                 armyManager.registerCohort(cav);
 
-                // 4. Save the newly populated legion to disk
+                //wrap the legion in an Army so it appears on the map and can be dispatched (TODO: bare legions cannot be interacted with on the map, eventually make it so that they can for the purpose of moving it around in friendly territory)
+                Optional<Army> newArmy = armyManager.autoWrapLegionInArmy(activeLegion);
+
                 armyManager.setDirty();
 
-                player.sendSystemMessage(Component.literal("§a[Minecraft Empires] Test Legion raised! (2 Cohorts, 1 Squadron)"));
+                if (newArmy.isPresent()) {
+                    player.sendSystemMessage(Component.literal("§a[Minecraft Empires] Test Army raised! Legion with 2 Cohorts + 1 Cavalry Squadron, now visible on the map."));
+                } else {
+                    // Legion exists but Army wrapping failed — still useful for data-layer testing
+                    player.sendSystemMessage(Component.literal("§e[Minecraft Empires] Test Legion raised, but Army wrap failed. Legion is live but not on the map."));
+                }
                 return 1;
             } else {
                 player.sendSystemMessage(Component.literal("§c[Minecraft Empires] Failed to raise Legion. Legion cap reached."));
