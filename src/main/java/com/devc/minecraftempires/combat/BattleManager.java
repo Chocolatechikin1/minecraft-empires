@@ -166,6 +166,11 @@ public final class BattleManager {
         if (attacker != null) finalizeArmy(attacker, session.getResult() == BattleSession.BattleResult.ATTACKER_WINS, session);
         if (defender != null) finalizeArmy(defender, session.getResult() == BattleSession.BattleResult.DEFENDER_WINS, session);
 
+        //force disband armies that aren't on campaign (NOTE: double check these 2 lines below very carefully, in test this works, but in game they should not be disbanding actual armies post battle)
+        //they will actually disband armies if they aren't on campaign, this should only happen with /army testbattle but just leaving this note here for reference
+        if (attacker != null && !attacker.isOnCampaign()) armyManager.disbandArmy(attacker.getArmyId(), true);
+        if (defender != null && !defender.isOnCampaign()) armyManager.disbandArmy(defender.getArmyId(), true);
+
         armyManager.setDirty(); //mark dirty so next tick saves to disk
         MinecraftEmpires.LOGGER.info("Battle {} concluded: {}.", session.getBattleId(), session.getResult());
     }
