@@ -22,6 +22,8 @@ public class Legion {
 
     //variable to store the legion position (used for map display and friendly-territory movement)
     private BlockPos storedPosition;
+    private double preciseX;
+    private double preciseZ;
 
     //waypoint tracking (for independent movement in friendly territory)
     private final Queue<BlockPos> waypoints = new LinkedList<>();
@@ -38,6 +40,8 @@ public class Legion {
         this.infantryCohorts  = new ArrayList<>();
         this.cavalrySquadrons = new ArrayList<>();
         this.auxiliaries      = new ArrayList<>();
+        this.preciseX = storedPosition.getX() + 0.5;
+        this.preciseZ = storedPosition.getZ() + 0.5;
     }
 
     //add cohort method
@@ -112,7 +116,23 @@ public class Legion {
     public UUID getLegionId()                      { return legionId; }
     public UUID getOwningStateId()                 { return owningStateId; }
     public BlockPos getStoredPosition()            { return storedPosition; }
-    public void setStoredPosition(BlockPos pos)    { this.storedPosition = pos; }
+    public double getPreciseX(){ 
+        return preciseX; 
+    }
+    public double getPreciseZ(){
+        return preciseZ;
+    }
+    public void setStoredPosition(BlockPos pos){
+        this.storedPosition = pos; 
+        this.preciseX = pos.getX() + 0.5;
+        this.preciseZ = pos.getZ() + 0.5;
+    }
+    public void setPrecisePos(double x, double z){
+        this.preciseX = x;
+        this.preciseZ = z;
+        //maintain storedPosition in sync with block integer properties
+        this.storedPosition = new BlockPos((int) Math.floor(x), storedPosition.getY(), (int) Math.floor(z));
+    }
 
     public List<Cohort> getInfantryCohorts()       { return Collections.unmodifiableList(infantryCohorts); }
     public List<Cohort> getCavalrySquadrons()      { return Collections.unmodifiableList(cavalrySquadrons); }
@@ -168,6 +188,8 @@ public class Legion {
         tag.put("InfantryCohorts",  serializeCohortList(infantryCohorts));
         tag.put("CavalrySquadrons", serializeCohortList(cavalrySquadrons));
         tag.put("Auxiliaries",      serializeCohortList(auxiliaries));
+        tag.putDouble("PreciseX", preciseX);
+        tag.putDouble("PreciseZ", preciseZ);
         return tag;
     }
 
@@ -179,13 +201,11 @@ public class Legion {
 
         Legion legion = new Legion(lid, sid, pos);
 
-        tag.getList("InfantryCohorts").ifPresent(list ->
-                deserializeCohortList(list, legion.infantryCohorts));
-        tag.getList("CavalrySquadrons").ifPresent(list ->
-                deserializeCohortList(list, legion.cavalrySquadrons));
-        tag.getList("Auxiliaries").ifPresent(list ->
-                deserializeCohortList(list, legion.auxiliaries));
-
+        tag.getList("InfantryCohorts").ifPresent(list -> deserializeCohortList(list, legion.infantryCohorts));
+        tag.getList("CavalrySquadrons").ifPresent(list -> deserializeCohortList(list, legion.cavalrySquadrons));
+        tag.getList("Auxiliaries").ifPresent(list -> deserializeCohortList(list, legion.auxiliaries));
+        tag.getDouble("PreciseX").ifPresent(x -> legion.preciseX = x);
+        tag.getDouble("PreciseZ").ifPresent(z -> legion.preciseZ = z);
         return legion;
     }
 
