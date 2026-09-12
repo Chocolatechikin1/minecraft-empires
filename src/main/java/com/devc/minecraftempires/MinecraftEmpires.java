@@ -158,7 +158,7 @@ public class MinecraftEmpires {
         LOGGER.info("custom commands registered");
     }
     //army movement method
-    @SubscribeEvent
+    /*@SubscribeEvent
     public void onServerTick(ServerTickEvent.Post event){
         //calculate the movement every 5 ticks, maintaining performance
         if(event.getServer().getTickCount() % 5 == 0){
@@ -166,7 +166,7 @@ public class MinecraftEmpires {
                 ArmyManager.get(level).tickArmies(level);
             });
         }
-    }
+    }*/
 
     //clears BattleManager state when the server shuts down
     @SubscribeEvent
