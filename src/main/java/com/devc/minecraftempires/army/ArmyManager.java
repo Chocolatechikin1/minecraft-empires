@@ -286,8 +286,7 @@ public class ArmyManager extends SavedData {
         for (Army army : activeArmies.values()) {
             if (army.isEngaged()) continue;
             if (!army.getWaypoints().isEmpty()) {
-                moveEntity(army.getStoredPosition(), army.getWaypoints(),
-                        army::setStoredPosition);
+                moveEntity(army.getPreciseX(), army.getPreciseZ(), army.getWaypoints(), army::setPrecisePos);
                 if (checkCollisionAndEngage(army, level)) requiresSave = true;
                 requiresSave = true;
             }
@@ -296,8 +295,7 @@ public class ArmyManager extends SavedData {
         // Move standalone Legions (those with available cohorts and their own waypoints)
         for (Legion legion : activeLegions.values()) {
             if (!legion.getWaypoints().isEmpty() && legion.hasAvailableCohorts()) {
-                moveEntity(legion.getStoredPosition(), legion.getWaypoints(),
-                        legion::setStoredPosition);
+                moveEntity(legion.getPreciseX(), legion.getPreciseZ(), legion.getWaypoints(), legion::setPrecisePos);
                 if (checkLegionCollision(legion, level)) requiresSave = true;
                 requiresSave = true;
             }
@@ -307,23 +305,25 @@ public class ArmyManager extends SavedData {
     }
 
     //army movement function, moves the army along its waypoints at a fixed speed, and removes the waypoint if reached
-    private void moveEntity(BlockPos current, Queue<BlockPos> waypoints, java.util.function.Consumer<BlockPos> setPos) {
+    private void moveEntity(double currentX, double currentZ, Queue<BlockPos> waypoints, java.util.function.BiConsumer<Double, Double> setPrecisePos) {
         BlockPos target = waypoints.peek();
-        double dx = target.getX() - current.getX();
-        double dz = target.getZ() - current.getZ();
+        double targetX = target.getX() + 0.5;
+        double targetZ = target.getZ() + 0.5;
+        double dx = targetX - currentX;
+        double dz = targetZ - currentZ;
         double distance = Math.hypot(dx, dz);
         // 0.2 blocks/tick = 4 blocks/second at 20 ticks/s (modify if needed later)
-        double marchSpeed = 0.2;
+        double marchSpeed = 1;
 
         if (distance <= marchSpeed) {
-            setPos.accept(target);
-            waypoints.poll();
+            setPrecisePos.accept(targetX, targetZ);
+            waypoints.poll(); //destination reached, remove the waypoint
         } 
         else{
-            double ratio = marchSpeed / distance;
-            int stepX = current.getX() + (int) Math.round(dx * ratio);
-            int stepZ = current.getZ() + (int) Math.round(dz * ratio);
-            setPos.accept(new BlockPos(stepX, current.getY(), stepZ));
+            double newX = currentX + (dx / distance) * marchSpeed;
+            double newZ = currentZ + (dz / distance) * marchSpeed;
+            setPrecisePos.accept(newX, newZ);
+            //setPos.accept(new BlockPos(stepX, current.getY(), stepZ));
         }
     }
 
