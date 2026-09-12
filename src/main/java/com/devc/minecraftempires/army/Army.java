@@ -19,6 +19,8 @@ public class Army {
     private final List<UUID> deployedCohortIds = new ArrayList<>(); //cohort IDs of all deployed cohorts (including garrisoned ones)
 
     private UUID campaignId = null; //UUID of the Campaign this Army belongs to; null if not on a campaign
+    private double preciseX;
+    private double preciseZ;
     private BlockPos storedPosition;
     private BlockPos campPosition = null;
     private UUID currentBattleId = null;
@@ -28,6 +30,8 @@ public class Army {
         this.armyId         = armyId;
         this.owningStateId  = owningStateId;
         this.storedPosition = storedPosition;
+        this.preciseX = storedPosition.getX() + 0.5;
+        this.preciseZ = storedPosition.getZ() + 0.5;
     }
 
    //add cohort to army function
@@ -95,9 +99,21 @@ public class Army {
 
     public UUID getArmyId()                         { return armyId; }
     public UUID getOwningStateId()                  { return owningStateId; }
+    public double getPreciseX()                     { return preciseX; }
+    public double getPreciseZ()                     { return preciseZ; }
 
     public BlockPos getStoredPosition()             { return storedPosition; }
-    public void setStoredPosition(BlockPos pos)     { this.storedPosition = pos; }
+    public void setStoredPosition(BlockPos pos){ 
+        this.storedPosition = pos; 
+        this.preciseX = pos.getX() + 0.5;
+        this.preciseZ = pos.getZ() + 0.5;
+    }
+    public void setPrecisePos(double x, double z){
+        this.preciseX = x;
+        this.preciseZ = z;
+        //maintain storedPosition in sync with block integer properties
+        this.storedPosition = new BlockPos((int) Math.floor(x), storedPosition.getY(), (int) Math.floor(z));
+    }
 
     public BlockPos getCampPosition()               { return campPosition; }
     public void setCampPosition(BlockPos pos)       { this.campPosition = pos; }
@@ -118,6 +134,8 @@ public class Army {
         tag.putString("ArmyId",        armyId.toString());
         tag.putString("OwningStateId", owningStateId.toString());
         tag.putLong("StoredPos",       storedPosition.asLong());
+        tag.putDouble("PreciseX", preciseX);
+        tag.putDouble("PreciseZ", preciseZ);
 
         if (campPosition != null)   tag.putLong("CampPos",     campPosition.asLong());
         if (currentBattleId != null) tag.putString("BattleId", currentBattleId.toString());
@@ -167,6 +185,8 @@ public class Army {
                         wpTag.getLong("Pos").ifPresent(l -> army.waypoints.offer(BlockPos.of(l))));
             }
         });
+        tag.getDouble("PreciseX").ifPresent(x -> army.preciseX = x);
+        tag.getDouble("PreciseZ").ifPresent(z -> army.preciseZ = z);
 
         return army;
     }
