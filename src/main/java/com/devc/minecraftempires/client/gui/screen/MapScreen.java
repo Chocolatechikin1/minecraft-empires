@@ -228,8 +228,7 @@ public final class MapScreen extends Screen {
                 // For Armies: the disband button position is dynamic — we click anywhere
                 // in the "disband zone" in the lower part of the panel.
                 // Simple approach: any left-click below y=100 inside the panel triggers disband for armies.
-                if (isArmy && event.x() >= panelX + 14 && event.x() <= this.width - 14
-                        && event.y() >= 95 && event.y() <= 135) {
+                if ((isArmy || isLegion) && event.x() >= panelX + 14 && event.x() <= this.width - 14 && event.y() >= 85 && event.y() <= 135) {
                     ClientPacketDistributor.sendToServer(new DisbandArmyPayload(selectedId));
                     this.mapWidget.clearSelectedArmy();
                     return true;
