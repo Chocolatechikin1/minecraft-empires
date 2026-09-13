@@ -375,6 +375,13 @@ public final class MapScreen extends Screen {
             graphics.text(this.font, Component.literal(Integer.toString(legionData.averageMorale())), textX + 78, y, 0xFFF3F5F7); //white
             y += 18;
 
+            //disband legion button
+            int buttonWidth = PANEL_WIDTH - 28;
+            int buttonX = panelX + 14;
+            boolean hover = mouseX >= buttonX && mouseX <= buttonX + buttonWidth && mouseY >= y && mouseY <= y + 20;
+            graphics.fill(buttonX, y, buttonX + buttonWidth, y + 20, hover? 0xFFFF6666 : 0xFFCC0000);
+            graphics.centeredText(this.font, Component.literal("Disband"), buttonX + buttonWidth / 2, y + 6, 0xFFFFFFFF);
+            y += 26; //advance y position for the hint text below the button
             // Right-click hint
             drawWrappedHint(graphics, textX, y, "Right-click on map to march.");
         }
