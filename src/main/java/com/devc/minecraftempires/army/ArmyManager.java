@@ -26,6 +26,8 @@ import com.devc.minecraftempires.network.packet.GarrisonCohortPayload;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.network.chat.Component;
+import net.neoforged.neoforge.network.PacketDistributor;
+import com.devc.minecraftempires.network.MapDataService;
 
 import java.util.*;
 
@@ -483,6 +485,7 @@ public class ArmyManager extends SavedData {
                     manager.disbandArmy(army.getArmyId(), false);
                     player.sendSystemMessage(Component.literal("§aArmy disbanded."));
                 }
+                PacketDistributor.sendToPlayer(player, MapDataService.buildArmyPayload(player));
                 return;
             }
 
@@ -512,6 +515,7 @@ public class ArmyManager extends SavedData {
 
                 manager.disbandLegion(payload.armyId());
                 manager.setDirty();
+                PacketDistributor.sendToPlayer(player, MapDataService.buildArmyPayload(player)); //this line may cause bugs with legion disbanding, check while testing
                 player.sendSystemMessage(Component.literal("§aLegion disbanded."));
             }
         });
