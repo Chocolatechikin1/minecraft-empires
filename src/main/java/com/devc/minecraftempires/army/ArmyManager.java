@@ -164,10 +164,18 @@ public class ArmyManager extends SavedData {
         Army army = activeArmies.get(armyId);
         if (army == null) return false;
 
-        for (UUID cohortId : new ArrayList<>(army.getDeployedCohortIds())) {
+        for(UUID cohortId : new ArrayList<>(army.getDeployedCohortIds())) {
             Cohort c = cohortRegistry.get(cohortId);
             if (c != null) {
                 if (!c.isGarrisoned()) {
+                    //update parent legion to the army's current field position (bug: legion teleports back to original army raise position instead of remaining where the army was disbanded)
+                    for (Legion legion : activeLegions.values()) {
+                        if (allCohortsOf(legion).contains(c)) {
+                            legion.setStoredPosition(army.getStoredPosition());
+                            legion.setPrecisePos(army.getPreciseX(), army.getPreciseZ());
+                            break;
+                        }
+                    }
                     // Non-garrisoned: return to Legion pool
                     c.setAssignedArmyId(null);
                 } else {
