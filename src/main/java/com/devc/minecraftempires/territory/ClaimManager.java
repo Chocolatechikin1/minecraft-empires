@@ -1,277 +1,188 @@
 package com.devc.minecraftempires.territory;
 
-//import dependencies
+import com.devc.minecraftempires.MinecraftEmpires;
+import com.devc.minecraftempires.army.Army;
+import com.devc.minecraftempires.army.ArmyManager;
+import com.devc.minecraftempires.army.Cohort;
+import com.devc.minecraftempires.army.Legion;
+import com.devc.minecraftempires.state.StateBalance;
+import com.devc.minecraftempires.state.StateData;
+import com.devc.minecraftempires.state.StateManager;
 import com.mojang.serialization.Codec;
+import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.tags.BiomeTags;
+import net.minecraft.util.datafix.DataFixTypes;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
-import net.minecraft.util.datafix.DataFixTypes;
 
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 
+/** Overworld claims. The cached counts make large-state expansion linear in the new area. */
 public class ClaimManager extends SavedData {
-    //central data storage, HashMap for O(1) lookups, key is ChunkPos, value is ChunkData
     private final Map<ChunkPos, ChunkData> claims = new HashMap<>();
-
-    // Tracks the core "City Altar" chunk for a given settlement ID
     private final Map<String, ChunkPos> settlementCenters = new HashMap<>();
+    private final Map<UUID, Integer> claimCounts = new HashMap<>();
 
-    //standard identifier
-    private static final String DATA_NAME = "minecraftempires_claims";
-    private static final String CLAIMS_LIST_KEY = "ClaimsList";
-    private static final String CHUNK_POS_KEY = "ChunkPosLong";
-
+    //codec and type for saving/loading
     private static final Codec<ClaimManager> CODEC = CompoundTag.CODEC.xmap(ClaimManager::fromTag, ClaimManager::toTag);
-
-    public static final SavedDataType<ClaimManager> TYPE = new SavedDataType<>(
-        Identifier.withDefaultNamespace(DATA_NAME),
-        ClaimManager::new,
-        CODEC,
-        DataFixTypes.LEVEL
-    );
-
-    //constructor
-    public ClaimManager() {
-        //initialize the claims map
-    }
-
-    //access method to fetch or create new instance
+    public static final SavedDataType<ClaimManager> TYPE = new SavedDataType<>(Identifier.withDefaultNamespace("minecraftempires_claims"), ClaimManager::new, CODEC, DataFixTypes.LEVEL);
+    
     public static ClaimManager get(ServerLevel level) {
-        return level.getDataStorage().computeIfAbsent(TYPE);
+        return level.getServer().overworld().getDataStorage().computeIfAbsent(TYPE);
     }
-
-    //claim management methods
-    //claim a chunk
-    public void setClaim(ChunkPos pos, UUID ownerUUID, String settlementID, boolean isGarrisoned, int tier) {
-        ChunkData data = new ChunkData(ownerUUID, settlementID, isGarrisoned, tier);
-        claims.put(pos, data);
-        setDirty(); //flag for  NeoForge that this data changed and MUST be saved to disk
+    public void setClaim(ChunkPos pos, UUID owner, String settlement, boolean garrisoned, int tier) {
+        if (owner == null) return;
+        ChunkData old = claims.put(pos, new ChunkData(owner, settlement, garrisoned, tier));
+        if (old != null && old.getOwnerUUID() != null) claimCounts.merge(old.getOwnerUUID(), -1, Integer::sum);
+        claimCounts.merge(owner, 1, Integer::sum);
+        setDirty();
     }
-
-    //unclaim a chunk
     public void removeClaim(ChunkPos pos) {
-        if (claims.remove(pos) != null) {
+        ChunkData old = claims.remove(pos);
+        if (old != null) {
+            if (old.getOwnerUUID() != null) claimCounts.merge(old.getOwnerUUID(), -1, Integer::sum);
             setDirty();
         }
     }
-
-    //retreive chunk data at a coordinate point, returns null if unclaimed
-    public ChunkData getClaim(ChunkPos pos) {
-        return claims.get(pos);
+    public void rebuildClaimCounts() {
+        claimCounts.clear();
+        for (ChunkData data : claims.values()) if (data.getOwnerUUID() != null) claimCounts.merge(data.getOwnerUUID(), 1, Integer::sum);
     }
 
-    //method to check if chunk is claimed
-    public boolean isClaimed(ChunkPos pos) {
-        return claims.containsKey(pos);
+    //getters and setters
+    public ChunkData getClaim(ChunkPos pos) { return claims.get(pos); }
+    public boolean isClaimed(ChunkPos pos) { return claims.containsKey(pos); }
+    public Map<ChunkPos, ChunkData> getClaimsView() { return Collections.unmodifiableMap(claims); }
+    public Map<String, ChunkPos> getSettlementCentersView() { return Collections.unmodifiableMap(settlementCenters); }
+    public int getClaimCountForState(UUID state) { return claimCounts.getOrDefault(state, 0); }
+    public double getChunkDistance(ChunkPos a, ChunkPos b) { return Math.hypot((double) a.x() - b.x(), (double) a.z() - b.z()); }
+    public double getProtectiveRadius(int ignoredTier) { return StateBalance.SETTLEMENT_RADIUS / 16.0; }
+    
+    //settlement center management
+    public void registerSettlementCenter(String settlement, ChunkPos pos) { settlementCenters.put(settlement, pos); setDirty(); }
+    public void removeSettlementCenter(String settlement) { if (settlementCenters.remove(settlement) != null) setDirty(); }
+    public void clearAllClaimsForState(UUID state) {
+        if (claims.values().removeIf(data -> state.equals(data.getOwnerUUID()))) { rebuildClaimCounts(); setDirty(); }
+    }
+    public void clearAllClaimsForSettlement(String settlement) {
+        if (claims.values().removeIf(data -> settlement.equals(data.getSettlementID()))) { rebuildClaimCounts(); setDirty(); }
     }
 
-    public Map<ChunkPos, ChunkData> getClaimsView() { // PHASE 3
-        return Collections.unmodifiableMap(claims);
+    /** Do not force world generation merely to sample water on the map's distant edge. */
+    //land claim checker
+    public static boolean isClaimableLand(ServerLevel level, ChunkPos chunk) {
+        BlockPos sample = new BlockPos(chunk.x() * 16 + 8, 64, chunk.z() * 16 + 8);
+        // If the chunk is not generated, we cannot determine if it is claimable. This prevents players from claiming ungenerated chunks.
+        if (!level.getWorldBorder().isWithinBounds(sample)) return false;
+        return !level.hasChunkAt(sample) || (!level.getBiome(sample).is(BiomeTags.IS_OCEAN) && !level.getBiome(sample).is(BiomeTags.IS_RIVER));
     }
 
-    public Map<String, ChunkPos> getSettlementCentersView() { // PHASE 3
-        return Collections.unmodifiableMap(settlementCenters);
+    /** Legacy overload is intentionally unable to conquer without a server/diplomacy context. */
+    public boolean tryFlipBorder(ChunkPos pos, UUID attacker, String settlement) { return false; }
+    //main claim function
+    public boolean tryFlipBorder(ServerLevel level, ChunkPos pos, UUID attacker, String settlement) {
+        if (level != level.getServer().overworld()) return false;
+        StateManager states = StateManager.get(level);
+        StateData state = states.getState(attacker);
+        ChunkData old = claims.get(pos);
+        if (state == null || (old != null && attacker.equals(old.getOwnerUUID()))) return false;
+        if (!states.canAcquireChunks(state, getClaimCountForState(attacker), 1)) return false;
+        if (old != null && (!states.areAtWar(attacker, old.getOwnerUUID()) || old.isGarrisoned())) return false;
+        if (protectsSettlement(states, pos, attacker)) return false;
+        if (!isClaimableLand(level, pos)) return false;
+        UUID defender = old == null ? null : old.getOwnerUUID();
+        setClaim(pos, attacker, settlement, false, 1);
+        if (defender != null) BreachAlertService.recordBreach(level, pos, defender, attacker);
+        return true;
     }
 
-    //settlement management methods
-    //calculates Euclidean distance between two chunks
-    public double getChunkDistance(ChunkPos pos1, ChunkPos pos2) {
-        int dx = pos1.x() - pos2.x();
-        int dz = pos1.z() - pos2.z();
-        return Math.sqrt(dx * dx + dz * dz);
-    }
-
-    //protective settlement radius (increases by tier)
-    public double getProtectiveRadius(int tier){
-        return 6.0 + (tier * 4.0); // Base radius of 6 chunks, increasing by 4 chunks per tier
-    }
-
-    //center altar chunk
-    public void registerSettlementCenter(String settlementID, ChunkPos centerPos) {
-        settlementCenters.put(settlementID, centerPos);
-        setDirty();
-    }
-
-    //main border flipping logic: called when a hostile unit enters a chunk
-    public boolean tryFlipBorder(ChunkPos targetPos, UUID attackerUUID, String attackerSettlementID) {
-        return tryFlipBorderInternal(null, targetPos, attackerUUID, attackerSettlementID);
-    }
-
-    /**
-     * Phase 3-aware overload. Future army movement code should use this version so successful
-     * hostile border crossings generate both chat warnings and map breach markers.
-     */
-    public boolean tryFlipBorder(
-            ServerLevel level,
-            ChunkPos targetPos,
-            UUID attackerUUID,
-            String attackerSettlementID
-    ) {
-        return tryFlipBorderInternal(level, targetPos, attackerUUID, attackerSettlementID);
-    }
-
-    private boolean tryFlipBorderInternal(
-            ServerLevel level,
-            ChunkPos targetPos,
-            UUID attackerUUID,
-            String attackerSettlementID
-    ) {
-        ChunkData targetData = claims.get(targetPos);
-        UUID defenderStateId = targetData == null ? null : targetData.getOwnerUUID();
-
-        //if land is unclaimed, take instantly
-        if (targetData == null) {
-            setClaim(targetPos, attackerUUID, attackerSettlementID, false, 1);
-            return true;
+    private boolean protectsSettlement(StateManager states, ChunkPos pos, UUID attacker) {
+        // Older saves had a 3x3 footprint. Protection still uses the agreed radius even
+        // when a nearby chunk lacks the settlement id; it never silently grants land.
+        for (SettlementData settlement : states.getAllSettlements()) {
+            if (!attacker.equals(settlement.getOwningStateId()) && StateManager.isInSettlementFootprint(settlement.getCenterAltarPos(), pos)) return true;
         }
-
-        //if chunk is garrisoned, cannot flip passively
-        if (targetData.isGarrisoned()) {
-            return false; //triggers a siege or battle
-        }
-
-        //defending settlement core locator
-        String defenderSettlement = targetData.getSettlementID();
-        ChunkPos defenderCore = settlementCenters.get(defenderSettlement);
-
-        //if core missing, land is considered abandoned, attacker takes it
-        if (defenderCore == null) {
-            setClaim(targetPos, attackerUUID, attackerSettlementID, false, 1);
-            notifyBreachIfNeeded(level, targetPos, defenderStateId, attackerUUID);
-            return true;
-        }
-
-        //calculate if attackers have reached the radius of the settlement
-        double distanceToCore = getChunkDistance(targetPos, defenderCore);
-        double protectiveRadius = getProtectiveRadius(targetData.getSettlementTier());
-
-        if (distanceToCore > protectiveRadius) {
-            // Attacker is outside the core protection. Flip the un-garrisoned land!
-            setClaim(targetPos, attackerUUID, attackerSettlementID, false, 1);
-            notifyBreachIfNeeded(level, targetPos, defenderStateId, attackerUUID);
-            return true;
-        }
-
-        // Attacker hit the protective radius. Passive flipping stops here.
         return false;
     }
 
-    private static void notifyBreachIfNeeded(
-            ServerLevel level,
-            ChunkPos targetPos,
-            UUID defenderStateId,
-            UUID attackerStateId
-    ) {
-        if (level != null) {
-            BreachAlertService.recordBreach(level, targetPos, defenderStateId, attackerStateId);
+    //campaign area claimer, with additional checks for nearby enemies and settlement capture.
+    public List<ChunkPos> claimCampaignArea(ServerLevel level, Army army) {
+        List<ChunkPos> acquired = new ArrayList<>();
+        if (level != level.getServer().overworld() || !army.isOnCampaign() || army.isEngaged()) return acquired;
+        UUID attacker = army.getOwningStateId();
+        StateManager states = StateManager.get(level);
+        if (states.getState(attacker) == null) return acquired;
+        List<BlockPos> defenders = new ArrayList<>();
+        ArmyManager armies = ArmyManager.get(level);
+        for (Legion legion : armies.getAllLegions()) {
+            if (!states.areAtWar(attacker, legion.getOwningStateId())) continue;
+            for (Cohort cohort : legion.allCohorts()) if (cohort.isAlive()) defenders.add(cohort.getStoredPosition());
         }
+        for (Army other : armies.getAllArmies()) {
+            if (states.areAtWar(attacker, other.getOwningStateId()) && other.isViable(armies)) defenders.add(other.getStoredPosition());
+        }
+        BlockPos position = army.getStoredPosition();
+        // Capture the protected core only after reaching its altar and removing its defenders.
+        for (SettlementData settlement : new ArrayList<>(states.getAllSettlements())) {
+            if (!states.areAtWar(attacker, settlement.getOwningStateId())
+                    || horizontalDistanceSquared(position, settlement.getCenterAltarPos()) > 16L * 16
+                    || threatened(settlement.getCenterAltarPos(), defenders)) continue;
+            List<ChunkPos> captured = claims.entrySet().stream()
+                    .filter(e -> settlement.getSettlementId().toString().equals(e.getValue().getSettlementID()) && !attacker.equals(e.getValue().getOwnerUUID()))
+                    .map(Map.Entry::getKey).toList();
+            if (states.captureSettlement(level, settlement.getSettlementId(), attacker)) acquired.addAll(captured);
+        }
+        List<ChunkPos> candidates = StateManager.squareChunks(position, StateBalance.CAMPAIGN_RADIUS);
+        candidates.sort(Comparator.comparingLong(c -> horizontalDistanceSquared(position, new BlockPos(c.x() * 16 + 8, position.getY(), c.z() * 16 + 8))));
+        for (ChunkPos candidate : candidates) {
+            BlockPos center = new BlockPos(candidate.x() * 16 + 8, position.getY(), candidate.z() * 16 + 8);
+            if (threatened(center, defenders)) continue;
+            // Passing an ally or peaceful neighbor never transfers its land or declares war.
+            if (tryFlipBorder(level, candidate, attacker, "")) acquired.add(candidate);
+        }
+        if (!acquired.isEmpty()) states.refreshProgression(level);
+        return acquired;
+    }
+    //returns true if the position is within 100 blocks of any enemy position.
+    private static boolean threatened(BlockPos position, List<BlockPos> enemies) {
+        for (BlockPos enemy : enemies) if (horizontalDistanceSquared(position, enemy) <= 100L * 100) return true;
+        return false;
+    }
+    //gets the squared horizontal distance between two positions, ignoring Y.
+    private static long horizontalDistanceSquared(BlockPos a, BlockPos b) {
+        long dx = (long) a.getX() - b.getX(), dz = (long) a.getZ() - b.getZ();
+        return dx * dx + dz * dz;
     }
 
-    //serialization
     private CompoundTag toTag() {
-        ListTag list = new ListTag();
         CompoundTag tag = new CompoundTag();
-
-        for (Map.Entry<ChunkPos, ChunkData> entry : claims.entrySet()) {
-            list.add(toEntryTag(entry.getKey(), entry.getValue()));
-        }
-
-        //save settlement centers as well
-        CompoundTag centersTag = new CompoundTag();
-        for (Map.Entry<String, ChunkPos> entry : settlementCenters.entrySet()) {
-            centersTag.putLong(entry.getKey(), entry.getValue().pack());
-        }
-        tag.put(CLAIMS_LIST_KEY, list);
-        tag.put("SettlementCenters", centersTag);
+        ListTag list = new ListTag();
+        claims.forEach((pos, data) -> { CompoundTag item = data.toNBT(); item.putLong("ChunkPosLong", pos.pack()); list.add(item); });
+        tag.put("ClaimsList", list);
+        CompoundTag centers = new CompoundTag();
+        settlementCenters.forEach((id, pos) -> centers.putLong(id, pos.pack()));
+        tag.put("SettlementCenters", centers);
         return tag;
     }
-
     private static ClaimManager fromTag(CompoundTag tag) {
         ClaimManager manager = new ClaimManager();
-
-        if (tag.contains(CLAIMS_LIST_KEY)) {
-            ListTag list = tag.getList(CLAIMS_LIST_KEY).orElse(new ListTag());
-            
-            for (int i = 0; i < list.size(); i++) {
-                CompoundTag entryTag = list.getCompound(i).orElse(new CompoundTag());
-                decodeEntryTag(entryTag).ifPresent(entry -> manager.claims.put(entry.pos(), entry.data()));
-            }
+        ListTag list = tag.getList("ClaimsList").orElse(new ListTag());
+        for (int i = 0; i < list.size(); i++) {
+            try {
+                CompoundTag item = list.getCompound(i).orElseThrow();
+                if (!item.contains("ChunkPosLong")) continue;
+                ChunkData data = ChunkData.fromNBT(item);
+                if (data.getOwnerUUID() != null) manager.claims.put(ChunkPos.unpack(item.getLong("ChunkPosLong").orElseThrow()), data);
+            } catch (RuntimeException malformed) { MinecraftEmpires.LOGGER.warn("Skipped invalid saved claim", malformed); }
         }
-
-        //load settlement centers
-        if (tag.contains("SettlementCenters")) {
-            CompoundTag centersTag = tag.getCompound("SettlementCenters").orElse(new CompoundTag());
-            for (String settlementID : centersTag.keySet()) {
-                long packedPos = centersTag.getLong(settlementID).orElse(0L);
-                ChunkPos centerPos = ChunkPos.unpack(packedPos);
-                manager.settlementCenters.put(settlementID, centerPos);
-            }
-        }
-
+        CompoundTag centers = tag.getCompound("SettlementCenters").orElse(new CompoundTag());
+        for (String id : centers.keySet()) centers.getLong(id).ifPresent(p -> manager.settlementCenters.put(id, ChunkPos.unpack(p)));
+        manager.rebuildClaimCounts();
         return manager;
-    }
-
-    private static CompoundTag toEntryTag(ChunkPos pos, ChunkData data) {
-        CompoundTag entryTag = data.toNBT();
-        entryTag.putLong(CHUNK_POS_KEY, pos.pack());
-        return entryTag;
-    }
-
-    private static java.util.Optional<ClaimEntry> decodeEntryTag(CompoundTag entryTag) {
-        if (!entryTag.contains(CHUNK_POS_KEY)) {
-            return java.util.Optional.empty();
-        }
-
-        long posLong = entryTag.getLong(CHUNK_POS_KEY).orElse(0L);
-        ChunkPos pos = ChunkPos.unpack(posLong);
-        ChunkData data = ChunkData.fromNBT(entryTag);
-        return java.util.Optional.of(new ClaimEntry(pos, data));
-    }
-
-    private record ClaimEntry(ChunkPos pos, ChunkData data) {}
-
-    //get the total terrutory (claims) owned by a specific state for tax purposes
-    public int getClaimCountForState(UUID stateId) {
-        int count = 0;
-        for (ChunkData data : this.claims.values()) {
-            if (data.getOwnerUUID().equals(stateId)) {
-                count++;
-            }
-        }
-        return count;
-    }
-
-    //clear chunk claims when disbanding a state
-    public void clearAllClaimsForState(UUID stateId) {
-        boolean chunksRemoved = this.claims.entrySet().removeIf(entry -> entry.getValue().getOwnerUUID().equals(stateId));
-        if (chunksRemoved) {
-            this.setDirty(); // CRITICAL: Tells the server to save the cleared map to disk!
-        }
-    }
-
-    // Removes all chunk claims that belong to a specific settlement.
-    // Used when a settlement is disbanded so the territory reverts to unclaimed.
-    public void clearAllClaimsForSettlement(String settlementId) {
-        boolean removed = this.claims.entrySet().removeIf(entry -> settlementId.equals(entry.getValue().getSettlementID()));
-        if (removed) {
-            setDirty();
-        }
-    }
-
-    // Removes a settlement's altar anchor from the center registry.
-    // This entry is used for protective radius calculations — it is NOT the same as a province.
-    // Provinces are a broader territorial concept and may span multiple settlements and open land.
-    // Always call this alongside clearAllClaimsForSettlement when disbanding a settlement.
-    public void removeSettlementCenter(String settlementId) {
-        if (settlementCenters.remove(settlementId) != null){
-            setDirty();
-        }
     }
 }

@@ -1,103 +1,86 @@
 package com.devc.minecraftempires.client.gui.screen;
 
-import com.devc.minecraftempires.network.packet.AbandonSettlementPayload;
-import net.minecraft.ChatFormatting;
+import com.devc.minecraftempires.client.ClientNetworking;
+import com.devc.minecraftempires.client.map.ClientManagementData;
+import com.devc.minecraftempires.network.packet.*;
+import com.devc.minecraftempires.state.StateBalance;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.neoforged.neoforge.client.network.ClientPacketDistributor;
-
 import java.util.UUID;
 
-//settlement management UI, triggered by right-clicking the altar
-//TODO (UI sprint): rename, population/tier display, upgrade path, etc.
-public class SettlementManagementScreen extends Screen {
-
-    //color selection
-    private static final int BG_PANEL    = 0xEE0D1218; // dark panel
-    private static final int BORDER_GOLD = 0xFFFFD45A; // gold accent
-    private static final int DIVIDER     = 0xFF657381; // gray
-    private static final int TEXT_TITLE  = 0xFFFFD45A; // gold
-    private static final int TEXT_HINT   = 0xFF87939E; // medium gray
-    private static final int TEXT_WARN   = 0xFFFF4444; // red
-
-    //UI window size
-    private static final int PANEL_W = 240;
-    private static final int PANEL_H = 140;
-
+//settlement management screen for players to manage their settlements
+public final class SettlementManagementScreen extends Screen {
     private final UUID settlementId;
     private final String settlementName;
     private final BlockPos altarPos;
+    private EditBox name;
+    private int ticks;
+    private boolean confirmAbandon;
 
-    public SettlementManagementScreen(UUID settlementId, String settlementName, BlockPos altarPos) {
-        super(Component.literal(settlementName));
-        this.settlementId   = settlementId;
-        this.settlementName = settlementName;
-        this.altarPos       = altarPos;
+    //constructor for the settlement management screen
+    public SettlementManagementScreen(UUID id, String name, BlockPos altar) {
+        super(Component.literal("Settlement Management"));
+        settlementId = id; settlementName = name; altarPos = altar;
     }
 
-    @Override
-    protected void init() {
-        super.init();
-
-        int panelX = (this.width  - PANEL_W) / 2;
-        int panelY = (this.height - PANEL_H) / 2;
-        int btnW   = 200;
-        int btnX   = panelX + (PANEL_W - btnW) / 2;
-
-        // "Abandon Settlement" button
-        this.addRenderableWidget(
-            Button.builder(
-                Component.literal("Abandon Settlement"),
-                btn -> {
-                    ClientPacketDistributor.sendToServer(new AbandonSettlementPayload(this.settlementId, this.altarPos)); //send packet to server to abandon settlement
-                    this.onClose(); //on button click, send packet to server and close the screen
-                }
-            ).bounds(btnX, panelY + 78, btnW, 20).build()
-        );
-
-        // "Close" button
-        this.addRenderableWidget(
-            Button.builder(
-                Component.literal("Close"),
-                btn -> this.onClose()
-            ).bounds(btnX, panelY + 104, btnW, 20).build()
-        );
+    //sends a packet to the server with the specified action and text, then requests updated map data
+    private void action(String action, String text) {
+        ClientPacketDistributor.sendToServer(new StateActionPayload(action, settlementId, altarPos, text));
+        ClientNetworking.requestMapData();
     }
 
-    @Override
-    public void extractRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {
-        int panelX = (this.width  - PANEL_W) / 2;
-        int panelY = (this.height - PANEL_H) / 2;
-        int cx     = this.width / 2;
-
-        //ui background
-        graphics.fill(panelX, panelY, panelX + PANEL_W, panelY + PANEL_H, BG_PANEL);
-
-        //top border
-        graphics.fill(panelX, panelY, panelX + PANEL_W, panelY + 1, BORDER_GOLD);
-
-        //settlement name display
-        graphics.centeredText(this.font, Component.literal(this.settlementName), cx, panelY + 12, TEXT_TITLE);
-
-        //hint line
-        graphics.centeredText(this.font, Component.literal("Manage your settlement").withStyle(ChatFormatting.GRAY), cx, panelY + 26, TEXT_HINT);
-
-        //divider
-        graphics.fill(panelX + 10, panelY + 42, panelX + PANEL_W - 10, panelY + 43, DIVIDER);
-
-        //warning text above the abandon button
-        graphics.centeredText(this.font, Component.literal("Abandoning cannot be undone.").withStyle(ChatFormatting.DARK_RED), cx, panelY + 60, TEXT_WARN);
-
-        //render buttons on top
-        super.extractRenderState(graphics, mouseX, mouseY, partialTick);
+    //helper method to create a button with the specified label, y position, and action
+    private void button(String label, int y, Runnable action) {
+        addRenderableWidget(Button.builder(Component.literal(label), b -> action.run()).bounds(width / 2 - 130, y, 260, 20).build());
     }
 
-    @Override
-    public boolean isPauseScreen() { return false; }
+    //initializes the settlement management screen, setting up the name edit box and buttons for various actions
+    @Override protected void init() {
+        String previous = name == null ? settlementName : name.getValue();
+        name = new EditBox(font, width / 2 - 130, 45, 185, 20, Component.literal("Settlement Name"));
+        name.setMaxLength(60); name.setValue(previous); addRenderableWidget(name);
+        addRenderableWidget(Button.builder(Component.literal("Rename"), b -> action("RENAME", name.getValue())).bounds(width / 2 + 59, 45, 71, 20).build());
+        button("Upgrade to city: " + StateBalance.CITY_UPGRADE_COST, 113, () -> action("UPGRADE", "")); //button for upgrading the settlement to a city
+        button("Raise legion", 137, () -> { //button for raising a legion from the settlement
+            ClientPacketDistributor.sendToServer(new ArmyActionPayload("RECRUIT_LEGION", settlementId, altarPos));
+            ClientNetworking.requestMapData();
+        });
 
-    public UUID getSettlementId()   { return settlementId; }
-    public BlockPos getAltarPos()   { return altarPos; }
+        //button for abandoning the settlement, with a confirmation step to prevent accidental abandonment
+        button(confirmAbandon ? "Confirm: abandon settlement" : "Abandon settlement", 161, () -> {
+            if (!confirmAbandon) { confirmAbandon = true; clearWidgets(); init(); return; }
+            ClientPacketDistributor.sendToServer(new AbandonSettlementPayload(settlementId, altarPos));
+            minecraft.gui.setScreen(new EmpireManagementScreen());
+        });
+        //return button to go back to the empire management screen
+        button("Back to management", height - 25, () -> minecraft.gui.setScreen(new EmpireManagementScreen()));
+    }
+
+    @Override public void tick(){ 
+        if (++ticks % 20 == 0) ClientNetworking.requestMapData(); 
+    }
+
+    //renders the settlement management screen, displaying the settlement's tier, population, garrison capacity, and other relevant information
+    @Override public void extractRenderState(GuiGraphicsExtractor g, int x, int y, float tick) {
+        g.fill(0, 0, width, height, 0xF0101820);
+        g.centeredText(font, title, width / 2, 15, 0xFFFFD45A);
+        var d = ClientManagementData.get();
+        var s = d.settlements().stream().filter(e -> e.id().equals(settlementId)).findFirst().orElse(null);
+        if (s != null) {
+            g.centeredText(font, Component.literal(s.tierLabel() + " | Population " + s.population() + " | Garrison capacity " + s.capacity()), width / 2, 77, 0xFFFFFFFF);
+            g.centeredText(font, Component.literal("City requires " + StateBalance.CITY_POPULATION + " residents | " + (d.freeLegion() ? "1st raised Legion is free" : "Legion costs 5,000")), width / 2, 94, 0xFFCCD5DE);
+        }
+        super.extractRenderState(g, x, y, tick);
+    }
+
+    @Override public boolean isPauseScreen() { return false; }
+
+    //getters
+    public UUID getSettlementId() { return settlementId; }
+    public BlockPos getAltarPos() { return altarPos; }
 }

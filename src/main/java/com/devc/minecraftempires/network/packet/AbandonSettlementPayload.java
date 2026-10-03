@@ -59,7 +59,10 @@ public record AbandonSettlementPayload(UUID settlementId, BlockPos altarPos) imp
             }
 
             //if the settlement is not owned by the player's state, send error message
-            if (!settlement.getOwningStateId().equals(playerState.getStateId())) { 
+            if (!settlement.getOwningStateId().equals(playerState.getStateId())
+                    || !serverPlayer.getUUID().equals(playerState.getLeaderId())
+                    || !settlement.getCenterAltarPos().equals(payload.altarPos())
+                    || level != level.getServer().overworld()) {
                 serverPlayer.sendSystemMessage(net.minecraft.network.chat.Component.literal("§c[Minecraft Empires] You do not own this settlement."));
                 return;
             }
@@ -69,7 +72,8 @@ public record AbandonSettlementPayload(UUID settlementId, BlockPos altarPos) imp
 
             //wipe the settlement data and unlock the altar block for breaking
             stateManager.disbandSettlement(payload.settlementId(), level);
-            stateManager.markAltarAbandoned(payload.altarPos());
+            stateManager.markAltarAbandoned(settlement.getCenterAltarPos());
+            com.devc.minecraftempires.network.ModNetworking.sendSnapshots(serverPlayer);
 
             //inform player
             serverPlayer.sendSystemMessage(net.minecraft.network.chat.Component.literal("§6[Minecraft Empires] §eAbandoned §f'" + settlementName + "§f'§e. Altar block breakable."));
