@@ -171,14 +171,22 @@ public class MinecraftEmpires {
     //clears BattleManager state when the server shuts down
     @SubscribeEvent
     public void onServerStopping(ServerStoppingEvent event) {
+        BattleManager.resolveAllOnShutdown(event.getServer());
         BattleManager.clearAll();
+        ModNetworking.clearAll();
         LOGGER.info("[Minecraft Empires] BattleManager cleared on server stop.");
+    }
+
+    @SubscribeEvent
+    public void onPlayerLogout(net.neoforged.neoforge.event.entity.player.PlayerEvent.PlayerLoggedOutEvent event) {
+        ModNetworking.clearPlayer(event.getEntity().getUUID());
     }
 
     //settlement altar protection logic
     @SubscribeEvent
     public void onBlockBreak(BreakBlockEvent event) {
         if (!(event.getLevel() instanceof net.minecraft.server.level.ServerLevel serverLevel)) return;
+        if (serverLevel != serverLevel.getServer().overworld()) return;
         net.minecraft.core.BlockPos pos = event.getPos();
         if (!serverLevel.getBlockState(pos).is(MinecraftEmpires.CITY_ALTAR.get())) return;
 
@@ -199,6 +207,7 @@ public class MinecraftEmpires {
         com.devc.minecraftempires.territory.SettlementData settlement = stateManager.getSettlementByAltarPos(pos);
 
         if (settlement == null) { //orphan altar, break
+            stateManager.clearAltarAbandoned(pos);
             return;
         }
 

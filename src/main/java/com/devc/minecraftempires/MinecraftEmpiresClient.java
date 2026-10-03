@@ -26,7 +26,6 @@ public class MinecraftEmpiresClient {
         //bus listeners
         NeoForge.EVENT_BUS.addListener(ClientEvents::onClientTick);
         NeoForge.EVENT_BUS.addListener(ClientEvents::onScreenInit);
-        NeoForge.EVENT_BUS.addListener(ClientEvents::onRightClickBlock);
     }
 
     private void onClientSetup(FMLClientSetupEvent event) {
