@@ -1,11 +1,13 @@
 package com.devc.minecraftempires.blocks;
 
+import com.devc.minecraftempires.network.ModNetworking;
+import com.devc.minecraftempires.network.packet.OpenSettlementPayload;
 import com.devc.minecraftempires.state.StateManager;
 import com.devc.minecraftempires.state.StateData;
 import com.devc.minecraftempires.territory.SettlementData;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
-import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionResult;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.entity.player.Player;
@@ -14,80 +16,41 @@ import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
+import net.neoforged.neoforge.network.PacketDistributor;
 import org.jetbrains.annotations.Nullable;
-import java.util.UUID;
-
-import com.devc.minecraftempires.territory.ClaimManager; 
-import com.devc.minecraftempires.territory.ChunkData; 
-import net.minecraft.world.level.ChunkPos; 
 
 public class CityAltarBlock extends Block {
-
-    public CityAltarBlock(Properties properties) {
-        super(properties);
-    }
+    public CityAltarBlock(Properties properties) { super(properties); }
 
     @Override
     public void setPlacedBy(Level level, BlockPos pos, BlockState state, @Nullable LivingEntity placer, ItemStack stack) {
         super.setPlacedBy(level, pos, state, placer, stack);
-
-        // Security Guard: Data logic must strictly evaluate only on the Logical Server
-        if (!level.isClientSide() && level instanceof ServerLevel serverLevel && placer instanceof Player player) {
-            
-            // 1. Fetch our global StateManager state machine (FIXED: references serverLevel directly)
-            StateManager manager = StateManager.get(serverLevel);
-            
-            // 2. Resolve the player's overarching macro State profile (FIXED: references manager)
-            StateData playerState = manager.getStateByPlayer(player.getUUID());
-            
-            // Guard Clause: Check if the player is a nomadic citizen without an established country
-            if (playerState == null) {
-                player.sendSystemMessage(Component.literal("§c[Minecraft Empires] Create or join a state to place an altar."));
-                
-                // Refund the block to the player and safely break it to prevent free claims
-                level.destroyBlock(pos, true, player);
-                return;
-            }
-
-            ClaimManager claimManager = ClaimManager.get(serverLevel); 
-            ChunkPos altarChunkPos = new ChunkPos(pos.getX() >> 4, pos.getZ() >> 4);
-            
-            if (claimManager.isClaimed(altarChunkPos)) { 
-                ChunkData chunkData = claimManager.getClaim(altarChunkPos); 
-                // If it's claimed, and the owner is NOT this player's state, block it. 
-                if (!chunkData.getOwnerUUID().equals(playerState.getStateId())) { 
-                    player.sendSystemMessage(Component.literal("§c[Minecraft Empires] You cannot establish a City Altar inside another state's territory!")); 
-                    level.destroyBlock(pos, true, player); 
-                    return; 
-                } 
-            } 
-
-            // 3. Initialize the unique local data model parameters
-            UUID settlementId = UUID.randomUUID();
-            String settlementName = player.getName().getString() + "'s Outpost";
-            
-            SettlementData freshSettlement = new SettlementData(
-                settlementId, 
-                playerState.getStateId(), 
-                settlementName, 
-                pos
-            );
-            
-            // 4. Register links inside both the macro State structure and the global system mapping
-            playerState.addSettlement(settlementId);
-            manager.registerSettlement(settlementId, freshSettlement);
-            
-            // 5. Fire off the geometric abstract chunk claims matrix around the altar block
-            manager.establishSettlementClaims(serverLevel, freshSettlement, playerState.getStateId());
-            
-            // 6. Provide clear visual confirmation feedback to the player
-            player.sendSystemMessage(Component.literal("§6§l[Minecraft Empires] §aEstablished §e" + settlementName + "§a linked to the realm of §b" + playerState.getStateName() + "§a."));
-        }
+        if (placer instanceof ServerPlayer player) openAltar(player, pos);
     }
 
-    //settlement management screen opening call
+    private void openAltar(ServerPlayer player, BlockPos pos) {
+        if (player.level() != player.level().getServer().overworld()) {
+            player.sendSystemMessage(Component.literal("[Minecraft Empires] City Altars can only found settlements in the Overworld."));
+            return;
+        }
+        StateManager manager = StateManager.get(player.level());
+        SettlementData settlement = manager.getSettlementByAltarPos(pos);
+        if (settlement == null) {
+            manager.beginFounding(player, pos);
+            return;
+        }
+        StateData state = manager.getStateByPlayer(player.getUUID());
+        if (state == null || !state.getStateId().equals(settlement.getOwningStateId())) {
+            player.sendSystemMessage(Component.literal("[Minecraft Empires] This settlement belongs to another state."));
+            return;
+        }
+        ModNetworking.sendSnapshots(player);
+        PacketDistributor.sendToPlayer(player, new OpenSettlementPayload(settlement.getSettlementId(), settlement.getSettlementName(), pos));
+    }
+
     @Override
     protected InteractionResult useWithoutItem(BlockState state, Level level, BlockPos pos, Player player, BlockHitResult hitResult) {
+        if (player instanceof ServerPlayer serverPlayer) openAltar(serverPlayer, pos);
         return InteractionResult.SUCCESS;
     }
 }

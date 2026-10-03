@@ -12,7 +12,7 @@ import java.util.UUID;
 
 public class SettlementData {
     private final UUID settlementId; //settlement unique identifier
-    private final UUID owningStateId; //links settlements to a state
+    private UUID owningStateId; //changes when the settlement is captured
     private String settlementName; //settlement name
     private BlockPos centerAltarPos; //center altar
     
@@ -40,12 +40,12 @@ public class SettlementData {
     public SettlementData(UUID settlementId, UUID owningStateId, String settlementName, BlockPos centerAltarPos) {
         this.settlementId = settlementId;
         this.owningStateId = owningStateId;
-        this.settlementName = settlementName;
+        this.settlementName = com.devc.minecraftempires.state.StateManager.cleanName(settlementName);
         this.centerAltarPos = centerAltarPos;
         
         //settlement initialization defaults
         this.settlementTier = 1;
-        this.localPopulation = 10;
+        this.localPopulation = com.devc.minecraftempires.state.StateBalance.STARTING_POPULATION;
         this.garrisonCapacity = 50; 
         this.protectiveRadius = 100; //gives a protective area of 156 chunks
         this.localSiegeImmunityTicks = 0; //no immunity by default
@@ -56,16 +56,18 @@ public class SettlementData {
     //getters and setters
     public UUID getSettlementId() { return settlementId; }
     public UUID getOwningStateId() { return owningStateId; }
+    public void setOwningStateId(UUID id) { owningStateId = id; }
     public String getSettlementName() { return settlementName; }
-    public void setSettlementName(String name) { this.settlementName = name; }
+    public void setSettlementName(String name) { this.settlementName = com.devc.minecraftempires.state.StateManager.cleanName(name); }
     public BlockPos getCenterAltarPos() { return centerAltarPos; }
     
     public int getSettlementTier() { return settlementTier; }
     public int getLocalPopulation() { return localPopulation; } // PHASE 3
+    public void setLocalPopulation(int population) { localPopulation = Math.max(0, population); }
     public int getGarrisonCapacity() { return garrisonCapacity; } // PHASE 3
     public int getProtectiveRadius() { return protectiveRadius; }
     public int getLocalSiegeImmunityTicks() { return localSiegeImmunityTicks; }
-    public void setLocalSiegeImmunityTicks(int ticks) { this.localSiegeImmunityTicks = ticks; }
+    public void setLocalSiegeImmunityTicks(int ticks) { this.localSiegeImmunityTicks = Math.max(0, ticks); }
     public void tickLocalImmunity() {
         if (this.localSiegeImmunityTicks > 0) {
             this.localSiegeImmunityTicks--;
@@ -79,9 +81,8 @@ public class SettlementData {
 
     //progression logic
     public void upgradeSettlement() {
+        if (settlementTier >= com.devc.minecraftempires.state.StateBalance.MAXIMUM_SETTLEMENT_TIER) return;
         this.settlementTier++;
-        //example scaling math - can be tweaked later
-        this.protectiveRadius += 50; 
         this.garrisonCapacity += 100;
     }
 
@@ -164,13 +165,14 @@ public class SettlementData {
         
         BlockPos altarPos = BlockPos.of(tag.getLong("AltarPos").orElse(BlockPos.ZERO.asLong()));
         
+        //create a new SettlementData instance with the loaded values
         SettlementData settlement = new SettlementData(sId, stateId, name, altarPos);
-        settlement.settlementTier = tag.getInt("Tier").orElse(1);
-        settlement.localPopulation = tag.getInt("LocalPopulation").orElse(10);
-        settlement.garrisonCapacity = tag.getInt("GarrisonCap").orElse(50);
-        settlement.localSiegeImmunityTicks = tag.getInt("LocalImmunity").orElse(0);
-        settlement.protectiveRadius = tag.getInt("Radius").orElse(100);
-        settlement.isMartialLaw     = tag.getBoolean("MartialLaw").orElse(false);
+        settlement.settlementTier = Math.max(1, tag.getInt("Tier").orElse(1));
+        settlement.localPopulation = Math.max(0, tag.getInt("LocalPopulation").orElse(com.devc.minecraftempires.state.StateBalance.STARTING_POPULATION));
+        settlement.garrisonCapacity = Math.max(0, tag.getInt("GarrisonCap").orElse(50));
+        settlement.localSiegeImmunityTicks = Math.max(0, tag.getInt("LocalImmunity").orElse(0));
+        settlement.protectiveRadius = com.devc.minecraftempires.state.StateBalance.SETTLEMENT_RADIUS;
+        settlement.isMartialLaw = tag.getBoolean("MartialLaw").orElse(false);
 
         // Load biome tallies
         if (tag.contains("BiomeTallies")) {
