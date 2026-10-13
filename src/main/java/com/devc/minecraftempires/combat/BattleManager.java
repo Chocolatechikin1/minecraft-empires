@@ -6,212 +6,242 @@ import com.devc.minecraftempires.army.ArmyManager;
 import com.devc.minecraftempires.army.Cohort;
 import com.devc.minecraftempires.network.packet.BattleSyncPayload;
 import com.devc.minecraftempires.network.packet.OpenBattleMapPayload;
+import com.devc.minecraftempires.state.StateData;
+import com.devc.minecraftempires.state.StateManager;
+import com.mojang.serialization.Codec;
 import net.minecraft.core.BlockPos;
-import net.minecraft.resources.ResourceKey;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.resources.Identifier;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.world.level.Level;
+import net.minecraft.util.datafix.DataFixTypes;
+import net.minecraft.world.level.saveddata.SavedData;
+import net.minecraft.world.level.saveddata.SavedDataType;
 import net.neoforged.neoforge.network.PacketDistributor;
-
 import java.util.*;
 
-//battle manager class
-public final class BattleManager {
-    private static final double COHORT_SPACING   = 6.0;
-    private static final double ATTACKER_OFFSET_Z = -20.0;
-    private static final double DEFENDER_OFFSET_Z =  20.0;
-
-    private static final Map<ResourceKey<Level>, BattleManager> INSTANCES = new HashMap<>();
-
+//battle manager class, handles the management of battles, including starting, resolving, and finalizing battles
+/** Saved battle snapshots. This store is the sole committer of permanent battle results. */
+public final class BattleManager extends SavedData {
+    private static final Codec<BattleManager> CODEC = CompoundTag.CODEC.xmap(BattleManager::fromTag, BattleManager::toTag);
+    public static final SavedDataType<BattleManager> TYPE = new SavedDataType<>(
+            Identifier.withDefaultNamespace("minecraftempires_battles"), BattleManager::new, CODEC, DataFixTypes.LEVEL);
+    private final Map<UUID, BattleSession> activeBattles = new LinkedHashMap<>();
+    private final LinkedHashMap<UUID, String> completedResults = new LinkedHashMap<>();
+    private boolean recoveryPending;
+    public BattleManager() {}
     public static BattleManager get(ServerLevel level) {
-        return INSTANCES.computeIfAbsent(level.dimension(), k -> new BattleManager());
+        return level.getServer().overworld().getDataStorage().computeIfAbsent(TYPE);
     }
+    /** Kept for the existing shutdown hook; SavedData has no process-wide cache. */
+    public static void clearAll() {}
 
-    public static void clearAll() { INSTANCES.clear(); }
-
-    private final Map<UUID, BattleSession> activeBattles = new HashMap<>();
-
-    private BattleManager() {}
-
-    //start of a battle function
     public BattleSession startBattle(Army attacker, Army defender, ServerLevel level) {
-        BlockPos origin = attacker.getStoredPosition(); 
-        double originX  = origin.getX();
-        double originZ  = origin.getZ();
-
-        //save armies current positions to their camp
+        if (attacker.isEngaged()) return getBattle(attacker.getCurrentBattleId());
+        if (defender.isEngaged()) return getBattle(defender.getCurrentBattleId());
+        if (attacker.getArmyId().equals(defender.getArmyId())) return null;
+        ArmyManager manager = ArmyManager.get(level);
+        if (!attacker.isViable(manager) || !defender.isViable(manager)) return null;
+        BlockPos origin = attacker.getStoredPosition();
+        BattleSession session = new BattleSession(attacker.getArmyId(), defender.getArmyId(), origin.getX(), origin.getZ());
         attacker.setCampPosition(attacker.getStoredPosition());
         defender.setCampPosition(defender.getStoredPosition());
-
-        BattleSession session = new BattleSession(
-            attacker.getArmyId(), defender.getArmyId(), originX, originZ
-        );
-
-        ArmyManager armyManager = ArmyManager.get(level);
-        deployArmy(session, attacker, true,  ATTACKER_OFFSET_Z, armyManager); //deploy armies
-        deployArmy(session, defender, false, DEFENDER_OFFSET_Z, armyManager);
-
-        //lock the armies into battle
+        deployArmy(session, attacker, true, manager);
+        deployArmy(session, defender, false, manager);
         attacker.setCurrentBattleId(session.getBattleId());
         defender.setCurrentBattleId(session.getBattleId());
         attacker.clearWaypoints();
         defender.clearWaypoints();
-
         activeBattles.put(session.getBattleId(), session);
-
-        //notify all players
-        MinecraftEmpires.LOGGER.info(
-                "Battle {} started: Army {} (att) vs Army {} (def) at ({}, {}).",
-                session.getBattleId(), attacker.getArmyId(), defender.getArmyId(),
-                (int) originX, (int) originZ);
-
+        setDirty();
+        manager.setDirty();
         notifyOnlinePlayers(session, attacker, defender, level);
         return session;
     }
-
-    //deploy army units helper function
-    private void deployArmy(BattleSession session, Army army, boolean isAttacker, double offsetZ, ArmyManager armyManager) {
-        List<Cohort> combatCohorts = new ArrayList<>(); //arraylist of cohorts to deploy, use an arraylist for quick O(1) access by index
-        //loop through all available cohorts in the army and add them to the combatCohorts list if they are alive and not garrisoned
-        for (UUID cohortId : army.getDeployedCohortIds()) {
-            Cohort c = armyManager.resolveCohort(cohortId);
-            if (c != null && c.isAlive() && !c.isGarrisoned()) {
-                combatCohorts.add(c);
-            }
+    private void deployArmy(BattleSession session, Army army, boolean attacker, ArmyManager manager) {
+        // Defensive wrappers deliberately retain their garrison assignments.
+        for (UUID id : army.getDeployedCohortIds()) {
+            Cohort cohort = manager.resolveCohort(id);
+            if (cohort == null || !cohort.isAlive()) continue;
+            CohortData snapshot = CohortData.fromCohort(cohort, 0, attacker ? -20 : 20);
+            if (attacker) session.addAttackerCohort(snapshot); else session.addDefenderCohort(snapshot);
         }
-
-        int count  = combatCohorts.size();
-        double startX = -((count - 1) / 2.0) * COHORT_SPACING;
-
-        //loop through all cohorts and deploy them in a line with spacing (currently only a line formation, but can be expanded to more complex formations in the future)
-        for (int i = 0; i < count; i++) {
-            Cohort cohort = combatCohorts.get(i);
-            double x = startX + i * COHORT_SPACING;
-            CohortData data = CohortData.fromCohort(cohort, x, offsetZ);
-            if (isAttacker) session.addAttackerCohort(data);
-            else            session.addDefenderCohort(data);
-        }
+        session.applyFormation(attacker, BattleSession.Formation.TRIPLEX);
     }
-
-    //tick function to update all active battles
+    public boolean canControlSide(ServerPlayer player, BattleSession session, boolean attacker) {
+        if (player.level() != player.level().getServer().overworld()) return false;
+        StateData state = StateManager.get(player.level()).getStateByPlayer(player.getUUID());
+        Army army = ArmyManager.get(player.level()).getArmy(attacker ? session.getAttackerArmyId() : session.getDefenderArmyId());
+        return state != null && army != null && state.getStateId().equals(army.getOwningStateId())
+                && player.getUUID().equals(state.getLeaderId());
+    }
+    public boolean canSpectate(ServerPlayer player, BattleSession session) {
+        if (player.level() != player.level().getServer().overworld()) return false;
+        StateData state = StateManager.get(player.level()).getStateByPlayer(player.getUUID());
+        if (state == null) return false;
+        ArmyManager manager = ArmyManager.get(player.level());
+        Army attacker = manager.getArmy(session.getAttackerArmyId());
+        Army defender = manager.getArmy(session.getDefenderArmyId());
+        return attacker != null && state.getStateId().equals(attacker.getOwningStateId())
+                || defender != null && state.getStateId().equals(defender.getOwningStateId());
+    }
     public void tick(ServerLevel level) {
-        if (activeBattles.isEmpty()) return;
-        ArmyManager armyManager = ArmyManager.get(level);
-        List<UUID> toFinish = new ArrayList<>();
-
-        //loop through all active battles and update them, if they are not active anymore, add them to the toFinish list
-        for (BattleSession session : activeBattles.values()) {
-            if (!session.isActive()) {
-                toFinish.add(session.getBattleId());
-                continue;
+        if (level != level.getServer().overworld()) return;
+        ArmyManager manager = ArmyManager.get(level);
+        if (recoveryPending) {
+            recoveryPending = false;
+            // Never reconstruct fresh-strength armies after a restart: resolve the saved snapshots.
+            resolveAll(level);
+        }
+        for (BattleSession session : new ArrayList<>(activeBattles.values())) {
+            for (UUID id : new HashSet<>(session.getSpectatingPlayerIds())) {
+                ServerPlayer player = level.getServer().getPlayerList().getPlayer(id);
+                if (player == null || !canSpectate(player, session)) session.removeSpectator(id);
             }
-
-            //if the battle is being spectated, tick it and signal retreats for both sides, then broadcast the sync to all players (okay tf check this later that shouldnt be what the armies do)
-            if (session.isSpectated()) {
-                session.tick();
-
-                Army attackerArmy = armyManager.getArmy(session.getAttackerArmyId());
-                Army defenderArmy = armyManager.getArmy(session.getDefenderArmyId());
-                if (attackerArmy != null)
-                    signalRetreatsForSide(session, true, attackerArmy.getCampPosition(), session.getMapOriginZ());
-                if (defenderArmy != null)
-                    signalRetreatsForSide(session, false, defenderArmy.getCampPosition(), session.getMapOriginZ());
-
-                broadcastSync(session, level);
-            } else {
-                //no spectator advances the idle timer.
-                //auto-resolve is blocked during the grace period so players have time to open the specator view
-                session.tickIdle();
-
-                if (session.isAutoResolveAllowed()) {
-                    //grace period has elapsed: resolve the battle automatically
-                    Army attackerArmy = armyManager.getArmy(session.getAttackerArmyId());
-                    Army defenderArmy = armyManager.getArmy(session.getDefenderArmyId());
-                    if (attackerArmy != null && defenderArmy != null) {
-                        AutoResolveEngine.BattleOutcome outcome = AutoResolveEngine.resolve(session, attackerArmy, defenderArmy, armyManager);
-                        MinecraftEmpires.LOGGER.info( "Auto-resolved battle {}: {} (att -{}, def -{}).", session.getBattleId(), outcome.result(), outcome.attackerCasualties(), outcome.defenderCasualties());
-                    }
-                    else{
-                        session.setInactive();
-                    }
-                    toFinish.add(session.getBattleId());
+            if (session.isActive()) {
+                if (session.isSpectated()) {
+                    session.resetIdleTicks();
+                    session.tick(!hasCommander(session, true, level), !hasCommander(session, false, level));
+                } else {
+                    session.tickIdle();
+                    session.tickDeployment();
+                    if (session.isAutoResolveAllowed()) resolve(session, manager);
                 }
-                // else: still within the grace period — do nothing this tick
             }
-
-            if (!session.isActive()) toFinish.add(session.getBattleId());
+            setDirty();
+            if (!session.isActive()) finalizeBattle(session, level);
+            else broadcastSync(session, level);
         }
-
-        for (UUID id : toFinish) {
-            BattleSession finished = activeBattles.remove(id);
-            if (finished != null) finalizeBattle(finished, level);
+        // Old saves had battle IDs without any saved battle data. Unlock only those stale locks.
+        for (Army army : manager.getAllArmies()) {
+            if (army.isEngaged() && !activeBattles.containsKey(army.getCurrentBattleId())) {
+                army.setCurrentBattleId(null);
+                army.setCampPosition(null);
+                manager.setDirty();
+            }
         }
     }
-
-    //starts a retreat for a side, retreating to their camp position if it exists, otherwise retreating to the battle origin (note good autocorrect fix for campPos, suggests using army parameter and then getting the camp position from that, but this is fine)
-    private void signalRetreatsForSide(BattleSession session, boolean isAttacker, BlockPos campPos, double originZ) {
-        if (campPos == null) return;
-        double retreatX = campPos.getX() - session.getMapOriginX();
-        double retreatZ = campPos.getZ() - session.getMapOriginZ();
-        session.signalRetreat(retreatX, retreatZ, isAttacker);
+    private boolean hasCommander(BattleSession session, boolean attacker, ServerLevel level) {
+        return session.getSpectatingPlayerIds().stream().map(level.getServer().getPlayerList()::getPlayer)
+                .anyMatch(p -> p != null && canControlSide(p, session, attacker));
     }
-
-    //finalize battle function, called when a battle ends
+    private void resolve(BattleSession session, ArmyManager manager) {
+        AutoResolveEngine.resolve(session, manager.getArmy(session.getAttackerArmyId()),
+                manager.getArmy(session.getDefenderArmyId()), manager);
+    }
+    private void resolveAll(ServerLevel level) {
+        for (BattleSession session : new ArrayList<>(activeBattles.values())) {
+            if (session.isActive()) resolve(session, ArmyManager.get(level));
+            finalizeBattle(session, level);
+        }
+    }
+    public static void resolveAllOnShutdown(MinecraftServer server) {
+        get(server.overworld()).resolveAll(server.overworld());
+    }
     private void finalizeBattle(BattleSession session, ServerLevel level) {
-        ArmyManager armyManager = ArmyManager.get(level);
-        Army attacker = armyManager.getArmy(session.getAttackerArmyId());
-        Army defender = armyManager.getArmy(session.getDefenderArmyId());
-
-        if (attacker != null) finalizeArmy(attacker, session.getResult() == BattleSession.BattleResult.ATTACKER_WINS, session);
-        if (defender != null) finalizeArmy(defender, session.getResult() == BattleSession.BattleResult.DEFENDER_WINS, session);
-
-        armyManager.setDirty(); //mark dirty so next tick saves to disk
+        ArmyManager manager = ArmyManager.get(level);
+        if (!completedResults.containsKey(session.getBattleId())) {
+            commitSide(session, true, manager);
+            commitSide(session, false, manager);
+            completedResults.put(session.getBattleId(), session.getResult().name());
+            while (completedResults.size() > 128) completedResults.remove(completedResults.keySet().iterator().next());
+        }
+        // Send the terminal snapshot while spectators still know the battle, then discard the active entry.
+        broadcastSync(session, level);
+        activeBattles.remove(session.getBattleId());
+        manager.setDirty();
+        setDirty();
         MinecraftEmpires.LOGGER.info("Battle {} concluded: {}.", session.getBattleId(), session.getResult());
     }
-
-    //finalize army function, called when a battle ends, sets the army's current battle to null, and sets their stored position to their camp position if they won, or to the battle origin if they lost
-    private void finalizeArmy(Army army, boolean isWinner, BattleSession session) {
-        // Clear battle lock — Army continues its campaign
-        army.setCurrentBattleId(null);
-
-        //logic was flipped here, CHECK IF IT IS RIGHT
-        if (isWinner) { //if the army won, they remain on the field
-            BlockPos camp = army.getCampPosition();
-            army.setStoredPosition(camp != null ? camp : new BlockPos((int) session.getMapOriginX(), 64, (int) session.getMapOriginZ()));
-        } else { //if the army lost, they retreat to their camp position
-            army.setStoredPosition(new BlockPos((int) session.getMapOriginX(), 64, (int) session.getMapOriginZ()));
+    private void commitSide(BattleSession session, boolean attacking, ArmyManager manager) {
+        Army army = manager.getArmy(attacking ? session.getAttackerArmyId() : session.getDefenderArmyId());
+        boolean won = session.getResult() == (attacking ? BattleSession.BattleResult.ATTACKER_WINS : BattleSession.BattleResult.DEFENDER_WINS);
+        List<CohortData> snapshots = attacking ? session.getAttackerCohorts() : session.getDefenderCohorts();
+        boolean needsCommit = snapshots.stream().map(c -> manager.resolveCohort(c.getCohortId()))
+                .anyMatch(c -> c != null && !c.hasResolvedBattle(session.getBattleId()));
+        if (!needsCommit) {
+            // SavedData files may have been flushed separately before an interruption. The army
+            // store can already contain this result while the battle store still contains its snapshot.
+            // In that case even retreat movement must not be applied a second time.
+            if (army != null && session.getBattleId().equals(army.getCurrentBattleId())) {
+                army.setCurrentBattleId(null);
+                army.setCampPosition(null);
+            }
+            return;
         }
-
-        army.setCampPosition(null);
-        army.clearWaypoints();
-    }
-
-    //network function to notify all online players in the battle's states that a battle has started, sending them the OpenBattleMapPayload packet
-    private void notifyOnlinePlayers(BattleSession session, Army attacker, Army defender, ServerLevel level) {
-        OpenBattleMapPayload payload = new OpenBattleMapPayload(session.getBattleId(), attacker.getArmyId(), defender.getArmyId());
-
-        for (ServerPlayer player : level.getServer().getPlayerList().getPlayers()) {
-            com.devc.minecraftempires.state.StateManager sm = com.devc.minecraftempires.state.StateManager.get(level);
-            com.devc.minecraftempires.state.StateData sd = sm.getStateByPlayer(player.getUUID());
-            if (sd != null && (sd.getStateId().equals(attacker.getOwningStateId()) || sd.getStateId().equals(defender.getOwningStateId()))) {
-                PacketDistributor.sendToPlayer(player, payload);
+        BlockPos position = army == null ? new BlockPos((int)session.getMapOriginX(), 64, (int)session.getMapOriginZ()) : army.getStoredPosition();
+        // A defeated formation retreats 500 blocks from the field; this is the abstract battle's recovery leg.
+        BlockPos retreat = position.offset(0, 0, attacking ? -500 : 500);
+        if (army != null) {
+            army.setCurrentBattleId(null);
+            army.clearWaypoints();
+            if (!won) army.setStoredPosition(retreat);
+            army.setCampPosition(null);
+        }
+        for (CohortData data : snapshots) {
+            Cohort cohort = manager.resolveCohort(data.getCohortId());
+            if (cohort == null || cohort.hasResolvedBattle(session.getBattleId())) continue;
+            cohort.applyBattleOutcome(session.getBattleId(), data.getCurrentHealth(), data.getMorale(), won);
+            cohort.clearWaypoints();
+            if (cohort.isGarrisoned()) {
+                // A routed garrison abandons its post; successful defenders stay at the altar.
+                if (!won || data.isRouting() || data.hasEscaped()) {
+                    cohort.setIsGarrisoned(false);
+                    cohort.setGarrisonedSettlementId(null);
+                    cohort.setStoredPosition(retreat);
+                }
+            } else cohort.setStoredPosition(!won || data.isRouting() || data.hasEscaped() ? retreat : position);
+            if (army != null && (cohort.isGarrisoned() || won && (data.isRouting() || data.hasEscaped()) || !cohort.isAlive())) {
+                army.removeCohortId(cohort.getCohortId());
+                cohort.setAssignedArmyId(null);
             }
         }
+        if (army != null) manager.syncCohortPositions(army);
     }
-
-    public void broadcastSync(BattleSession session, ServerLevel level) {
-        if (session.getSpectatingPlayerIds().isEmpty()) return;
-        BattleSyncPayload payload = BattleSyncPayload.fromSession(session);
-        MinecraftServer server = level.getServer();
-        for (UUID playerId : session.getSpectatingPlayerIds()) {
-            ServerPlayer player = server.getPlayerList().getPlayer(playerId);
-            if (player != null) PacketDistributor.sendToPlayer(player, payload);
+    private void notifyOnlinePlayers(BattleSession session, Army attacker, Army defender, ServerLevel level) {
+        OpenBattleMapPayload payload = new OpenBattleMapPayload(session.getBattleId(), attacker.getArmyId(), defender.getArmyId());
+        for (ServerPlayer player : level.getServer().getPlayerList().getPlayers()) {
+            if (canSpectate(player, session)) PacketDistributor.sendToPlayer(player, payload);
         }
     }
-
-    //getters
-    public BattleSession getBattle(UUID battleId)           { return activeBattles.get(battleId); }
-    public Collection<BattleSession> getAllBattles()        { return Collections.unmodifiableCollection(activeBattles.values()); }
-    public boolean hasBattle(UUID battleId)                 { return activeBattles.containsKey(battleId); }
+    public void broadcastSync(BattleSession session, ServerLevel level) {
+        for (UUID id : session.getSpectatingPlayerIds()) {
+            ServerPlayer player = level.getServer().getPlayerList().getPlayer(id);
+            if (player != null) PacketDistributor.sendToPlayer(player, BattleSyncPayload.fromSession(session,
+                    canControlSide(player, session, true), canControlSide(player, session, false)));
+        }
+    }
+    public BattleSession getBattle(UUID id) { return activeBattles.get(id); }
+    public Collection<BattleSession> getAllBattles() { return Collections.unmodifiableCollection(activeBattles.values()); }
+    public boolean hasBattle(UUID id) { return activeBattles.containsKey(id); }
+    public String getRecordedResult(UUID id) { return completedResults.get(id); }
+    private CompoundTag toTag() {
+        CompoundTag tag = new CompoundTag();
+        ListTag battles = new ListTag();
+        activeBattles.values().forEach(s -> battles.add(s.toNBT()));
+        tag.put("Battles", battles);
+        ListTag results = new ListTag();
+        completedResults.forEach((id, result) -> { CompoundTag r = new CompoundTag(); r.putString("Id", id.toString()); r.putString("Result", result); results.add(r); });
+        tag.put("Results", results);
+        return tag;
+    }
+    private static BattleManager fromTag(CompoundTag tag) {
+        BattleManager manager = new BattleManager();
+        tag.getList("Battles").ifPresent(list -> {
+            for (int i = 0; i < list.size(); i++) list.getCompound(i).ifPresent(t -> {
+                try { BattleSession session = BattleSession.fromNBT(t); manager.activeBattles.put(session.getBattleId(), session); }
+                catch (RuntimeException ex) { MinecraftEmpires.LOGGER.warn("Unable to recover malformed battle record", ex); }
+            });
+        });
+        tag.getList("Results").ifPresent(list -> {
+            for (int i = 0; i < list.size(); i++) list.getCompound(i).ifPresent(t -> {
+                try { manager.completedResults.put(UUID.fromString(t.getString("Id").orElseThrow()), t.getString("Result").orElse("UNKNOWN")); }
+                catch (RuntimeException ex) { MinecraftEmpires.LOGGER.warn("Unable to read battle result", ex); }
+            });
+        });
+        manager.recoveryPending = true;
+        return manager;
+    }
 }

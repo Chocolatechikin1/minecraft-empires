@@ -3,123 +3,64 @@ package com.devc.minecraftempires.combat;
 import com.devc.minecraftempires.army.Army;
 import com.devc.minecraftempires.army.ArmyManager;
 import com.devc.minecraftempires.army.Cohort;
-import com.devc.minecraftempires.army.CohortType;
-import com.devc.minecraftempires.army.GearTier;
-
-import java.util.ArrayList;
 import java.util.List;
-import java.util.UUID;
 
 //if there is no player present, this class will be used to resolve the battle automatically, without player input
 //computes the power of each army, determines a winner, applies casualties, and returns a BattleOutcome object
 public final class AutoResolveEngine {
     private AutoResolveEngine() {}
-
-    private static int gearTierBonus(GearTier tier) {
-        return switch (tier) {
-            case STONE   -> 0;
-            case IRON    -> 10;
-            case DIAMOND -> 25;
-        };
-    }
-
-    //compute function, calculates the power of an army based on the number of soldiers, their strength, gear tier, and morale
-    private static double computePower(Army army, ArmyManager manager) {
+    private static double computePower(List<CohortData> cohorts, ArmyManager manager) {
         double total = 0;
-        for (UUID cohortId : army.getDeployedCohortIds()) {
-            Cohort c = manager.resolveCohort(cohortId);
-            if (c == null || !c.isAlive() || c.isGarrisoned()) continue;
-
-            double cavalryMult = c.getType() == CohortType.CAVALRY ? 1.5 : 1.0; //1.5x multiplier for cavalry units
-            total += c.getSoldierCount() * cavalryMult * (c.getStrength() + gearTierBonus(c.getGearTier()) + (c.getMorale() / 10.0));
-        }
-        return Math.max(1, total); //to avoid division by zero
-    }
-
-    //casualty function, applies casualties to an army, distributing them proportionally across all alive, non-garrisoned cohorts, and applying morale shock based on the number of casualties taken
-    private static void applyCasualties(Army army, int totalCasualties, ArmyManager manager) {
-        List<Cohort> combatants = new ArrayList<>();
-        int totalSoldiers = 0;
-        for (UUID cohortId : army.getDeployedCohortIds()) {
-            Cohort c = manager.resolveCohort(cohortId);
-            if (c != null && c.isAlive() && !c.isGarrisoned()) {
-                combatants.add(c);
-                totalSoldiers += c.getSoldierCount();
-            }
-        }
-        if (totalSoldiers <= 0) return;
-
-        for (Cohort cohort : combatants) {
-            double share     = (double) cohort.getSoldierCount() / totalSoldiers;
-            int    casualties = (int) Math.round(totalCasualties * share);
-            cohort.applyAttrition(casualties);
-            int moraleShock  = (int)((double) casualties / Math.max(1, cohort.getSoldierCount()) * 30);
-            cohort.tickMorale(-moraleShock);
-        }
-    }
-
-    //strength function, calculates the total number of soldiers in an army, excluding garrisoned cohorts
-    private static int combatStrength(Army army, ArmyManager manager) {
-        int total = 0;
-        for (UUID cohortId : army.getDeployedCohortIds()) {
-            Cohort c = manager.resolveCohort(cohortId);
-            if (c != null && c.isAlive() && !c.isGarrisoned()) total += c.getSoldierCount();
+        for (CohortData data : cohorts) {
+            if (!data.canFight()) continue;
+            Cohort source = manager.resolveCohort(data.getCohortId());
+            int gear = source == null ? 0 : switch (source.getGearTier()) {
+                case STONE -> 0;
+                case IRON -> 10;
+                case DIAMOND -> 25;
+            };
+            double cavalry = "CAVALRY".equals(data.getType()) ? 1.5 : 1.0;
+            total += data.getCurrentHealth() * cavalry *
+                    Math.max(1, data.getStrength() + gear) * (0.25 + data.getMorale() / 100.0) *
+                    (0.75 + Math.clamp(data.getEndurance(), 0, 100) / 200.0) * (data.isWithdrawing() ? 0.25 : 1.0);
         }
         return total;
     }
-
-    //resolver function, takes in a battle session, an attacker army, a defender army, and the army manager, computes the power of each army, determines a winner, applies casualties, increments battle count for XP purposes, and returns a BattleOutcome object
+    private static int applyCasualties(List<CohortData> cohorts, double fraction, boolean defeated) {
+        int eligible = cohorts.stream().filter(c -> c.isAlive() && !c.hasEscaped())
+                .mapToInt(CohortData::getCurrentHealth).sum();
+        int losses = Math.min(eligible, (int) Math.round(eligible * fraction));
+        int remainingLosses = losses;
+        int remainingSoldiers = eligible;
+        for (CohortData cohort : cohorts) {
+            if (!cohort.isAlive() || cohort.hasEscaped()) continue;
+            int soldiers = cohort.getCurrentHealth();
+            int count = remainingSoldiers == soldiers ? remainingLosses :
+                    (int) ((long) remainingLosses * soldiers / Math.max(1, remainingSoldiers));
+            cohort.applyDamage(count, defeated ? 30 : 10);
+            if (defeated) cohort.setRouting(true);
+            remainingLosses -= count;
+            remainingSoldiers -= soldiers;
+        }
+        return losses;
+    }
     public static BattleOutcome resolve(BattleSession session, Army attacker, Army defender, ArmyManager manager) {
-        double attackerPower = computePower(attacker, manager);
-        double defenderPower = computePower(defender, manager);
-
-        double totalPower = attackerPower + defenderPower;
-        double attackerRatio = attackerPower / totalPower;
-        double defenderRatio = defenderPower / totalPower;
-
-        int totalSoldiers = combatStrength(attacker, manager) + combatStrength(defender, manager);
-        double balance = Math.abs(attackerRatio - defenderRatio);
-
-        //casualty calculations: loser takes 40-60% casualties, winner takes 10-25% casualties, scaled by the balance of power
-        int loserCasualties = (int)(totalSoldiers * (0.40 + balance * 0.20));
-        int winnerCasualties = (int)(totalSoldiers * (0.10 + (1 - balance) * 0.15));
-
-        BattleSession.BattleResult result;
-        int attackerLosses;
-        int defenderLosses;
-
-        if (attackerPower >= defenderPower) {
-            result = BattleSession.BattleResult.ATTACKER_WINS;
-            attackerLosses = Math.min(combatStrength(attacker, manager), winnerCasualties);
-            defenderLosses = Math.min(combatStrength(defender, manager), loserCasualties);
-        } 
-        else {
-            result = BattleSession.BattleResult.DEFENDER_WINS;
-            attackerLosses = Math.min(combatStrength(attacker, manager), loserCasualties);
-            defenderLosses = Math.min(combatStrength(defender, manager), winnerCasualties);
-        }
-
-        applyCasualties(attacker, attackerLosses, manager);
-        applyCasualties(defender, defenderLosses, manager);
-
-        // Increment battle count for XP purposes
-        for (UUID cohortId : attacker.getDeployedCohortIds()) {
-            Cohort c = manager.resolveCohort(cohortId);
-            if (c != null && !c.isGarrisoned()) c.incrementBattleCount();
-        }
-        for (UUID cohortId : defender.getDeployedCohortIds()) {
-            Cohort c = manager.resolveCohort(cohortId);
-            if (c != null && !c.isGarrisoned()) c.incrementBattleCount();
-        }
-
-        session.setInactive();
+        if (!session.isActive()) return new BattleOutcome(session.getResult(), 0, 0);
+        double attack = attacker == null ? 0 : computePower(session.getAttackerCohorts(), manager);
+        double defense = defender == null ? 0 : computePower(session.getDefenderCohorts(), manager);
+        boolean attackerWins = attack > 0 && attack >= defense;
+        double balance = Math.abs(attack - defense) / Math.max(1.0, attack + defense);
+        double winnerLossRate = 0.10 + (1 - balance) * 0.15;
+        double loserLossRate = 0.40 + balance * 0.20;
+        if (attack == 0 || defense == 0) winnerLossRate = 0;
+        int attackerLosses = applyCasualties(session.getAttackerCohorts(),
+                attackerWins ? winnerLossRate : loserLossRate, !attackerWins);
+        int defenderLosses = applyCasualties(session.getDefenderCohorts(),
+                attackerWins ? loserLossRate : winnerLossRate, attackerWins);
+        BattleSession.BattleResult result = attackerWins ? BattleSession.BattleResult.ATTACKER_WINS :
+                BattleSession.BattleResult.DEFENDER_WINS;
+        session.finish(result);
         return new BattleOutcome(result, attackerLosses, defenderLosses);
     }
-
-    //outcome class, holds the result of a battle, the number of casualties for the attacker, and the number of casualties for the defender
-    public record BattleOutcome(
-            BattleSession.BattleResult result,
-            int attackerCasualties,
-            int defenderCasualties
-    ) {}
+    public record BattleOutcome(BattleSession.BattleResult result, int attackerCasualties, int defenderCasualties) {}
 }

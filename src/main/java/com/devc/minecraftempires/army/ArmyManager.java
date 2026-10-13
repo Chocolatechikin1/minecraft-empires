@@ -2,697 +2,755 @@ package com.devc.minecraftempires.army;
 
 import com.devc.minecraftempires.MinecraftEmpires;
 import com.devc.minecraftempires.combat.BattleManager;
+import com.devc.minecraftempires.network.packet.*;
+import com.devc.minecraftempires.network.ModNetworking;
 import com.devc.minecraftempires.state.StateData;
-import com.devc.minecraftempires.state.StateTier;
-import com.devc.minecraftempires.territory.ClaimManager;
-import com.devc.minecraftempires.territory.SettlementData;
-import com.devc.minecraftempires.territory.ChunkData;
 import com.devc.minecraftempires.state.StateManager;
+import com.devc.minecraftempires.territory.ClaimManager;
+import com.devc.minecraftempires.territory.ChunkData;
+import com.devc.minecraftempires.territory.SettlementData;
 import com.mojang.serialization.Codec;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
+import net.minecraft.network.chat.Component;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.util.datafix.DataFixTypes;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.saveddata.SavedData;
 import net.minecraft.world.level.saveddata.SavedDataType;
-import com.devc.minecraftempires.network.packet.DispatchArmyPayload;
-import com.devc.minecraftempires.network.packet.DispatchLegionPayload;
-import com.devc.minecraftempires.network.packet.DisbandArmyPayload;
-import com.devc.minecraftempires.network.packet.ComposeArmyPayload;
-import com.devc.minecraftempires.network.packet.GarrisonCohortPayload;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
-import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.network.chat.Component;
 
 import java.util.*;
+import java.util.function.BiConsumer;
 
-/**
- * Primary server-side data store for all Legions, Armies, and Campaigns.
- *
- * Two-layer grand-strategy system:
- *  - Legions: permanent organisational units. Visible on the map. Hold Cohorts.
- *             Can move in friendly territory without an Army wrapper.
- *  - Armies:  operational groupings of Cohorts. Enter BattleSessions.
- *             Auto-created when a Legion/Army triggers combat.
- *  - Campaigns: wrap Armies through multi-battle operations.
- *
- * The cohortRegistry is a flat Map<UUID, Cohort> that allows O(1) lookup of any
- * Cohort by ID without scanning all Legions. It is populated at load time and
- * kept in sync whenever Cohorts are added/removed.
- */
+/** Persistent organization, physical unit locations, and operational army/campaign wrappers. */
 public class ArmyManager extends SavedData {
-    private static final String DATA_NAME = "minecraftempires_armies";
+    public static final int LEGION_RECRUIT_COST = 5_000;
+    public static final int LIGHT_INFANTRY_COST = 100;
+    public static final int ASSEMBLY_RANGE = 16;
+    public static final int ENGAGEMENT_RANGE = 100;
+    private static final int MAX_WAYPOINTS = 128;
     private static final Codec<ArmyManager> CODEC = CompoundTag.CODEC.xmap(ArmyManager::fromTag, ArmyManager::toTag);
     public static final SavedDataType<ArmyManager> TYPE = new SavedDataType<>(
-            Identifier.withDefaultNamespace(DATA_NAME),
-            ArmyManager::new,
-            CODEC,
-            DataFixTypes.LEVEL
-    );
+        Identifier.withDefaultNamespace("minecraftempires_armies"), ArmyManager::new, CODEC, DataFixTypes.LEVEL);
 
-    private final Map<UUID, Legion> activeLegions = new HashMap<>(); //all active Legions, keyed by legionId
-    private final Map<UUID, List<UUID>> stateToLegionIndex = new HashMap<>(); //all legions owned by the state
-    private final Map<UUID, Army> activeArmies = new HashMap<>(); //active armies
-    private final Map<UUID, List<UUID>> stateToArmyIndex = new HashMap<>(); //all armies owned by the state
-    private final Map<UUID, Campaign> activeCampaigns = new HashMap<>(); //all campaigns
-    private final Map<UUID, Cohort> cohortRegistry = new HashMap<>(); //all cohorts in all legions
-
-    public ArmyManager() {}
+    private final Map<UUID, Legion> activeLegions = new LinkedHashMap<>();
+    private final Map<UUID, List<UUID>> stateToLegionIndex = new HashMap<>();
+    private final Map<UUID, Army> activeArmies = new LinkedHashMap<>();
+    private final Map<UUID, List<UUID>> stateToArmyIndex = new HashMap<>();
+    private final Map<UUID, Campaign> activeCampaigns = new LinkedHashMap<>();
+    private final Map<UUID, Cohort> cohortRegistry = new LinkedHashMap<>();
+    private final Map<UUID, UUID> cohortParents = new HashMap<>();
+    private boolean locationsReconciled;
 
     public static ArmyManager get(ServerLevel level) {
-        return level.getDataStorage().computeIfAbsent(TYPE);
+        return level.getServer().overworld().getDataStorage().computeIfAbsent(TYPE);
     }
 
-    //raise legion function, checks if the state can raise a legion, if so creates one and registers it
-    public Optional<Legion> raiseLegion(StateData state, BlockPos pos) {
-        StateTier tier = state.getCurrentTier();
-        int cap = tier.getMaxLegions();
-        UUID stateId = state.getStateId();
-
-        if (cap <= 0) { //check how many legions the state has
-            MinecraftEmpires.LOGGER.info("State '{}' cannot field any Legions.", state.getStateName());
-            return Optional.empty();
-        }
-        int currentCount = getLegionCountForState(stateId);
-        if (currentCount >= cap) { //check if the state has reached its legion cap
-            MinecraftEmpires.LOGGER.info(" State '{}' at Legion cap ({}/{}).",
-                    state.getStateName(), currentCount, cap);
-            return Optional.empty();
-        }
-        //success, register legion
-        Legion legion = new Legion(UUID.randomUUID(), stateId, pos);
+    /** Creates a whole legion; only the authorized recruitment handler charges or grants it. */
+    public Optional<Legion> raiseLegion(StateData state, BlockPos position) {
+        if (getLegionCountForState(state.getStateId()) >= state.getCurrentTier().getMaxLegions()) return Optional.empty();
+        Legion legion = new Legion(UUID.randomUUID(), state.getStateId(), position);
+        for (int i = 0; i < Legion.MAX_INFANTRY_COHORTS; i++) legion.addInfantryCohort(Cohort.createInfantry());
+        for (int i = 0; i < Legion.MAX_CAVALRY_SQUADRONS; i++) legion.addCavalrySquadron(Cohort.createCavalrySquadron());
         registerLegion(legion);
-        MinecraftEmpires.LOGGER.info("Raised Legion {} for state '{}' ({}/{}).", legion.getLegionId(), state.getStateName(), currentCount + 1, cap);
         return Optional.of(legion);
     }
 
-    //disbands legion,clears cohorts in the army and then removes it
-    public boolean disbandLegion(UUID legionId) {
-        Legion removed = activeLegions.remove(legionId);
-        if (removed == null) return false;
-
-        // Un-register all cohorts from the flat registry and un-deploy them
-        for (Cohort c : allCohortsOf(removed)) {
-            cohortRegistry.remove(c.getCohortId());
-            if (c.getAssignedArmyId() != null) {
-                Army a = activeArmies.get(c.getAssignedArmyId());
-                if (a != null) a.removeCohortId(c.getCohortId());
-            }
-        }
-
-        List<UUID> stateList = stateToLegionIndex.get(removed.getOwningStateId());
-        if (stateList != null) {
-            stateList.remove(legionId);
-            if (stateList.isEmpty()) stateToLegionIndex.remove(removed.getOwningStateId());
+    public void registerLegion(Legion legion) {
+        if (activeLegions.putIfAbsent(legion.getLegionId(), legion) != null) return;
+        stateToLegionIndex.computeIfAbsent(legion.getOwningStateId(), ignored -> new ArrayList<>()).add(legion.getLegionId());
+        for (Cohort cohort : legion.allCohorts()) {
+            cohortRegistry.put(cohort.getCohortId(), cohort);
+            cohortParents.put(cohort.getCohortId(), legion.getLegionId());
         }
         setDirty();
-        MinecraftEmpires.LOGGER.info("Disbanded Legion {} (owner: {}).",
-                legionId, removed.getOwningStateId());
+    }
+
+    //register cohort in the army manager
+    public void registerCohort(Cohort cohort) {
+        cohortRegistry.put(cohort.getCohortId(), cohort);
+        for (Legion legion : activeLegions.values()) {
+            if (legion.allCohorts().contains(cohort)) cohortParents.put(cohort.getCohortId(), legion.getLegionId());
+        }
+        setDirty();
+    }
+
+    /** Forced removal for destruction/desertion. Player requests must pass canDissolveLegion first. */
+    public boolean disbandLegion(UUID legionId) {
+        Legion legion = activeLegions.remove(legionId);
+        if (legion == null) return false;
+        for (Cohort cohort : legion.allCohorts()) {
+            Army army = getArmy(cohort.getAssignedArmyId());
+            if (army != null) army.removeCohortId(cohort.getCohortId());
+            cohortRegistry.remove(cohort.getCohortId());
+            cohortParents.remove(cohort.getCohortId());
+        }
+        removeIndex(stateToLegionIndex, legion.getOwningStateId(), legionId);
+        setDirty();
         return true;
     }
 
-    private void registerLegion(Legion legion) {
-        activeLegions.put(legion.getLegionId(), legion);
-        stateToLegionIndex.computeIfAbsent(legion.getOwningStateId(), k -> new ArrayList<>()).add(legion.getLegionId());
-        // Register all existing cohorts into the flat registry
-        for (Cohort c : allCohortsOf(legion)) {
-            cohortRegistry.put(c.getCohortId(), c);
-        }
-        setDirty();
+    //checks if the legion can be dissolved
+    public boolean canDissolveLegion(Legion legion) {
+        // The wrapper must be removed even after its campaign has ended.
+        return legion.allCohorts().stream().noneMatch(Cohort::isDeployed) && activeArmies.values().stream().noneMatch(a -> a.getParticipatingLegionIds().contains(legion.getLegionId()));
     }
 
-    //register a single cohort
-    public void registerCohort(Cohort cohort) {
-        cohortRegistry.put(cohort.getCohortId(), cohort);
-    }
-
-    //raise an army at current position and load cohorts into it
-    public Optional<Army> raiseArmy(UUID owningStateId, BlockPos pos, List<UUID> cohortIds) {
-        if (cohortIds.isEmpty()) return Optional.empty();
-
-        Army army = new Army(UUID.randomUUID(), owningStateId, pos);
-        for (UUID cohortId : cohortIds) {
-            Cohort c = cohortRegistry.get(cohortId);
-            if (c == null) {
-                MinecraftEmpires.LOGGER.warn("raiseArmy: unknown cohort {}, aborting.", cohortId);
-                return Optional.empty();
-            }
-            if (c.isDeployed()) {
-                MinecraftEmpires.LOGGER.warn("raiseArmy: cohort {} already deployed, aborting.", cohortId);
-                return Optional.empty();
-            }
-            if (!army.canAddCohort(c, this)) {
-                MinecraftEmpires.LOGGER.warn("raiseArmy: cap exceeded for cohort type {}, aborting.", c.getType());
-                return Optional.empty();
-            }
-            army.addCohortId(cohortId);
-            c.setAssignedArmyId(army.getArmyId());
+    //raise army function
+    //grabs the state ID, ignored client position, and list of cohort IDs to raise an army
+    //validates the selection and returns an Optional Army if successful
+    public Optional<Army> raiseArmy(UUID stateId, BlockPos ignoredClientPosition, List<UUID> cohortIds) {
+        if (cohortIds.isEmpty() || cohortIds.size() > 150 || new HashSet<>(cohortIds).size() != cohortIds.size()) return Optional.empty();
+        Cohort first = resolveCohort(cohortIds.getFirst());
+        if (first == null) return Optional.empty();
+        Army army = new Army(UUID.randomUUID(), stateId, first.getStoredPosition());
+        for (UUID id : cohortIds) {
+            Cohort cohort = resolveCohort(id);
+            Legion parent = getParentLegion(id);
+            if (cohort == null || parent == null || !stateId.equals(parent.getOwningStateId())
+                    || !cohort.isAlive() || cohort.isDeployed() || cohort.isGarrisoned()
+                    || !near(first.getStoredPosition(), cohort.getStoredPosition(), ASSEMBLY_RANGE)
+                    || !army.canAddCohort(cohort, this)) return Optional.empty();
+            army.addCohortId(id); // Local, unpublished candidate only.
         }
-
+        for (UUID id : cohortIds) {
+            Cohort cohort = resolveCohort(id);
+            cohort.setAssignedArmyId(army.getArmyId());
+            cohort.clearWaypoints();
+        }
         registerArmy(army);
-        MinecraftEmpires.LOGGER.info("Raised Army {} for state {} with {} cohorts.", army.getArmyId(), owningStateId, cohortIds.size());
+        syncCohortPositions(army);
         return Optional.of(army);
     }
 
-    //disbands an army, releases non-garrisoned cohorts back to their Legion pools, and sets isActive to false
-    public boolean disbandArmy(UUID armyId, boolean forceDisband) {
-        Army army = activeArmies.get(armyId);
-        if (army == null) return false;
-
-        for (UUID cohortId : new ArrayList<>(army.getDeployedCohortIds())) {
-            Cohort c = cohortRegistry.get(cohortId);
-            if (c != null) {
-                if (!c.isGarrisoned()) {
-                    // Non-garrisoned: return to Legion pool
-                    c.setAssignedArmyId(null);
-                } else {
-                    // Garrisoned: stays garrisoned at settlement, just un-links from Army
-                    c.setAssignedArmyId(null);
-                    // isGarrisoned and garrisonedSettlementId intentionally preserved
-                }
+    //register the army in the army manager
+    public void registerArmy(Army army) {
+        if (activeArmies.putIfAbsent(army.getArmyId(), army) != null) return;
+        stateToArmyIndex.computeIfAbsent(army.getOwningStateId(), ignored -> new ArrayList<>()).add(army.getArmyId());
+        for (UUID id : army.getDeployedCohortIds()) {
+            Cohort cohort = resolveCohort(id);
+            if (cohort != null) {
+                cohort.setAssignedArmyId(army.getArmyId());
+                Legion parent = getParentLegion(id);
+                if (parent != null) army.rememberLegion(parent.getLegionId());
+                if (!cohort.hasStoredPosition()) cohort.setStoredPosition(army.getStoredPosition());
             }
         }
-
-        activeArmies.remove(armyId);
-        List<UUID> stateList = stateToArmyIndex.get(army.getOwningStateId());
-        if (stateList != null) {
-            stateList.remove(armyId);
-            if (stateList.isEmpty()) stateToArmyIndex.remove(army.getOwningStateId());
-        }
-
-        // Unlink from campaign if applicable
-        if (army.getCampaignId() != null) {
-            Campaign campaign = activeCampaigns.get(army.getCampaignId());
-            if (campaign != null) campaign.removeArmy(armyId);
-        }
-
         setDirty();
-        MinecraftEmpires.LOGGER.info("Disbanded Army {} (owner: {}).", armyId, army.getOwningStateId());
+    }
+
+    //disband army function: removes the army from the manager and releases its cohorts in place
+    public boolean disbandArmy(UUID armyId, boolean forceDisband) {
+        Army army = getArmy(armyId);
+        if (army == null || (!forceDisband && (army.isEngaged() || army.isOnCampaign()))) return false;
+        syncCohortPositions(army);
+        for (UUID id : army.getDeployedCohortIds()) {
+            Cohort cohort = resolveCohort(id);
+            if (cohort != null && armyId.equals(cohort.getAssignedArmyId())) cohort.setAssignedArmyId(null);
+        }
+        activeArmies.remove(armyId);
+        removeIndex(stateToArmyIndex, army.getOwningStateId(), armyId);
+        Campaign campaign = getCampaign(army.getCampaignId());
+        if (campaign != null) {
+            campaign.removeArmy(armyId);
+            if (campaign.isEmpty()) activeCampaigns.remove(campaign.getCampaignId());
+        }
+        setDirty();
         return true;
     }
 
-    private void registerArmy(Army army) {
-        activeArmies.put(army.getArmyId(), army);
-        stateToArmyIndex
-                .computeIfAbsent(army.getOwningStateId(), k -> new ArrayList<>())
-                .add(army.getArmyId());
-        setDirty();
-    }
-
-    //legion to army, for if the player just wants one legion to become the army for a campaign
+    //if a legion gets in an engagement "unprovoked," wrap it in an army to participate in the battle and campaign
     public Optional<Army> autoWrapLegionInArmy(Legion legion) {
-        List<UUID> availableIds = new ArrayList<>();
-        for (Cohort c : allCohortsOf(legion)) {
-            if (!c.isDeployed()) availableIds.add(c.getCohortId());
-        }
-        if (availableIds.isEmpty()) return Optional.empty();
-
-        Optional<Army> result = raiseArmy(legion.getOwningStateId(), legion.getStoredPosition(), availableIds);
-        if (result.isPresent()) {
-            legion.clearWaypoints(); // Army takes over movement
-        }
-        return result;
+        Cohort main = legion.getMainCohort();
+        if (main == null || main.isDeployed() || main.isGarrisoned()) return Optional.empty();
+        List<UUID> ids = legion.allCohorts().stream().filter(c -> c.isAlive() && !c.isDeployed() && !c.isGarrisoned()
+                && near(main.getStoredPosition(), c.getStoredPosition(), ASSEMBLY_RANGE)).map(Cohort::getCohortId).toList();
+        Optional<Army> army = raiseArmy(legion.getOwningStateId(), main.getStoredPosition(), ids);
+        army.ifPresent(a -> {
+            legion.getWaypoints().forEach(a::addWaypoint);
+            legion.clearWaypoints();
+        });
+        return army;
     }
 
-    //army campaign launcher function
-    public Campaign createCampaign(UUID owningStateId, UUID armyId) {
-        Campaign campaign = new Campaign(UUID.randomUUID(), owningStateId);
+    //campaign creation function: creates a campaign for the given state and army, if one does not already exist
+    public Campaign createCampaign(UUID stateId, UUID armyId) {
+        Army army = getArmy(armyId);
+        if (army == null || !stateId.equals(army.getOwningStateId())) throw new IllegalArgumentException("Army does not belong to state");
+        Campaign existing = getCampaign(army.getCampaignId());
+        if (existing != null) return existing;
+        Campaign campaign = new Campaign(UUID.randomUUID(), stateId);
         campaign.addArmy(armyId);
-        Army army = activeArmies.get(armyId); //load the desired army
-        if (army != null) army.setCampaignId(campaign.getCampaignId()); //link the army to the campaign
-        activeCampaigns.put(campaign.getCampaignId(), campaign); //register the campaign
-        setDirty(); //mark to be saved to disk
-        MinecraftEmpires.LOGGER.info("Campaign {} created for Army {}.", campaign.getCampaignId(), armyId);
+        army.setCampaignId(campaign.getCampaignId());
+        activeCampaigns.put(campaign.getCampaignId(), campaign);
+        setDirty();
         return campaign;
     }
 
-    //campaign end checker
+    //end campaign function: ends the campaign for the given state and army, if one exists and is eligible to end
     public boolean endCampaign(UUID campaignId, ServerPlayer player) {
-        Campaign campaign = activeCampaigns.get(campaignId); //get the desired campaign
-        if (campaign == null) return false;
-
-        if (!campaign.checkEndConditions(this)) { //checks with helper function, if failed, inform player
-            player.sendSystemMessage(Component.literal("§cCannot end campaign, enemy forces are still threatening your territories."));
+        Campaign campaign = getCampaign(campaignId);
+        if (campaign == null || !controls(player, campaign.getOwningStateId())) return false;
+        if (!campaign.checkEndConditions(this, player.level())) {
+            tell(player, "Cannot end campaign while a battle or hostile threat remains near your armies, conquered land, or settlements.");
             return false;
         }
-
-        //if successful, disband the campaign and remove it from the active campaigns list
-        campaign.disbandCampaign(this); //call helper function
-        activeCampaigns.remove(campaignId); //remove from active campaigns
-        setDirty(); //mark to be saved to disk
-        player.sendSystemMessage(Component.literal("§aCampaign ended successfully."));
+        campaign.disbandCampaign(this);
+        activeCampaigns.remove(campaignId);
+        setDirty();
+        tell(player, "Campaign ended."); //TODO: maybe send in chat a brief summary of what was conquered and what was lost, and any army changes
         return true;
     }
 
-    public Cohort resolveCohort(UUID cohortId) {
-        return cohortRegistry.get(cohortId);
+    //sync the positions of all cohorts in the army to the army's position, and update their parent legions
+    public void syncCohortPositions(Army army) {
+        Set<Legion> parents = new HashSet<>();
+        for (UUID id : army.getDeployedCohortIds()) {
+            Cohort cohort = resolveCohort(id);
+            if (cohort == null) continue;
+            if (!cohort.isGarrisoned()) {
+                cohort.setStoredPosition(army.getStoredPosition());
+                cohort.setPrecisePos(army.getPreciseX(), army.getPreciseZ());
+            }
+            Legion parent = getParentLegion(id);
+            if (parent != null) parents.add(parent);
+        }
+        parents.forEach(Legion::syncMainPosition);
     }
 
-    //class garbage collector, disbands armies and legions that are no longer viable 
     public void runGarbageCollection() {
-        // Armies: disband if no alive, non-garrisoned cohorts remain
-        List<UUID> armiesToDisband = new ArrayList<>();
-        for (Army army : activeArmies.values()) {
-            if (!army.isViable(this)) armiesToDisband.add(army.getArmyId()); //mark for disbanding
+        for (Legion legion : new ArrayList<>(activeLegions.values())) {
+            boolean inBattle = legion.allCohorts().stream().map(Cohort::getAssignedArmyId).map(this::getArmy)
+                    .filter(Objects::nonNull).anyMatch(Army::isEngaged);
+            if (!legion.isViable() && !inBattle) disbandLegion(legion.getLegionId());
+            else legion.syncMainPosition();
         }
-        for (UUID id : armiesToDisband) { //disband marked army
-            MinecraftEmpires.LOGGER.info("GC: Army {} is no longer viable — disbanding.", id);
-            disbandArmy(id, true);
-        }
-
-        // Legions: disband if not viable (no alive cohorts of required types)
-        List<UUID> legionsToDisband = new ArrayList<>();
-        for (Legion legion : activeLegions.values()) {
-            if (!legion.isViable()) legionsToDisband.add(legion.getLegionId());
-        }
-        for (UUID id : legionsToDisband) { //disband marked legion
-            MinecraftEmpires.LOGGER.info("GC: Legion {} is no longer viable — disbanding.", id);
-            disbandLegion(id);
-        }
-
-        if (!armiesToDisband.isEmpty() || !legionsToDisband.isEmpty()) {
-            MinecraftEmpires.LOGGER.info("GC: {} Army(s) and {} Legion(s) disbanded.", armiesToDisband.size(), legionsToDisband.size());
+        for (Army army : new ArrayList<>(activeArmies.values())) {
+            boolean requiresRelease = army.hasParticipatedInCampaign()
+                    && army.getParticipatingLegionIds().stream().anyMatch(activeLegions::containsKey);
+            if (!army.isViable(this) && !army.isEngaged() && !requiresRelease) disbandArmy(army.getArmyId(), true);
         }
     }
 
-    //tick class, moves armies and legions along their waypoints, checks for collisions and starts battles if necessary
+    //tick armies function: called every tick to update the positions of all armies and legions, and check for engagements
+    //ngl this function got so complicated idek whats going on anymore
     public void tickArmies(ServerLevel level) {
-        boolean requiresSave = false;
-
-        // Move Armies
-        for (Army army : activeArmies.values()) {
-            if (army.isEngaged()) continue;
+        if (level.dimension() != Level.OVERWORLD) return;
+        reconcileLocations(level);
+        boolean changed = false;
+        for (Army army : new ArrayList<>(activeArmies.values())) {
+            if (army.isEngaged() || !army.isViable(this)) continue;
             if (!army.getWaypoints().isEmpty()) {
-                moveEntity(army.getStoredPosition(), army.getWaypoints(),
-                        army::setStoredPosition);
-                if (checkCollisionAndEngage(army, level)) requiresSave = true;
-                requiresSave = true;
+                move(army.getPreciseX(), army.getPreciseZ(), army.getWaypoints(), army::setPrecisePos);
+                syncCohortPositions(army);
+                enterTerritory(army, level);
+                changed = true;
             }
         }
+        for (Legion legion : new ArrayList<>(activeLegions.values())) {
+            Cohort main = legion.getMainCohort();
+            if (main == null || main.isDeployed() || main.isGarrisoned() || legion.getWaypoints().isEmpty()) continue;
+            BlockPos oldPosition = main.getStoredPosition();
+            List<Cohort> travelling = legion.allCohorts().stream().filter(c -> c.isAlive() && !c.isDeployed()
+                    && !c.isGarrisoned() && c.getWaypoints().isEmpty() && near(oldPosition, c.getStoredPosition(), ASSEMBLY_RANGE)).toList();
+            move(legion.getPreciseX(), legion.getPreciseZ(), legion.getWaypoints(), legion::setPrecisePos);
+            for (Cohort cohort : travelling) {
+                cohort.setStoredPosition(legion.getStoredPosition());
+                cohort.setPrecisePos(legion.getPreciseX(), legion.getPreciseZ());
+            }
+            if (needsCampaign(legion.getOwningStateId(), legion.getStoredPosition(), level))
+                autoWrapLegionInArmy(legion).ifPresent(a -> enterTerritory(a, level));
+            changed = true;
+        }
+        // Regrouping physically moves each detached cohort; it never teleports to its parent.
+        for (Cohort cohort : new ArrayList<>(cohortRegistry.values())) {
+            if (!cohort.isAlive() || cohort.isDeployed() || cohort.isGarrisoned() || cohort.getWaypoints().isEmpty()) continue;
+            move(cohort.getPreciseX(), cohort.getPreciseZ(), cohort.getWaypoints(), cohort::setPrecisePos);
+            Legion parent = getParentLegion(cohort.getCohortId());
+            if (parent != null && needsCampaign(parent.getOwningStateId(), cohort.getStoredPosition(), level)) {
+                List<BlockPos> remaining = new ArrayList<>(cohort.getWaypoints());
+                raiseArmy(parent.getOwningStateId(), cohort.getStoredPosition(), List.of(cohort.getCohortId())).ifPresent(a -> {
+                    remaining.forEach(a::addWaypoint);
+                    enterTerritory(a, level);
+                });
+            }
+            if (parent != null) parent.syncMainPosition();
+            changed = true;
+        }
+        if (level.getGameTime() % 20 == 0) {
+            for (Army army : new ArrayList<>(activeArmies.values())) {
+                if (army.isEngaged() || !army.isViable(this)) continue;
+                if (army.isOnCampaign()) {
+                    Campaign campaign = getCampaign(army.getCampaignId());
+                    if (campaign != null) {
+                        List<ChunkPos> acquired = ClaimManager.get(level).claimCampaignArea(level, army);
+                        acquired.forEach(pos -> campaign.trackConqueredChunk(pos.pack()));
+                        changed |= !acquired.isEmpty();
+                    }
+                }
+                changed |= checkCollisionAndEngage(army, level);
+            }
+            // A stationary legion or detached garrison must also react to an enemy.
+            for (Legion legion : new ArrayList<>(activeLegions.values())) {
+                for (Cohort cohort : legion.allCohorts()) {
+                    if (!cohort.isAlive() || cohort.isDeployed()) continue;
+                    if (hasEnemyNear(legion.getOwningStateId(), cohort.getStoredPosition(), level)) {
+                        Army defender = wrapNearbyDefenders(legion.getOwningStateId(), cohort.getStoredPosition());
+                        if (defender != null) changed |= checkCollisionAndEngage(defender, level);
+                        break;
+                    }
+                }
+            }
+            refreshGarrisons(level);
+            runGarbageCollection();
+        }
+        if (changed) setDirty();
+    }
 
-        // Move standalone Legions (those with available cohorts and their own waypoints)
-        for (Legion legion : activeLegions.values()) {
-            if (!legion.getWaypoints().isEmpty() && legion.hasAvailableCohorts()) {
-                moveEntity(legion.getStoredPosition(), legion.getWaypoints(),
-                        legion::setStoredPosition);
-                if (checkLegionCollision(legion, level)) requiresSave = true;
-                requiresSave = true;
+    private boolean needsCampaign(UUID stateId, BlockPos position, ServerLevel level) {
+        ChunkData claim = ClaimManager.get(level).getClaim(new ChunkPos(position.getX() >> 4, position.getZ() >> 4));
+        return claim == null || (!stateId.equals(claim.getOwnerUUID()) && !StateManager.get(level).hasPassage(stateId, claim.getOwnerUUID()));
+    }
+
+    //territory crossing function: checks if the army is entering a foreign territory and declares war if necessary, then creates a campaign for the army
+    private void enterTerritory(Army army, ServerLevel level) {
+        BlockPos position = army.getStoredPosition();
+        ChunkData claim = ClaimManager.get(level).getClaim(new ChunkPos(position.getX() >> 4, position.getZ() >> 4));
+        StateManager states = StateManager.get(level);
+        if (claim != null && !army.getOwningStateId().equals(claim.getOwnerUUID())) {
+            if (states.hasPassage(army.getOwningStateId(), claim.getOwnerUUID())) return;
+            if (!states.areAtWar(army.getOwningStateId(), claim.getOwnerUUID())) {
+                states.declareWar(army.getOwningStateId(), claim.getOwnerUUID());
+                states.notifyState(level, army.getOwningStateId(), "Your army crossed a foreign border without passage. War has begun.");
+                states.notifyState(level, claim.getOwnerUUID(), "A foreign army crossed your border without passage. War has begun.");
+            }
+        } else if (claim != null) return;
+        createCampaign(army.getOwningStateId(), army.getArmyId());
+    }
+
+    //campaign ending check 1: enemy army prescence check, if there is an enemy army within engagement range of the army, the campaign cannot end
+    private boolean hasEnemyNear(UUID stateId, BlockPos position, ServerLevel level) {
+        StateManager states = StateManager.get(level);
+        return activeArmies.values().stream().anyMatch(a -> !a.isEngaged() && a.isViable(this)
+                && states.areAtWar(stateId, a.getOwningStateId()) && near(position, a.getStoredPosition(), ENGAGEMENT_RANGE))
+                || activeLegions.values().stream().filter(l -> states.areAtWar(stateId, l.getOwningStateId()))
+                .flatMap(l -> l.allCohorts().stream()).anyMatch(c -> c.isAlive() && !c.isDeployed() && near(position, c.getStoredPosition(), ENGAGEMENT_RANGE));
+    }
+
+    //campaign ending check 2: hostile presence check, if there is a hostile army within engagement range of the army, the campaign cannot end
+    private boolean hasHostilePresence(UUID stateId, BlockPos position, ServerLevel level) {
+        StateManager states = StateManager.get(level);
+        // An ongoing battle is still a threat and must not permit instant recruitment beside it.
+        return activeArmies.values().stream().anyMatch(a -> a.isViable(this)
+                && states.areAtWar(stateId, a.getOwningStateId()) && near(position, a.getStoredPosition(), ENGAGEMENT_RANGE))
+                || activeLegions.values().stream().filter(l -> states.areAtWar(stateId, l.getOwningStateId()))
+                .flatMap(l -> l.allCohorts().stream()).anyMatch(c -> c.isAlive() && near(position, c.getStoredPosition(), ENGAGEMENT_RANGE));
+    }
+
+    /** Includes a garrison in its defensive battle without losing its settlement assignment. */
+    private Army wrapNearbyDefenders(UUID stateId, BlockPos position) {
+        Army defender = new Army(UUID.randomUUID(), stateId, position);
+        for (Legion legion : getLegionsForState(stateId)) {
+            for (Cohort cohort : legion.allCohorts()) {
+                if (cohort.isAlive() && !cohort.isDeployed() && near(position, cohort.getStoredPosition(), ASSEMBLY_RANGE)
+                        && defender.canAddCohort(cohort, this)) defender.addCohortId(cohort.getCohortId());
             }
         }
-
-        if (requiresSave) setDirty();
+        if (defender.getDeployedCohortIds().isEmpty()) return null;
+        registerArmy(defender);
+        return defender;
     }
 
-    //army movement function, moves the army along its waypoints at a fixed speed, and removes the waypoint if reached
-    private void moveEntity(BlockPos current, Queue<BlockPos> waypoints, java.util.function.Consumer<BlockPos> setPos) {
-        BlockPos target = waypoints.peek();
-        double dx = target.getX() - current.getX();
-        double dz = target.getZ() - current.getZ();
-        double distance = Math.hypot(dx, dz);
-        // 0.2 blocks/tick = 4 blocks/second at 20 ticks/s (modify if needed later)
-        double marchSpeed = 0.2;
-
-        if (distance <= marchSpeed) {
-            setPos.accept(target);
-            waypoints.poll();
-        } 
-        else{
-            double ratio = marchSpeed / distance;
-            int stepX = current.getX() + (int) Math.round(dx * ratio);
-            int stepZ = current.getZ() + (int) Math.round(dz * ratio);
-            setPos.accept(new BlockPos(stepX, current.getY(), stepZ));
-        }
-    }
-
-    private static final int ENGAGEMENT_DIST_SQ = 2500; // 50 blocks squared
-
-    //army collision checker, also wraps a legion or military unit that isn't in an army in one and pushes it into battle
-    private boolean checkCollisionAndEngage(Army movingArmy, ServerLevel level) {
-        //get the moving army's position and check if it's engaged, if so return false
-        if (movingArmy.isEngaged()) return false;
-        BlockPos pos = movingArmy.getStoredPosition();
-
-        // Check against other Armies
-        for (Army other : activeArmies.values()) {
-            if (other.getArmyId().equals(movingArmy.getArmyId())) continue;
-            if (other.getOwningStateId().equals(movingArmy.getOwningStateId())) continue;
-            if (other.isEngaged()) continue;
-            if (pos.distSqr(other.getStoredPosition()) < ENGAGEMENT_DIST_SQ) {
-                // Ensure campaign exists for moving army
-                ensureCampaign(movingArmy);
-                BattleManager.get(level).startBattle(movingArmy, other, level);
-                MinecraftEmpires.LOGGER.info("Engagement: Army {} vs Army {} at {}.", movingArmy.getArmyId(), other.getArmyId(), pos);
+    //engagement check function: checks if the army is within engagement range of any enemy armies or legions, and starts a battle if so
+    private boolean checkCollisionAndEngage(Army army, ServerLevel level) {
+        if (army.isEngaged() || !army.isViable(this)) return false;
+        StateManager states = StateManager.get(level);
+        for (Army other : new ArrayList<>(activeArmies.values())) {
+            if (other.isEngaged() || !other.isViable(this) || !states.areAtWar(army.getOwningStateId(), other.getOwningStateId())) continue;
+            if (near(army.getStoredPosition(), other.getStoredPosition(), ENGAGEMENT_RANGE)) {
+                createCampaign(army.getOwningStateId(), army.getArmyId());
+                createCampaign(other.getOwningStateId(), other.getArmyId());
+                BattleManager.get(level).startBattle(army, other, level);
                 return true;
             }
         }
-
-        // Check against standalone enemy Legions (note: it only checks legions, but not inidividual cohorts or military units, adjust later)
-        for (Legion legion : activeLegions.values()) {
-            if (legion.getOwningStateId().equals(movingArmy.getOwningStateId())) continue;
-            if (!legion.hasAvailableCohorts()) continue;
-            if (pos.distSqr(legion.getStoredPosition()) < ENGAGEMENT_DIST_SQ) {
-                Optional<Army> wrappedOpt = autoWrapLegionInArmy(legion);
-                if (wrappedOpt.isPresent()) {
-                    ensureCampaign(movingArmy);
-                    BattleManager.get(level).startBattle(movingArmy, wrappedOpt.get(), level);
-                    MinecraftEmpires.LOGGER.info("Engagement: Army {} vs auto-wrapped Legion {} at {}.", movingArmy.getArmyId(), legion.getLegionId(), pos);
-                    return true;
-                }
-            }
-        }
-
-        // TODO: Once Detachments / Garrison Cohorts can leave a settlement as their own map entity,
-        //       this method must also check for Detachment-vs-Army and Detachment-vs-Legion collisions.
-        //add the other military unit checkers here
-        return false;
-    }
-
-    //checks individual legions for collisions with other legions or armies, and wraps them in an army if necessary
-    private boolean checkLegionCollision(Legion movingLegion, ServerLevel level) {
-        BlockPos pos = movingLegion.getStoredPosition();
-
-        // Legion vs Army
-        for (Army enemy : activeArmies.values()) { 
-            if (enemy.getOwningStateId().equals(movingLegion.getOwningStateId())) continue;
-            if (enemy.isEngaged()) continue;
-            if (pos.distSqr(enemy.getStoredPosition()) < ENGAGEMENT_DIST_SQ) {
-                Optional<Army> wrapped = autoWrapLegionInArmy(movingLegion);
-                if (wrapped.isPresent()) {
-                    ensureCampaign(wrapped.get());
-                    BattleManager.get(level).startBattle(wrapped.get(), enemy, level);
-                    MinecraftEmpires.LOGGER.info("Engagement: Legion {} (wrapped) vs Army {} at {}.",
-                            movingLegion.getLegionId(), enemy.getArmyId(), pos);
-                    return true;
-                }
-            }
-        }
-
-        // Legion vs Legion
-        for (Legion other : activeLegions.values()) { //note: checks for armies, but not individual cohorts or military units, adjust later
-            if (other.getLegionId().equals(movingLegion.getLegionId())) continue;
-            if (other.getOwningStateId().equals(movingLegion.getOwningStateId())) continue;
-            if (!other.hasAvailableCohorts()) continue;
-            if (pos.distSqr(other.getStoredPosition()) < ENGAGEMENT_DIST_SQ) {
-                Optional<Army> wrappedA = autoWrapLegionInArmy(movingLegion);
-                Optional<Army> wrappedB = autoWrapLegionInArmy(other);
-                if (wrappedA.isPresent() && wrappedB.isPresent()) {
-                    ensureCampaign(wrappedA.get());
-                    BattleManager.get(level).startBattle(wrappedA.get(), wrappedB.get(), level);
-                    MinecraftEmpires.LOGGER.info("[ArmyManager] Engagement: Legion {} vs Legion {} (both wrapped) at {}.",
-                            movingLegion.getLegionId(), other.getLegionId(), pos);
-                    return true;
-                }
-            }
-        }
-
-        //add the other military unit checkers here
-        return false;
-    }
-
-    //campaign auto creater function
-    private void ensureCampaign(Army army) {
-        if (!army.isOnCampaign()) {
-            createCampaign(army.getOwningStateId(), army.getArmyId());
-        }
-    }
-
-    //network handlers for army dispatch, legion dispatch, army disband, army compose, and cohort garrisoning
-    public static void handleDispatchArmy(final DispatchArmyPayload payload, final IPayloadContext context) {
-        context.enqueueWork(() -> { //queues the work to be done on the server thread
-            if (!(context.player() instanceof ServerPlayer player)) return;
-            ArmyManager manager = ArmyManager.get(player.level());
-            Army army = manager.getArmy(payload.armyId());
-            if (army == null) return;
-
-            if (!payload.isQueueing()) army.clearWaypoints();
-            army.addWaypoint(payload.targetPos());
-
-            // Auto-create campaign if the target is in non-friendly territory
-            if (!army.isOnCampaign()) {
-                ChunkPos targetChunk = new ChunkPos(payload.targetPos().getX() >> 4, payload.targetPos().getZ() >> 4); // Convert BlockPos to ChunkPos
-                ClaimManager claimManager = ClaimManager.get(player.level());
-                ChunkData chunkData = claimManager.getClaim(targetChunk);
-                boolean isFriendly = chunkData != null && army.getOwningStateId().equals(chunkData.getOwnerUUID());
-                if (!isFriendly) {
-                    manager.createCampaign(army.getOwningStateId(), army.getArmyId());
-                }
-            }
-
-            manager.setDirty();
-            MinecraftEmpires.LOGGER.info("Army {} dispatched to {} (queuing={}).", payload.armyId(), payload.targetPos(), payload.isQueueing());
-        });
-    }
-
-    //single legion mover function, moves the legion to the target position, and clears waypoints if not queueing
-    public static void handleDispatchLegion(final DispatchLegionPayload payload, final IPayloadContext context) {
-        context.enqueueWork(() -> { //queues the work to be done on the server thread
-            if (!(context.player() instanceof ServerPlayer player)) return;
-            ArmyManager manager = ArmyManager.get(player.level());
-            Legion legion = manager.getLegion(payload.legionId());
-            if (legion == null) return;
-
-            if (!payload.isQueueing()) legion.clearWaypoints();
-            legion.addWaypoint(payload.targetPos());
-
-            manager.setDirty();
-            MinecraftEmpires.LOGGER.info("Legion {} dispatched to {} (queuing={}).", payload.legionId(), payload.targetPos(), payload.isQueueing());
-        });
-    }
-
-    /** hmm double check this function it should not disband legions that are in campaigns, but it should disband armies that are in campaigns and end the campaign if so 
-     * Disband handler.
-     * If the target UUID is an Army that belongs to an active Campaign, routes to endCampaign.
-     * If it's a standalone Army, disbands directly.
-     * If it's a Legion UUID, disbands the Legion.
-     */
-    //army disbander function, checks if the army is in a campaign, if so ends the campaign, otherwise disbands the army or legion
-    public static void handleDisbandArmy(final DisbandArmyPayload payload, final IPayloadContext context) {
-        context.enqueueWork(() -> {
-            if (!(context.player() instanceof ServerPlayer player)) return;
-            ArmyManager manager = ArmyManager.get(player.level());
-
-            Army army = manager.getArmy(payload.armyId());
-            if (army != null) {
-                if (army.isOnCampaign()) {
-                    manager.endCampaign(army.getCampaignId(), player);
-                } 
-                else{
-                    manager.disbandArmy(army.getArmyId(), false);
-                    player.sendSystemMessage(Component.literal("§aArmy disbanded."));
-                }
-                return;
-            }
-
-            // Try Legion
-            Legion legion = manager.activeLegions.get(payload.armyId());
-            if (legion != null) {
-                // Block disbanding a Legion whose cohorts are actively deployed in a Campaign.
-                // Players must end the Campaign first before the Legion can be dissolved.
-                boolean inActiveCampaign = legion.getInfantryCohorts().stream().anyMatch(c -> {
-                    if (c.getAssignedArmyId() == null) return false;
-                    Army a = manager.activeArmies.get(c.getAssignedArmyId());
-                    return a != null && a.isOnCampaign();
-                }) || legion.getCavalrySquadrons().stream().anyMatch(c -> {
-                    if (c.getAssignedArmyId() == null) return false;
-                    Army a = manager.activeArmies.get(c.getAssignedArmyId());
-                    return a != null && a.isOnCampaign();
-                }) || legion.getAuxiliaries().stream().anyMatch(c -> {
-                    if (c.getAssignedArmyId() == null) return false;
-                    Army a = manager.activeArmies.get(c.getAssignedArmyId());
-                    return a != null && a.isOnCampaign();
-                });
-
-                if (inActiveCampaign) {
-                    player.sendSystemMessage(Component.literal("§cCannot disband a Legion that is actively deployed in a Campaign. End the Campaign first."));
-                    return;
-                }
-
-                manager.disbandLegion(payload.armyId());
-                manager.setDirty();
-                player.sendSystemMessage(Component.literal("§aLegion disbanded."));
-            }
-        });
-    }
-
-    //army creation helper function, checks if the player can create an army with the selected cohorts, and creates it if possible
-    public static void handleComposeArmy(final ComposeArmyPayload payload, final IPayloadContext context) {
-        context.enqueueWork(() -> {
-            if (!(context.player() instanceof ServerPlayer player)) return;
-            ArmyManager manager = ArmyManager.get(player.level()); //get player server level (?)
-            StateManager stateManager = StateManager.get(player.level()); //get statte level
-            StateData state = stateManager.getStateByPlayer(player.getUUID()); //get state data
-            if (state == null) return;
-
-            Optional<Army> result = manager.raiseArmy(state.getStateId(), payload.initialPosition(), payload.selectedCohortIds());
-            if (result.isPresent()) {
-                manager.setDirty();
-                player.sendSystemMessage(Component.literal("§aArmy formed."));
-            } 
-            else {
-                player.sendSystemMessage(Component.literal("§cFailed to form Army."));
-            }
-        });
-    }
-
-    //garrison function, checks if the cohort is garrisoned or not, and sets the garrison status accordingly, also sets martial law if garrisoned
-    public static void handleGarrisonCohort(final GarrisonCohortPayload payload, final IPayloadContext context) {
-        context.enqueueWork(() -> {
-            if (!(context.player() instanceof ServerPlayer player)) return;
-            ArmyManager manager = ArmyManager.get(player.level());
-            Cohort cohort = manager.resolveCohort(payload.cohortId());
-            if (cohort == null) return;
-
-            StateManager stateManager = StateManager.get(player.level());
-            SettlementData settlement = stateManager.getSettlement(payload.settlementId());
-
-            if (payload.ungarrison()) {
-                // Remove garrison
-                cohort.setIsGarrisoned(false);
-                UUID prevSettlement = cohort.getGarrisonedSettlementId();
-                cohort.setGarrisonedSettlementId(null);
-                if (prevSettlement != null && settlement != null) {
-                    // Check if any other cohort is still garrisoning this settlement
-                    boolean othersGarrisoning = manager.cohortRegistry.values().stream().anyMatch(c -> c.isGarrisoned() && prevSettlement.equals(c.getGarrisonedSettlementId()));
-                    if (!othersGarrisoning && settlement != null) {
-                        settlement.setMartialLaw(false);
-                        MinecraftEmpires.LOGGER.info("Martial Law lifted at {}.", settlement.getSettlementName());
+        for (Legion legion : new ArrayList<>(activeLegions.values())) {
+            if (!states.areAtWar(army.getOwningStateId(), legion.getOwningStateId())) continue;
+            for (Cohort cohort : legion.allCohorts()) {
+                if (cohort.isAlive() && !cohort.isDeployed() && near(army.getStoredPosition(), cohort.getStoredPosition(), ENGAGEMENT_RANGE)) {
+                    Army defender = wrapNearbyDefenders(legion.getOwningStateId(), cohort.getStoredPosition());
+                    if (defender != null) {
+                        createCampaign(army.getOwningStateId(), army.getArmyId());
+                        createCampaign(defender.getOwningStateId(), defender.getArmyId());
+                        BattleManager.get(level).startBattle(army, defender, level);
+                        return true;
                     }
                 }
-                player.sendSystemMessage(Component.literal("§aCohort returned to legion."));
-            } 
-            else{
-                // Garrison the cohort
-                cohort.setIsGarrisoned(true);
-                cohort.setGarrisonedSettlementId(payload.settlementId());
-                if (settlement != null && !settlement.isMartialLaw()) {
-                    settlement.setMartialLaw(true);
-                    MinecraftEmpires.LOGGER.info("Martial Law established at {} (STUB — loyalty pending).", settlement.getSettlementName());
-                }
-                player.sendSystemMessage(Component.literal("§aCohort garrisoning settlement (Martial Law active)."));
             }
+        }
+        return false;
+    }
 
+    //army movement function: moves the army towards its next waypoint, and removes the waypoint if it has been reached
+    private static void move(double x, double z, Queue<BlockPos> waypoints, BiConsumer<Double, Double> setter) {
+        BlockPos target = waypoints.peek();
+        if (target == null) return;
+        double dx = target.getX() + 0.5 - x, dz = target.getZ() + 0.5 - z;
+        double distance = Math.hypot(dx, dz);
+        double speed = 0.2; // 0.8 blocks/second at five-tick intervals; terrain modifiers are deferred. and also check if this is too fast or slow
+        if (distance <= speed) {
+            setter.accept(target.getX() + 0.5, target.getZ() + 0.5);
+            waypoints.poll();
+        } else setter.accept(x + dx / distance * speed, z + dz / distance * speed);
+    }
+
+    //checks if two block positions are within a certain range of each other
+    public static boolean near(BlockPos a, BlockPos b, int range) {
+        double dx = (double) a.getX() - b.getX(), dz = (double) a.getZ() - b.getZ();
+        return dx * dx + dz * dz <= (double) range * range;
+    }
+
+    //ownership check function: checks if the player controls the state that owns the army
+    private static boolean controls(ServerPlayer player, UUID stateId) {
+        StateData state = StateManager.get(player.level()).getStateByPlayer(player.getUUID());
+        return player.level().dimension() == Level.OVERWORLD && state != null && state.getStateId().equals(stateId)
+                && player.getUUID().equals(state.getLeaderId());
+    }
+
+    private static void tell(ServerPlayer player, String message) {
+        player.sendSystemMessage(Component.literal(message));
+        ModNetworking.sendSnapshots(player);
+    }
+    //valid target check function: checks if the target position is within the valid range of the world
+    private static boolean validTarget(ServerLevel level, BlockPos position) {
+        return Math.abs((long) position.getX()) <= 29_999_984 && Math.abs((long) position.getZ()) <= 29_999_984
+                && level.getWorldBorder().isWithinBounds(position);
+    }
+
+    //all dispatchment functions: handles the dispatchment of armies and legions, and the disbandment of armies and legions
+    public static void handleDispatchArmy(DispatchArmyPayload payload, IPayloadContext context) {
+        context.enqueueWork(() -> {
+            if (!(context.player() instanceof ServerPlayer player)) return;
+            ArmyManager manager = get(player.level());
+            Army army = manager.getArmy(payload.armyId());
+            if (army == null || !controls(player, army.getOwningStateId()) || army.isEngaged()
+                    || !army.isViable(manager) || !validTarget(player.level(), payload.targetPos())) return;
+            if (!payload.isQueueing()) army.clearWaypoints();
+            if (army.getWaypoints().size() < MAX_WAYPOINTS) army.addWaypoint(payload.targetPos());
             manager.setDirty();
+            ModNetworking.sendSnapshots(player);
         });
     }
 
-    //getters
-    public Legion getLegion(UUID legionId)                    { return activeLegions.get(legionId); }
-    public Army   getArmy(UUID armyId)                        { return activeArmies.get(armyId); }
-    public Campaign getCampaign(UUID campaignId)              { return activeCampaigns.get(campaignId); }
-
-    public List<Legion> getLegionsForState(UUID stateId) { //utilizes lists, gets O(1) lookup of legions for a state, and returns an unmodifiable list of legions
-        List<UUID> ids = stateToLegionIndex.getOrDefault(stateId, Collections.emptyList());
-        List<Legion> result = new ArrayList<>(ids.size());
-        for (UUID id : ids){ 
-            Legion l = activeLegions.get(id); if (l != null) result.add(l); 
-        }
-        return Collections.unmodifiableList(result);
+    public static void handleDispatchLegion(DispatchLegionPayload payload, IPayloadContext context) {
+        context.enqueueWork(() -> {
+            if (!(context.player() instanceof ServerPlayer player)) return;
+            ArmyManager manager = get(player.level());
+            Legion legion = manager.getLegion(payload.legionId());
+            if (legion == null || !controls(player, legion.getOwningStateId()) || !validTarget(player.level(), payload.targetPos())) return;
+            Cohort main = legion.getMainCohort();
+            if (main == null || main.isDeployed() || main.isGarrisoned()) {
+                tell(player, "Move the army containing the main cohort, or release its assignment first.");
+                return;
+            }
+            if (!payload.isQueueing()) legion.clearWaypoints();
+            if (legion.getWaypoints().size() < MAX_WAYPOINTS) legion.addWaypoint(payload.targetPos());
+            manager.setDirty();
+            ModNetworking.sendSnapshots(player);
+        });
     }
 
+    public static void handleDisbandArmy(DisbandArmyPayload payload, IPayloadContext context) {
+        context.enqueueWork(() -> {
+            if (!(context.player() instanceof ServerPlayer player)) return;
+            ArmyManager manager = get(player.level());
+            Army army = manager.getArmy(payload.armyId());
+            if (army != null) {
+                if (!controls(player, army.getOwningStateId())) return;
+                tell(player, manager.disbandArmy(army.getArmyId(), false) ? "Army wrapper released. Cohorts remain at their locations."
+                        : "End the campaign and finish any battle before releasing this army.");
+                return;
+            }
+            Legion legion = manager.getLegion(payload.armyId());
+            if (legion == null || !controls(player, legion.getOwningStateId())) return;
+            if (!manager.canDissolveLegion(legion)) {
+                tell(player, "End its campaign and release every army wrapper before dissolving this legion.");
+                return;
+            }
+            manager.disbandLegion(legion.getLegionId());
+            manager.refreshGarrisons(player.level());
+            tell(player, "Legion dissolved permanently.");
+        });
+    }
+
+    public static void handleComposeArmy(ComposeArmyPayload payload, IPayloadContext context) {
+        context.enqueueWork(() -> {
+            if (!(context.player() instanceof ServerPlayer player)) return;
+            StateData state = StateManager.get(player.level()).getStateByPlayer(player.getUUID());
+            if (state == null || !controls(player, state.getStateId())) return;
+            Optional<Army> army = get(player.level()).raiseArmy(state.getStateId(), payload.initialPosition(), payload.selectedCohortIds());
+            if (army.isPresent()) {
+                ArmyManager manager = get(player.level());
+                for (UUID id : army.get().getDeployedCohortIds()) {
+                    Legion parent = manager.getParentLegion(id);
+                    if (parent != null && parent.getMainCohort() != null && id.equals(parent.getMainCohort().getCohortId())) parent.clearWaypoints();
+                }
+            }
+            tell(player, army.isPresent() ? "Army formed." : "Select living, available cohorts within 16 blocks of each other. Army capacity also applies.");
+        });
+    }
+
+    public static void handleGarrisonCohort(GarrisonCohortPayload payload, IPayloadContext context) {
+        context.enqueueWork(() -> {
+            if (!(context.player() instanceof ServerPlayer player)) return;
+            StateManager states = StateManager.get(player.level());
+            StateData state = states.getStateByPlayer(player.getUUID());
+            if (state == null || !controls(player, state.getStateId())) return;
+            ArmyManager manager = get(player.level());
+            if (!manager.changeGarrison(state.getStateId(), payload.cohortIds(),
+                    states.getSettlement(payload.settlementId()), payload.ungarrison())) {
+                tell(player, "No cohorts changed. Select your living, unengaged cohorts at this settlement; new garrisons must be within 16 blocks and fit its soldier capacity.");
+                return;
+            }
+            manager.refreshGarrisons(player.level());
+            tell(player, payload.ungarrison() ? "Garrison released in place. Regroup or form an army to move it."
+                    : "Selected cohorts stationed at the settlement.");
+        });
+    }
+
+    //garrision change function: changes the garrison of the selected cohorts, either garrisoning them at the settlement or ungarrisoning them and releasing them in place
+    public boolean changeGarrison(UUID stateId, List<UUID> ids, SettlementData settlement, boolean ungarrison) {
+        if (settlement == null || !stateId.equals(settlement.getOwningStateId()) || ids.isEmpty()
+                || ids.size() > 150 || new HashSet<>(ids).size() != ids.size()) return false;
+        List<Cohort> selected = new ArrayList<>();
+        long newSoldiers = 0;
+        for (UUID id : ids) {
+            Cohort cohort = resolveCohort(id);
+            Legion parent = getParentLegion(id);
+            if (cohort == null || parent == null || !cohort.isAlive() || !stateId.equals(parent.getOwningStateId())) return false;
+            Army army = getArmy(cohort.getAssignedArmyId());
+            if (army != null && army.isEngaged()) return false;
+            if (ungarrison) {
+                if (!cohort.isGarrisoned() || !settlement.getSettlementId().equals(cohort.getGarrisonedSettlementId())) return false;
+            } else {
+                if (cohort.isGarrisoned() || !near(cohort.getStoredPosition(), settlement.getCenterAltarPos(), ASSEMBLY_RANGE)) return false;
+                newSoldiers += cohort.getSoldierCount();
+            }
+            selected.add(cohort);
+        }
+        long currentSoldiers = cohortRegistry.values().stream().filter(c -> c.isAlive() && c.isGarrisoned()
+                && settlement.getSettlementId().equals(c.getGarrisonedSettlementId())).mapToLong(Cohort::getSoldierCount).sum();
+        if (!ungarrison && currentSoldiers + newSoldiers > settlement.getGarrisonCapacity()) return false;
+        for (Cohort cohort : selected) {
+            Army army = getArmy(cohort.getAssignedArmyId());
+            if (army != null) army.removeCohortId(cohort.getCohortId());
+            cohort.setAssignedArmyId(null);
+            cohort.clearWaypoints();
+            cohort.setIsGarrisoned(!ungarrison);
+            cohort.setGarrisonedSettlementId(ungarrison ? null : settlement.getSettlementId());
+            if (!ungarrison) cohort.setStoredPosition(settlement.getCenterAltarPos());
+            getParentLegion(cohort.getCohortId()).syncMainPosition();
+        }
+        setDirty();
+        return true;
+    }
+
+    //handle army action function: handles the actions that can be performed on an army, such as recruiting legions and auxiliaries, regrouping, and ending campaigns
+    public static void handleArmyAction(ArmyActionPayload payload, IPayloadContext context) {
+        context.enqueueWork(() -> {
+            if (!(context.player() instanceof ServerPlayer player)) return;
+            StateManager states = StateManager.get(player.level());
+            StateData state = states.getStateByPlayer(player.getUUID());
+            if (state == null || !controls(player, state.getStateId())) return;
+            ArmyManager manager = get(player.level());
+            switch (payload.action()) {
+                case "RECRUIT_LEGION" -> {
+                    SettlementData settlement = states.getSettlement(payload.targetId());
+                    if (settlement == null || !state.getStateId().equals(settlement.getOwningStateId())) return;
+                    if (manager.hasHostilePresence(state.getStateId(), settlement.getCenterAltarPos(), player.level())) {
+                        tell(player, "Cannot recruit while hostile forces threaten this settlement.");
+                        return;
+                    }
+                    boolean free = states.canClaimFreeLegion(player.getUUID());
+                    if (!free && state.getTreasuryBalance() < LEGION_RECRUIT_COST) { tell(player, "A legion costs 5,000 emeralds."); return; }
+                    Optional<Legion> legion = manager.raiseLegion(state, settlement.getCenterAltarPos());
+                    if (legion.isEmpty()) { tell(player, "Your state's legion limit has been reached."); return; }
+                    if (free) states.claimFirstLegionGrant(player.getUUID());
+                    else state.deductFunds(LEGION_RECRUIT_COST);
+                    states.setDirty();
+                    tell(player, free ? "First Legion Free!" : "Legion recruited.");
+                }
+                case "RECRUIT_AUXILIARY" -> {
+                    Legion legion = manager.getLegion(payload.targetId());
+                    if (legion == null || !state.getStateId().equals(legion.getOwningStateId())) return;
+                    Cohort main = legion.getMainCohort();
+                    boolean atSettlement = main != null && !main.isDeployed() && states.getAllSettlements().stream().anyMatch(s ->
+                            state.getStateId().equals(s.getOwningStateId()) && near(main.getStoredPosition(), s.getCenterAltarPos(), ASSEMBLY_RANGE));
+                    if (!atSettlement || state.getTreasuryBalance() < LIGHT_INFANTRY_COST
+                            || manager.hasHostilePresence(state.getStateId(), legion.getStoredPosition(), player.level())) {
+                        tell(player, "Recruit light infantry with the legion's main cohort at an owned, unthreatened settlement, for 100 emeralds.");
+                        return;
+                    }
+                    Cohort auxiliary = Cohort.createAuxiliary("light_infantry");
+                    if (!legion.addAuxiliary(auxiliary)) { tell(player, "This legion already has ten living auxiliary formations."); return; }
+                    manager.registerCohort(auxiliary);
+                    state.deductFunds(LIGHT_INFANTRY_COST);
+                    states.setDirty();
+                    tell(player, "50 light infantry recruited. Their losses are permanent.");
+                }
+                case "REGROUP" -> {
+                    Legion legion = manager.getLegion(payload.targetId());
+                    if (legion == null || !state.getStateId().equals(legion.getOwningStateId())) return;
+                    Cohort main = legion.getMainCohort();
+                    if (main == null) return;
+                    for (Cohort cohort : legion.allCohorts()) {
+                        if (cohort != main && cohort.isAlive() && !cohort.isDeployed() && !cohort.isGarrisoned()) {
+                            cohort.clearWaypoints();
+                            cohort.addWaypoint(main.getStoredPosition());
+                        }
+                    }
+                    manager.setDirty();
+                    tell(player, "Available detachments ordered to the main cohort's current location.");
+                }
+                case "END_CAMPAIGN" -> {
+                    Army army = manager.getArmy(payload.targetId());
+                    if (army != null && controls(player, army.getOwningStateId()) && army.isOnCampaign()) manager.endCampaign(army.getCampaignId(), player);
+                }
+                default -> { }
+            }
+        });
+    }
+
+    //army disbandment function: disbands selected armies, checking for garrisoned units as well
+    public static boolean removeForStateIfAvailable(ServerLevel level, UUID stateId) {
+        ArmyManager manager = get(level);
+        if (manager.getArmiesForState(stateId).stream().anyMatch(a -> a.isEngaged() || a.isOnCampaign())) return false;
+        for (Army army : manager.getArmiesForState(stateId)) manager.disbandArmy(army.getArmyId(), false);
+        for (Legion legion : manager.getLegionsForState(stateId)) manager.disbandLegion(legion.getLegionId());
+        manager.refreshGarrisons(level);
+        return true;
+    }
+
+    public void releaseGarrison(UUID settlementId) {
+        for (Cohort cohort : cohortRegistry.values()) {
+            if (settlementId.equals(cohort.getGarrisonedSettlementId())) {
+                cohort.setIsGarrisoned(false);
+                cohort.setGarrisonedSettlementId(null);
+            }
+        }
+        setDirty();
+    }
+
+    private void refreshGarrisons(ServerLevel level) {
+        StateManager states = StateManager.get(level);
+        Set<UUID> occupied = new HashSet<>();
+        for (Cohort cohort : cohortRegistry.values()) {
+            if (!cohort.isGarrisoned()) continue;
+            if (states.getSettlement(cohort.getGarrisonedSettlementId()) == null || !cohort.isAlive()) {
+                cohort.setIsGarrisoned(false);
+                cohort.setGarrisonedSettlementId(null);
+                setDirty();
+            } else occupied.add(cohort.getGarrisonedSettlementId());
+        }
+        for (SettlementData settlement : states.getAllSettlements()) {
+            boolean garrisoned = occupied.contains(settlement.getSettlementId());
+            if (settlement.isMartialLaw() != garrisoned) { settlement.setMartialLaw(garrisoned); states.setDirty(); }
+        }
+    }
+
+    private void reconcileLocations(ServerLevel level) {
+        if (locationsReconciled) return;
+        for (Cohort cohort : cohortRegistry.values()) {
+            if (cohort.isGarrisoned()) {
+                SettlementData settlement = StateManager.get(level).getSettlement(cohort.getGarrisonedSettlementId());
+                if (settlement != null) cohort.setStoredPosition(settlement.getCenterAltarPos());
+            }
+        }
+        activeArmies.values().forEach(this::syncCohortPositions);
+        activeLegions.values().forEach(Legion::syncMainPosition);
+        locationsReconciled = true;
+        setDirty();
+    }
+
+    public Cohort resolveCohort(UUID id) { return cohortRegistry.get(id); }
+    public Legion getParentLegion(UUID cohortId) { return activeLegions.get(cohortParents.get(cohortId)); }
+    public Legion getLegion(UUID id) { return activeLegions.get(id); }
+    public Army getArmy(UUID id) { return activeArmies.get(id); }
+    public Campaign getCampaign(UUID id) { return activeCampaigns.get(id); }
+    public Collection<Cohort> getAllCohorts() { return Collections.unmodifiableCollection(cohortRegistry.values()); }
+    public Collection<Legion> getAllLegions() { return Collections.unmodifiableCollection(activeLegions.values()); }
+    public Collection<Army> getAllArmies() { return Collections.unmodifiableCollection(activeArmies.values()); }
+    public List<Legion> getLegionsForState(UUID stateId) {
+        return stateToLegionIndex.getOrDefault(stateId, List.of()).stream().map(activeLegions::get).filter(Objects::nonNull).toList();
+    }
     public List<Army> getArmiesForState(UUID stateId) {
-        List<UUID> ids = stateToArmyIndex.getOrDefault(stateId, Collections.emptyList());
-        List<Army> result = new ArrayList<>(ids.size());
-        for (UUID id : ids){
-            Army a = activeArmies.get(id); if (a != null) result.add(a);
-        }
-        return Collections.unmodifiableList(result);
+        return stateToArmyIndex.getOrDefault(stateId, List.of()).stream().map(activeArmies::get).filter(Objects::nonNull).toList();
+    }
+    public int getLegionCountForState(UUID stateId) { return stateToLegionIndex.getOrDefault(stateId, List.of()).size(); }
+
+    private static void removeIndex(Map<UUID, List<UUID>> index, UUID owner, UUID id) {
+        List<UUID> ids = index.get(owner);
+        if (ids != null) { ids.remove(id); if (ids.isEmpty()) index.remove(owner); }
     }
 
-    public int getLegionCountForState(UUID stateId) {
-        return stateToLegionIndex.getOrDefault(stateId, Collections.emptyList()).size();
-    }
-
-    public Collection<Legion> getAllLegions()   { return Collections.unmodifiableCollection(activeLegions.values()); }
-    public Collection<Army>   getAllArmies()    { return Collections.unmodifiableCollection(activeArmies.values()); }
-
-    //data serialization and deserialization functions, saves and loads the army manager data to disk
-    private CompoundTag toTag() {
+    public CompoundTag toTag() {
         CompoundTag root = new CompoundTag();
-
-        ListTag legionList = new ListTag();
-        for (Legion legion : activeLegions.values()) legionList.add(legion.toNBT());
-        root.put("Legions", legionList);
-
-        ListTag armyList = new ListTag();
-        for (Army army : activeArmies.values()) armyList.add(army.toNBT());
-        root.put("Armies", armyList);
-
-        ListTag campaignList = new ListTag();
-        for (Campaign campaign : activeCampaigns.values()) campaignList.add(campaign.toNBT());
-        root.put("Campaigns", campaignList);
-
+        root.putInt("Version", 2);
+        ListTag legions = new ListTag(), armies = new ListTag(), campaigns = new ListTag(), standalone = new ListTag();
+        activeLegions.values().forEach(l -> legions.add(l.toNBT()));
+        activeArmies.values().forEach(a -> armies.add(a.toNBT()));
+        activeCampaigns.values().forEach(c -> campaigns.add(c.toNBT()));
+        cohortRegistry.values().stream().filter(c -> !cohortParents.containsKey(c.getCohortId())).forEach(c -> standalone.add(c.toNBT()));
+        root.put("Legions", legions); root.put("Armies", armies); root.put("Campaigns", campaigns); root.put("StandaloneCohorts", standalone);
         return root;
     }
 
-    private static ArmyManager fromTag(CompoundTag root) {
+    public static ArmyManager fromTag(CompoundTag root) {
         ArmyManager manager = new ArmyManager();
-
-        // 1. Load Legions (and populate cohortRegistry)
-        ListTag legionList = root.getList("Legions").orElse(new ListTag());
-        for (int i = 0; i < legionList.size(); i++) {
-            legionList.getCompound(i).ifPresent(tag -> {
-                Legion legion = Legion.fromNBT(tag);
-                manager.activeLegions.put(legion.getLegionId(), legion);
-                manager.stateToLegionIndex.computeIfAbsent(legion.getOwningStateId(), k -> new ArrayList<>()).add(legion.getLegionId());
-                // Populate cohort registry
-                for (Cohort c : allCohortsOf(legion)) {
-                    manager.cohortRegistry.put(c.getCohortId(), c);
-                }
-            });
+        readTags(root, "Legions", tag -> manager.registerLegion(Legion.fromNBT(tag)));
+        readTags(root, "StandaloneCohorts", tag -> manager.registerCohort(Cohort.fromNBT(tag)));
+        readTags(root, "Armies", tag -> {
+            Army army = Army.fromNBT(tag);
+            for (UUID id : new ArrayList<>(army.getDeployedCohortIds())) {
+                Cohort cohort = manager.resolveCohort(id);
+                Legion parent = manager.getParentLegion(id);
+                if (cohort == null || (parent != null && !army.getOwningStateId().equals(parent.getOwningStateId()))
+                        || (cohort.getAssignedArmyId() != null && manager.getArmy(cohort.getAssignedArmyId()) != null)) army.removeCohortId(id);
+            }
+            manager.registerArmy(army);
+        });
+        readTags(root, "Campaigns", tag -> {
+            Campaign campaign = Campaign.fromNBT(tag);
+            for (UUID id : new HashSet<>(campaign.getArmyIds())) {
+                Army army = manager.getArmy(id);
+                if (army == null || !army.getOwningStateId().equals(campaign.getOwningStateId())) campaign.removeArmy(id);
+                else army.setCampaignId(campaign.getCampaignId());
+            }
+            if (campaign.isActive() && !campaign.isEmpty()) manager.activeCampaigns.put(campaign.getCampaignId(), campaign);
+        });
+        for (Cohort cohort : manager.cohortRegistry.values()) {
+            Army army = manager.getArmy(cohort.getAssignedArmyId());
+            if (army == null || !army.getDeployedCohortIds().contains(cohort.getCohortId())) cohort.setAssignedArmyId(null);
         }
-
-        // 2. Load Armies (cohort assignedArmyId is already saved on each Cohort)
-        ListTag armyList = root.getList("Armies").orElse(new ListTag());
-        for (int i = 0; i < armyList.size(); i++) {
-            armyList.getCompound(i).ifPresent(tag -> {
-                Army army = Army.fromNBT(tag);
-                // Reconcile: drop stale cohort IDs (cohort was deleted)
-                List<UUID> validIds = new ArrayList<>();
-                for (UUID cohortId : army.getDeployedCohortIds()) {
-                    if (manager.cohortRegistry.containsKey(cohortId)) {
-                        validIds.add(cohortId);
-                    } 
-                    else {
-                        MinecraftEmpires.LOGGER.warn("Stale cohort {} in Army {} dropped on load.",cohortId, army.getArmyId());
-                    }
-                }
-                // Re-build the list with only valid IDs
-                Army clean = new Army(army.getArmyId(), army.getOwningStateId(), army.getStoredPosition());
-                clean.setCampPosition(army.getCampPosition());
-                clean.setCurrentBattleId(army.getCurrentBattleId());
-                clean.setCampaignId(army.getCampaignId());
-                army.getWaypoints().forEach(clean::addWaypoint);
-                validIds.forEach(clean::addCohortId);
-
-                manager.activeArmies.put(clean.getArmyId(), clean);
-                manager.stateToArmyIndex.computeIfAbsent(clean.getOwningStateId(), k -> new ArrayList<>()).add(clean.getArmyId());
-            });
+        for (Army army : manager.activeArmies.values()) {
+            if (manager.getCampaign(army.getCampaignId()) == null) army.setCampaignId(null);
+            manager.syncCohortPositions(army);
         }
-
-        // 3. Load Campaigns
-        ListTag campaignList = root.getList("Campaigns").orElse(new ListTag());
-        for (int i = 0; i < campaignList.size(); i++) {
-            campaignList.getCompound(i).ifPresent(tag -> {
-                Campaign campaign = Campaign.fromNBT(tag);
-                if (campaign.isActive()) {
-                    manager.activeCampaigns.put(campaign.getCampaignId(), campaign);
-                }
-            });
-        }
-
-        MinecraftEmpires.LOGGER.info("Loaded {} Legion(s), {} Army(s), {} Campaign(s).", manager.activeLegions.size(), manager.activeArmies.size(), manager.activeCampaigns.size());
         return manager;
     }
 
-    //private helper function to get all cohorts of a legion, including infantry, cavalry, and auxiliaries
-    private static List<Cohort> allCohortsOf(Legion legion) {
-        List<Cohort> all = new ArrayList<>();
-        all.addAll(legion.getInfantryCohorts());
-        all.addAll(legion.getCavalrySquadrons());
-        all.addAll(legion.getAuxiliaries());
-        return all;
+    private static void readTags(CompoundTag root, String key, java.util.function.Consumer<CompoundTag> reader) {
+        ListTag list = root.getList(key).orElse(new ListTag());
+        for (int i = 0; i < list.size(); i++) {
+            Optional<CompoundTag> entry = list.getCompound(i);
+            if (entry.isEmpty()) continue;
+            try { reader.accept(entry.get()); }
+            catch (RuntimeException error) { MinecraftEmpires.LOGGER.error("Could not load {} entry {}: {}", key, i, error.getMessage()); }
+        }
     }
 }

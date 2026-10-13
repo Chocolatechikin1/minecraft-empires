@@ -50,6 +50,8 @@ import com.devc.minecraftempires.network.packet.MapDataPayload;
 import com.devc.minecraftempires.network.ModNetworking; 
 import com.devc.minecraftempires.army.ArmyManager;
 import net.neoforged.neoforge.event.server.ServerStoppingEvent;
+import net.neoforged.neoforge.event.level.block.BreakBlockEvent;
+import com.devc.minecraftempires.state.StateManager;
 
 // The value here should match an entry in the META-INF/neoforge.mods.toml file
 @Mod(MinecraftEmpires.MODID)
@@ -156,7 +158,7 @@ public class MinecraftEmpires {
         LOGGER.info("custom commands registered");
     }
     //army movement method
-    @SubscribeEvent
+    /*@SubscribeEvent
     public void onServerTick(ServerTickEvent.Post event){
         //calculate the movement every 5 ticks, maintaining performance
         if(event.getServer().getTickCount() % 5 == 0){
@@ -164,13 +166,59 @@ public class MinecraftEmpires {
                 ArmyManager.get(level).tickArmies(level);
             });
         }
-    }
+    }*/
 
     //clears BattleManager state when the server shuts down
     @SubscribeEvent
     public void onServerStopping(ServerStoppingEvent event) {
+        BattleManager.resolveAllOnShutdown(event.getServer());
         BattleManager.clearAll();
+        ModNetworking.clearAll();
         LOGGER.info("[Minecraft Empires] BattleManager cleared on server stop.");
+    }
+
+    @SubscribeEvent
+    public void onPlayerLogout(net.neoforged.neoforge.event.entity.player.PlayerEvent.PlayerLoggedOutEvent event) {
+        ModNetworking.clearPlayer(event.getEntity().getUUID());
+    }
+
+    //settlement altar protection logic
+    @SubscribeEvent
+    public void onBlockBreak(BreakBlockEvent event) {
+        if (!(event.getLevel() instanceof net.minecraft.server.level.ServerLevel serverLevel)) return;
+        if (serverLevel != serverLevel.getServer().overworld()) return;
+        net.minecraft.core.BlockPos pos = event.getPos();
+        if (!serverLevel.getBlockState(pos).is(MinecraftEmpires.CITY_ALTAR.get())) return;
+
+        StateManager stateManager = StateManager.get(serverLevel);
+        net.minecraft.world.entity.player.Player player = event.getPlayer();
+
+        if (player.isCreative()) { //if player is in creative, allow breaks
+            com.devc.minecraftempires.territory.SettlementData settlement =
+                    stateManager.getSettlementByAltarPos(pos);
+            if (settlement != null) {
+                stateManager.disbandSettlement(settlement.getSettlementId(), serverLevel);
+            }
+            stateManager.clearAltarAbandoned(pos); //tidy up any leftover abandoned marker
+            return; // allow the break
+        }
+
+        //survival mode logic below
+        com.devc.minecraftempires.territory.SettlementData settlement = stateManager.getSettlementByAltarPos(pos);
+
+        if (settlement == null) { //orphan altar, break
+            stateManager.clearAltarAbandoned(pos);
+            return;
+        }
+
+        if (!stateManager.isAltarAbandoned(pos)) { //prevent active settlement from being broken
+            event.setCanceled(true);
+            event.setNotifyClient(true);
+            player.sendSystemMessage(net.minecraft.network.chat.Component.literal("§c[Minecraft Empires] This altar is linked to '" + settlement.getSettlementName()+ "'. Right-click it to manage or abandon the settlement first."));
+        } else {
+            // Player completed the abandon flow — clear the marker and allow the break
+            stateManager.clearAltarAbandoned(pos);
+        }
     }
     
 }

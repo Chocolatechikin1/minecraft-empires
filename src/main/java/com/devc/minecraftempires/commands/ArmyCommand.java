@@ -1,5 +1,6 @@
 package com.devc.minecraftempires.commands;
 
+import com.devc.minecraftempires.army.Army;
 import com.devc.minecraftempires.army.ArmyManager;
 import com.devc.minecraftempires.army.Cohort;
 import com.devc.minecraftempires.army.Legion;
@@ -19,6 +20,7 @@ public class ArmyCommand {
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
         dispatcher.register(
             Commands.literal("army")
+                .requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
                 .then(Commands.literal("raise")
                     .then(Commands.literal("test") // Added "test" argument
                         .executes(ArmyCommand::executeRaise)
@@ -48,24 +50,18 @@ public class ArmyCommand {
 
             if (newLegion.isPresent()) {
                 Legion activeLegion = newLegion.get();
-                
-                // 2. Inject troops to make it viable (survives Garbage Collection)
-                Cohort inf1 = Cohort.createInfantry();
-                Cohort inf2 = Cohort.createInfantry();
-                Cohort cav  = Cohort.createCavalrySquadron();
-                activeLegion.addInfantryCohort(inf1);
-                activeLegion.addInfantryCohort(inf2);
-                activeLegion.addCavalrySquadron(cav);
 
-                // 3. Register cohorts in the flat lookup registry
-                armyManager.registerCohort(inf1);
-                armyManager.registerCohort(inf2);
-                armyManager.registerCohort(cav);
+                //wrap the legion in an Army so it appears on the map and can be dispatched (TODO: bare legions cannot be interacted with on the map, eventually make it so that they can for the purpose of moving it around in friendly territory)
+                Optional<Army> newArmy = armyManager.autoWrapLegionInArmy(activeLegion);
 
-                // 4. Save the newly populated legion to disk
                 armyManager.setDirty();
 
-                player.sendSystemMessage(Component.literal("§a[Minecraft Empires] Test Legion raised! (2 Cohorts, 1 Squadron)"));
+                if (newArmy.isPresent()) {
+                    player.sendSystemMessage(Component.literal("§a[Minecraft Empires] Test army raised with a full 550-soldier legion. This operator fixture bypasses the recruitment cost."));
+                } else {
+                    // Legion exists but Army wrapping failed — still useful for data-layer testing
+                    player.sendSystemMessage(Component.literal("§e[Minecraft Empires] Test Legion raised, but Army wrap failed. Legion is live but not on the map."));
+                }
                 return 1;
             } else {
                 player.sendSystemMessage(Component.literal("§c[Minecraft Empires] Failed to raise Legion. Legion cap reached."));

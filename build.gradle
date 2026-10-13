@@ -184,3 +184,22 @@ idea {
         downloadJavadoc = true
     }
 }
+
+// NeoForge binds game dependencies to main; domain tests need the same game classes.
+sourceSets.test.compileClasspath += sourceSets.main.compileClasspath
+sourceSets.test.runtimeClasspath += sourceSets.main.runtimeClasspath
+
+// Domain regressions run without a client or an existing save; no extra libraries required.
+var preSprint7Regression = tasks.register('preSprint7Regression', JavaExec) {
+    group = 'verification'
+    description = 'Checks army, state, diplomacy, battle and save compatibility rules.'
+    dependsOn tasks.named('testClasses')
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.devc.minecraftempires.PreSprint7Regression'
+    workingDir = layout.buildDirectory.dir('regression').get().asFile
+    doFirst { workingDir.mkdirs() }
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
+}
+tasks.named('check') { dependsOn preSprint7Regression }
+// The domain suite is executed by JavaExec, not a JUnit engine.
+tasks.named('test') { exclude '**/PreSprint7Regression.class' }

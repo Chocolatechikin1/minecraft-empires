@@ -190,7 +190,7 @@ public final class InteractiveMapWidget {
 
             // Troop count label
             if (zoom >= 12.0 && font != null) {
-                String label = "A" + army.troops();
+                String label = army.displayName() + " \u00b7 " + army.troops(); //army.troops might be unncessary, mark for now TODO: 
                 int labelX = screenX + iconSize + 2;
                 int labelY = screenY + (iconSize / 2) - 4;
                 graphics.fill(labelX - 1, labelY - 1, labelX + font.width(label) + 2, labelY + 10, 0xAA111820);
@@ -467,6 +467,12 @@ public final class InteractiveMapWidget {
 
         if (button == 1) {
             if (this.selectedArmyId != null) {
+                UUID viewer = ClientMapData.get().viewerStateId();
+                var snapshot = ClientArmyData.get();
+                UUID owner = selectedIsArmy
+                        ? snapshot.armiesById().containsKey(selectedArmyId) ? snapshot.armiesById().get(selectedArmyId).ownerStateId() : null
+                        : snapshot.legionsById().containsKey(selectedArmyId) ? snapshot.legionsById().get(selectedArmyId).ownerStateId() : null;
+                if (viewer == null || !viewer.equals(owner)) return true;
                 boolean isQueueing = net.minecraft.client.Minecraft.getInstance().options.keyShift.isDown();
                 BlockPos targetPos = new BlockPos(chunkX * 16 + 8, 100, chunkZ * 16 + 8);
 
@@ -504,6 +510,7 @@ public final class InteractiveMapWidget {
 
         for (ArmyMapPayload.ArmySummary army : armies.armiesById().values()) {
             if (!army.isEngaged() || army.battleId() == null) continue;
+            if (!army.ownerStateId().equals(ClientMapData.get().viewerStateId())) continue;
             ChunkPos chunkPos = ChunkPos.unpack(army.packedChunkPos());
             int screenX = chunkToScreenX(chunkPos.x());
             int screenY = chunkToScreenY(chunkPos.z());

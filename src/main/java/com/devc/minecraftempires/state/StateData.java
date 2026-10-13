@@ -20,6 +20,10 @@ public class StateData {
     //economy variables
     private long treasuryBalance;
     private int totalPopulation;
+    private long graceTicksRemaining = StateBalance.INTRODUCTORY_TICKS;
+    private int unpaidDays;
+    private boolean endgameChoice;
+    private UUID capitalSettlementId;
 
     //state war data
     private int siegeImmunityTicks; //variable to track siege immunity timer (1 day)
@@ -28,7 +32,7 @@ public class StateData {
 
     public StateData(UUID stateId, String stateName, UUID leaderId, StateTier startingTier) {
         this.stateId = stateId;
-        this.stateName = stateName;
+        this.stateName = StateManager.cleanName(stateName);
         this.leaderId = leaderId;
         this.currentTier = startingTier;
         this.ownedSettlements = new ArrayList<>();
@@ -42,7 +46,7 @@ public class StateData {
     //getters and setters (yes ai wrote them im too lazy to write them)
     public UUID getStateId() { return stateId; }
     public String getStateName() { return stateName; }
-    public void setStateName(String name) { this.stateName = name; }
+    public void setStateName(String name) { this.stateName = StateManager.cleanName(name); }
     
     public UUID getLeaderId() { return leaderId; }
     public void setLeaderId(UUID leaderId) { this.leaderId = leaderId; }
@@ -65,12 +69,12 @@ public class StateData {
     
     //add emeralds
     public void addFunds(long amount){ 
-        this.treasuryBalance += amount; 
+        if (amount > 0) this.treasuryBalance = amount > Long.MAX_VALUE - treasuryBalance ? Long.MAX_VALUE : treasuryBalance + amount;
     }
     
     //deduct emeralds and ensure it doesn't go below 0
     public void deductFunds(long amount){ 
-        this.treasuryBalance = Math.max(0L, this.treasuryBalance - amount); 
+        if (amount > 0) this.treasuryBalance = Math.max(0L, this.treasuryBalance - amount);
     }
 
     //get population
@@ -80,8 +84,17 @@ public class StateData {
 
     //set population
     public void setTotalPopulation(int population){
-        this.totalPopulation = Math.max(0, population); 
+        this.totalPopulation = Math.max(0, population);
     }
+
+    public long getGraceTicksRemaining() { return graceTicksRemaining; }
+    public void setGraceTicksRemaining(long ticks) { graceTicksRemaining = Math.clamp(ticks, 0L, StateBalance.INTRODUCTORY_TICKS); }
+    public int getUnpaidDays() { return unpaidDays; }
+    public void setUnpaidDays(int days) { unpaidDays = Math.max(0, days); }
+    public boolean hasEndgameChoice() { return endgameChoice; }
+    public void setEndgameChoice(boolean available) { endgameChoice = available; }
+    public UUID getCapitalSettlementId() { return capitalSettlementId; }
+    public void setCapitalSettlementId(UUID id) { capitalSettlementId = id; }
 
     //get siege immunity duration left
     public int getSiegeImmunityTicks(){ 
@@ -137,6 +150,10 @@ public class StateData {
         tag.putString("StateTier", currentTier.name());
         tag.putLong("Treasury", treasuryBalance);
         tag.putInt("Population", totalPopulation);
+        tag.putLong("GraceTicks", graceTicksRemaining);
+        tag.putInt("UnpaidDays", unpaidDays);
+        tag.putBoolean("EndgameChoice", endgameChoice);
+        if (capitalSettlementId != null) tag.putString("CapitalSettlement", capitalSettlementId.toString());
         tag.putInt("SiegeImmunity", siegeImmunityTicks);
         tag.putInt("CampaignMomentum", campaignMomentumTicks);
         tag.putInt("CampaignCaptures", settlementsCapturedThisCampaign);
@@ -155,22 +172,28 @@ public class StateData {
         UUID lId = null;
         String leaderId = tag.getString("LeaderId").orElse("");
         if (!leaderId.isEmpty()) {
-            lId = UUID.fromString(leaderId);
+            try { lId = UUID.fromString(leaderId); } catch (IllegalArgumentException ignored) { /* Keep the state even if its optional leader reference is damaged. */ }
         }
 
-        String tierName = tag.getString("StateTier").orElse(StateTier.NOMADIC.name());
-        StateTier tier = StateTier.valueOf(tierName);
+        String tierName = tag.getString("StateTier").orElse(StateTier.COUNTY.name());
+        StateTier tier;
+        try { tier = StateTier.valueOf(tierName); } catch (IllegalArgumentException ignored) { tier = StateTier.COUNTY; }
         
         StateData state = new StateData(sId, sName, lId, tier);
-        state.treasuryBalance = tag.getLong("Treasury").orElse(0L);
-        state.totalPopulation = tag.getInt("Population").orElse(0);
-        state.siegeImmunityTicks = tag.getInt("SiegeImmunity").orElse(0);
-        state.campaignMomentumTicks = tag.getInt("CampaignMomentum").orElse(0);
-        state.settlementsCapturedThisCampaign = tag.getInt("CampaignCaptures").orElse(0);
+        state.treasuryBalance = Math.max(0, tag.getLong("Treasury").orElse(0L));
+        state.setGraceTicksRemaining(tag.getLong("GraceTicks").orElse(StateBalance.INTRODUCTORY_TICKS));
+        state.unpaidDays = Math.max(0, tag.getInt("UnpaidDays").orElse(0));
+        state.endgameChoice = tag.getBoolean("EndgameChoice").orElse(false);
+        tag.getString("CapitalSettlement").ifPresent(id -> { try { state.capitalSettlementId = UUID.fromString(id); } catch (IllegalArgumentException ignored) {} });
+        state.totalPopulation = Math.max(0, tag.getInt("Population").orElse(0));
+        state.siegeImmunityTicks = Math.max(0, tag.getInt("SiegeImmunity").orElse(0));
+        state.campaignMomentumTicks = Math.max(0, tag.getInt("CampaignMomentum").orElse(0));
+        state.settlementsCapturedThisCampaign = Math.max(0, tag.getInt("CampaignCaptures").orElse(0));
         
         ListTag settlementList = tag.getList("OwnedSettlements").orElse(new ListTag());
         for (int i = 0; i < settlementList.size(); i++) {
-            state.ownedSettlements.add(UUID.fromString(settlementList.getString(i).orElseThrow()));
+            try { state.ownedSettlements.add(UUID.fromString(settlementList.getString(i).orElseThrow())); }
+            catch (RuntimeException malformedReference) { /* Rebuilt from the settlement registry after loading. */ }
         }
         
         return state;

@@ -43,6 +43,7 @@ public record ArmyMapPayload(List<LegionSummary> legions, List<ArmySummary> armi
             UUID ownerStateId,
             long packedChunkPos,
             List<BlockPos> waypoints,
+            String displayName,     // e.g. "1st Army", "2nd Army" — generated server-side
             int troops,             // total soldiers (including garrisoned cohorts)
             int morale,             // average morale of non-garrisoned cohorts
             int maintenance,        // daily upkeep cost in emeralds
@@ -56,6 +57,7 @@ public record ArmyMapPayload(List<LegionSummary> legions, List<ArmySummary> armi
                     buffer.readUUID(),
                     buffer.readLong(),
                     readWaypoints(buffer),
+                    buffer.readUtf(),
                     buffer.readVarInt(),
                     buffer.readVarInt(),
                     buffer.readVarInt(),
@@ -71,6 +73,7 @@ public record ArmyMapPayload(List<LegionSummary> legions, List<ArmySummary> armi
             buffer.writeLong(packedChunkPos);
             buffer.writeVarInt(waypoints.size());
             for (BlockPos pos : waypoints) buffer.writeBlockPos(pos);
+            buffer.writeUtf(displayName);
             buffer.writeVarInt(troops);
             buffer.writeVarInt(morale);
             buffer.writeVarInt(maintenance);
