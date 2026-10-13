@@ -20,6 +20,11 @@ import com.devc.minecraftempires.network.packet.ComposeArmyPayload;
 import com.devc.minecraftempires.network.packet.DispatchLegionPayload;
 import com.devc.minecraftempires.network.packet.GarrisonCohortPayload;
 import com.devc.minecraftempires.network.packet.AbandonSettlementPayload;
+import com.devc.minecraftempires.network.packet.ManagementDataPayload;
+import com.devc.minecraftempires.network.packet.StateActionPayload;
+import com.devc.minecraftempires.network.packet.ArmyActionPayload;
+import com.devc.minecraftempires.network.packet.OpenFoundingPayload;
+import com.devc.minecraftempires.network.packet.OpenSettlementPayload;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -34,7 +39,12 @@ public final class ModNetworking {
     private static final long MAP_REQUEST_COOLDOWN_MS = 2000L; // 2 seconds between map refreshes
 
     public static void registerPayloads(RegisterPayloadHandlersEvent event) {
-        PayloadRegistrar registrar = event.registrar("1");
+        PayloadRegistrar registrar = event.registrar("2");
+        registrar.playToClient(ManagementDataPayload.TYPE, ManagementDataPayload.STREAM_CODEC);
+        registrar.playToClient(OpenFoundingPayload.TYPE, OpenFoundingPayload.STREAM_CODEC);
+        registrar.playToClient(OpenSettlementPayload.TYPE, OpenSettlementPayload.STREAM_CODEC);
+        registrar.playToServer(StateActionPayload.TYPE, StateActionPayload.STREAM_CODEC, StateActionPayload::handle);
+        registrar.playToServer(ArmyActionPayload.TYPE, ArmyActionPayload.STREAM_CODEC, ArmyManager::handleArmyAction);
 
         registrar.playToServer(
                 RequestMapDataPayload.TYPE,
@@ -112,7 +122,14 @@ public final class ModNetworking {
         }
         mapRequestCooldowns.put(player.getUUID(), now);
 
+        sendSnapshots(player);
+    }
+
+    public static void sendSnapshots(ServerPlayer player) {
         PacketDistributor.sendToPlayer(player, MapDataService.buildPayload(player));
         PacketDistributor.sendToPlayer(player, MapDataService.buildArmyPayload(player));
+        PacketDistributor.sendToPlayer(player, ManagementDataService.build(player));
     }
+    public static void clearPlayer(UUID id) { mapRequestCooldowns.remove(id); }
+    public static void clearAll() { mapRequestCooldowns.clear(); }
 }

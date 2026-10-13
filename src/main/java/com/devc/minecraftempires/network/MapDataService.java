@@ -53,6 +53,20 @@ public final class MapDataService {
         Map<ChunkPos, ChunkData> allClaims = claimManager.getClaimsView();
         Set<UUID> warVisibleStateIds = getWarVisibleStateIds(viewerState);
         ScoutingResult scouting = findScoutedForeignChunks(allClaims, viewerStateId);
+        Set<Long> scouted = new HashSet<>(scouting.scoutedForeignChunks());
+        Set<UUID> encountered = new HashSet<>(scouting.borderingStateIds());
+        for (BlockPos origin : scoutingOrigins(ArmyManager.get(level), viewerStateId)) {
+            int cx = origin.getX() >> 4, cz = origin.getZ() >> 4;
+            for (int x = cx - 16; x <= cx + 16; x++) for (int z = cz - 16; z <= cz + 16; z++) {
+                ChunkPos chunk = new ChunkPos(x, z);
+                ChunkData claim = allClaims.get(chunk);
+                if (claim != null && claim.getOwnerUUID() != null && !viewerStateId.equals(claim.getOwnerUUID())
+                        && ArmyManager.near(origin, new BlockPos(x * 16 + 8, 0, z * 16 + 8), 250)) {
+                    scouted.add(chunk.pack()); encountered.add(claim.getOwnerUUID());
+                }
+            }
+        }
+        scouting = new ScoutingResult(scouted, encountered);
 
         Set<UUID> visibleStateIds = new HashSet<>();
         visibleStateIds.add(viewerStateId);
@@ -104,7 +118,11 @@ public final class MapDataService {
                 String.CASE_INSENSITIVE_ORDER));
 
         Collection<SettlementData> allSettlements = stateManager.getAllSettlements();
-        Map<UUID, UUID> capitalSettlementByState = chooseCapitalSettlements(allSettlements, visibleStateIds);
+        Map<UUID, UUID> capitalSettlementByState = new HashMap<>();
+        for (UUID id : visibleStateIds) {
+            StateData state = stateManager.getState(id);
+            if (state != null && state.getCapitalSettlementId() != null) capitalSettlementByState.put(id, state.getCapitalSettlementId());
+        }
         List<MapDataPayload.SettlementSummary> settlementSummaries = new ArrayList<>();
         Set<String> summarizedSettlementIds = new HashSet<>();
 
@@ -215,7 +233,8 @@ public final class MapDataService {
     }
 
     private static Set<UUID> getWarVisibleStateIds(StateData viewerState) {
-        return Set.of(); // expanded in sprint 6+
+        // War authorizes combat; it does not reveal an entire foreign state through fog.
+        return Set.of();
     }
 
     //capital selection logic: for each state, choose the settlement with the highest tier, and if tied, the name that comes first alphabetically
@@ -267,12 +286,15 @@ public final class MapDataService {
         if (viewerState == null) return ArmyMapPayload.empty();
 
         UUID viewerStateId = viewerState.getStateId();
+        Set<BlockPos> origins = scoutingOrigins(armyManager, viewerStateId);
+        ClaimManager claims = ClaimManager.get(level);
 
         //legion cohort list for legions wiith free cohorts, including their position, available soldiers, and average morale
         List<ArmyMapPayload.LegionSummary> legionSummaries = new ArrayList<>();
-        for (Legion legion : armyManager.getLegionsForState(viewerStateId)) {
+        for (Legion legion : armyManager.getAllLegions()) {
             if (!legion.hasAvailableCohorts()) continue;
             BlockPos pos = legion.getStoredPosition();
+            if (!viewerStateId.equals(legion.getOwningStateId()) && !militaryVisible(pos, viewerStateId, claims, origins)) continue;
             ChunkPos cp = new ChunkPos(pos.getX() >> 4, pos.getZ() >> 4);
             legionSummaries.add(new ArmyMapPayload.LegionSummary(
                     legion.getLegionId(), legion.getOwningStateId(), cp.pack(),
@@ -280,24 +302,36 @@ public final class MapDataService {
         }
 
         // Army summaries — all active Armies for this state
-        // Per-soldier upkeep: 750 emeralds per full 500-soldier legion = 1.5 per soldier/day (fix this, shouldnt have decimals for emeralds)
-        final double UPKEEP_PER_SOLDIER = 1.5;
         List<ArmyMapPayload.ArmySummary> armySummaries = new ArrayList<>();
         int armyOrdinal = 1;
-        for (Army army : armyManager.getArmiesForState(viewerStateId)) {
+        for (Army army : armyManager.getAllArmies()) {
             BlockPos pos = army.getStoredPosition();
+            boolean owned = viewerStateId.equals(army.getOwningStateId());
+            if (!owned && (!army.isViable(armyManager) || !militaryVisible(pos, viewerStateId, claims, origins))) continue;
             ChunkPos cp = new ChunkPos(pos.getX() >> 4, pos.getZ() >> 4);
-            int maintenance = (int) Math.round(army.getTotalStrength(armyManager) * UPKEEP_PER_SOLDIER);
-            String displayName = ordinalName(armyOrdinal++) + " Army";
+            int maintenance = army.getTotalStrength(armyManager);
+            String displayName = owned ? ordinalName(armyOrdinal++) + " Army" : "Foreign army";
             armySummaries.add(new ArmyMapPayload.ArmySummary(
                     army.getArmyId(), army.getOwningStateId(), cp.pack(),
-                    new ArrayList<>(army.getWaypoints()),
+                    owned ? new ArrayList<>(army.getWaypoints()) : List.of(),
                     displayName,
                     army.getTotalStrength(armyManager),
                     army.getBattleMorale(armyManager),
-                    maintenance, army.isEngaged(), army.getCurrentBattleId(), army.isOnCampaign()));
+                    owned ? maintenance : 0, army.isEngaged(), army.getCurrentBattleId(), army.isOnCampaign()));
         }
 
         return new ArmyMapPayload(legionSummaries, armySummaries);
+    }
+
+    private static Set<BlockPos> scoutingOrigins(ArmyManager armies, UUID viewer) {
+        Set<BlockPos> result = new HashSet<>();
+        armies.getLegionsForState(viewer).stream().flatMap(l -> l.allCohorts().stream())
+                .filter(c -> c.isAlive()).forEach(c -> result.add(c.getStoredPosition()));
+        armies.getArmiesForState(viewer).stream().filter(a -> a.isViable(armies)).forEach(a -> result.add(a.getStoredPosition()));
+        return result;
+    }
+    private static boolean militaryVisible(BlockPos pos, UUID viewer, ClaimManager claims, Set<BlockPos> origins) {
+        var claim = claims.getClaim(new ChunkPos(pos.getX() >> 4, pos.getZ() >> 4));
+        return claim != null && viewer.equals(claim.getOwnerUUID()) || origins.stream().anyMatch(origin -> ArmyManager.near(origin, pos, 250));
     }
 }
