@@ -11,12 +11,16 @@ import java.util.*;
 public class Army {
     public static final int MAX_INFANTRY_COHORTS  = 60; //max legions: 6
     public static final int MAX_CAVALRY_SQUADRONS = 30; //max calvary wings: 6
+    public static final int MAX_AUXILIARY_COHORTS = 60;
     public static final int MIN_COHORTS = 1; //min cohorts: 1
     //min squadrons: 1
 
     private final UUID armyId;
     private final UUID owningStateId;
     private final List<UUID> deployedCohortIds = new ArrayList<>(); //cohort IDs of all deployed cohorts (including garrisoned ones)
+    //preserve legion organization for split cohorts
+    private final Set<UUID> participatingLegionIds = new LinkedHashSet<>();
+    private boolean hasParticipatedInCampaign;
 
     private UUID campaignId = null; //UUID of the Campaign this Army belongs to; null if not on a campaign
     private double preciseX;
@@ -51,16 +55,19 @@ public class Army {
         return Collections.unmodifiableList(deployedCohortIds);
     }
 
+    public Set<UUID> getParticipatingLegionIds() { return Collections.unmodifiableSet(participatingLegionIds); }
+    public void rememberLegion(UUID legionId) { participatingLegionIds.add(legionId); }
+    public boolean hasParticipatedInCampaign() { return hasParticipatedInCampaign; }
+
     //check if the cohort can be added
     public boolean canAddCohort(Cohort cohort, ArmyManager manager) {
         if (cohort.getType() == CohortType.CAVALRY) { //if it's cavalry, check cavalry cap
             long current = deployedCohortIds.stream().map(manager::resolveCohort).filter(Objects::nonNull).filter(c -> c.getType() == CohortType.CAVALRY).count();
             return current < MAX_CAVALRY_SQUADRONS;
         } 
-        else{ //if it's infantry or auxiliary, check infantry cap
-            // INFANTRY and AUXILIARY share the infantry cap
-            long current = deployedCohortIds.stream().map(manager::resolveCohort).filter(Objects::nonNull).filter(c -> c.getType() != CohortType.CAVALRY).count();
-            return current < MAX_INFANTRY_COHORTS;
+        else{
+            long current = deployedCohortIds.stream().map(manager::resolveCohort).filter(Objects::nonNull).filter(c -> c.getType() == cohort.getType()).count();
+            return current < (cohort.getType() == CohortType.AUXILIARY ? MAX_AUXILIARY_COHORTS : MAX_INFANTRY_COHORTS);
         }
     }
 
@@ -79,7 +86,7 @@ public class Army {
         List<Integer> morales = new ArrayList<>();
         for (UUID id : deployedCohortIds) { //only counts cohorts that are alive and not garrisoned
             Cohort c = manager.resolveCohort(id);
-            if (c != null && c.isAlive() && !c.isGarrisoned()) morales.add(c.getMorale());
+            if (c != null && c.isAlive()) morales.add(c.getMorale());
         }
         return morales.isEmpty() ? 0 : (int) morales.stream().mapToInt(Integer::intValue).average().orElse(0);
     }
@@ -88,7 +95,7 @@ public class Army {
     public boolean isViable(ArmyManager manager) {
         for (UUID id : deployedCohortIds) {
             Cohort c = manager.resolveCohort(id);
-            if (c != null && c.isAlive() && !c.isGarrisoned()) return true;
+            if (c != null && c.isAlive()) return true;
         }
         return false;
     }
@@ -122,7 +129,10 @@ public class Army {
     public void setCurrentBattleId(UUID id)         { this.currentBattleId = id; }
 
     public UUID getCampaignId()                     { return campaignId; }
-    public void setCampaignId(UUID id)              { this.campaignId = id; }
+    public void setCampaignId(UUID id) {
+        campaignId = id;
+        if (id != null) hasParticipatedInCampaign = true;
+    }
 
     public Queue<BlockPos> getWaypoints()           { return waypoints; }
     public void addWaypoint(BlockPos pos)           { waypoints.offer(pos); }
@@ -136,6 +146,10 @@ public class Army {
         tag.putLong("StoredPos",       storedPosition.asLong());
         tag.putDouble("PreciseX", preciseX);
         tag.putDouble("PreciseZ", preciseZ);
+        tag.putBoolean("HasParticipatedInCampaign", hasParticipatedInCampaign);
+        ListTag legionList = new ListTag();
+        participatingLegionIds.forEach(id -> legionList.add(StringTag.valueOf(id.toString())));
+        tag.put("ParticipatingLegions", legionList);
 
         if (campPosition != null)   tag.putLong("CampPos",     campPosition.asLong());
         if (currentBattleId != null) tag.putString("BattleId", currentBattleId.toString());
@@ -169,12 +183,18 @@ public class Army {
 
         tag.getLong("CampPos").ifPresent(l -> army.campPosition = BlockPos.of(l));
         tag.getString("BattleId").ifPresent(s -> { if (!s.isEmpty()) army.currentBattleId = UUID.fromString(s); });
-        tag.getString("CampaignId").ifPresent(s -> { if (!s.isEmpty()) army.campaignId = UUID.fromString(s); });
+        tag.getString("CampaignId").ifPresent(s -> { if (!s.isEmpty()) army.setCampaignId(UUID.fromString(s)); });
+        army.hasParticipatedInCampaign |= tag.getBoolean("HasParticipatedInCampaign").orElse(false);
+        tag.getList("ParticipatingLegions").ifPresent(list -> {
+            for (int i = 0; i < list.size(); i++) list.getString(i).ifPresent(s -> {
+                if (!s.isEmpty()) army.rememberLegion(UUID.fromString(s));
+            });
+        });
 
         tag.getList("DeployedCohorts").ifPresent(list -> {
             for (int i = 0; i < list.size(); i++) {
                 list.getString(i).ifPresent(s -> {
-                    if (!s.isEmpty()) army.deployedCohortIds.add(UUID.fromString(s));
+                    if (!s.isEmpty()) army.addCohortId(UUID.fromString(s));
                 });
             }
         });

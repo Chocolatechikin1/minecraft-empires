@@ -15,7 +15,9 @@ import java.util.Queue;
 public class Legion {
     public static final int MAX_INFANTRY_COHORTS  = 10;
     public static final int MAX_CAVALRY_SQUADRONS = 5;
-    public static final int DAILY_UPKEEP_EMERALDS = 750;
+    public static final int DAILY_UPKEEP_EMERALDS = 550; 
+    public static final int MAX_AUXILIARY_COHORTS = 10; // Provisional playtest cap, independent of regular slots.
+    public static final int AUTO_DISBAND_STRENGTH = 50;
 
     private final UUID legionId;
     private final UUID owningStateId;
@@ -30,7 +32,7 @@ public class Legion {
 
     private final List<Cohort> infantryCohorts;    // max MAX_INFANTRY_COHORTS
     private final List<Cohort> cavalrySquadrons;   // max MAX_CAVALRY_SQUADRONS
-    private final List<Cohort> auxiliaries;        // unlimited (change later)
+    private final List<Cohort> auxiliaries;
 
     //constructor
     public Legion(UUID legionId, UUID owningStateId, BlockPos storedPosition) {
@@ -49,6 +51,7 @@ public class Legion {
         if (cohort.getType() != CohortType.INFANTRY) return false;
         if (infantryCohorts.size() >= MAX_INFANTRY_COHORTS) return false;
         infantryCohorts.add(cohort);
+        if (!cohort.hasStoredPosition()) cohort.setStoredPosition(storedPosition);
         return true;
     }
 
@@ -57,13 +60,16 @@ public class Legion {
         if (squadron.getType() != CohortType.CAVALRY) return false;
         if (cavalrySquadrons.size() >= MAX_CAVALRY_SQUADRONS) return false;
         cavalrySquadrons.add(squadron);
+        if (!squadron.hasStoredPosition()) squadron.setStoredPosition(storedPosition);
         return true;
     }
 
     //method to add auxiliary cohort (controls auxillary count cap, change later)
     public boolean addAuxiliary(Cohort cohort) {
         if (cohort.getType() != CohortType.AUXILIARY) return false;
+        if (auxiliaries.stream().filter(Cohort::isAlive).count() >= MAX_AUXILIARY_COHORTS) return false;
         auxiliaries.add(cohort);
+        if (!cohort.hasStoredPosition()) cohort.setStoredPosition(storedPosition);
         return true;
     }
 
@@ -78,9 +84,7 @@ public class Legion {
 
     //checks if legion meets requirement minimums
     public boolean isViable() {
-        boolean hasInfantry = infantryCohorts.stream().anyMatch(Cohort::isAlive);
-        boolean hasCavalry  = cavalrySquadrons.stream().anyMatch(Cohort::isAlive);
-        return hasInfantry && hasCavalry;
+        return getTotalStrength() > AUTO_DISBAND_STRENGTH;
     }
 
     /**
@@ -143,7 +147,7 @@ public class Legion {
     public int getAuxiliaryCount()                 { return auxiliaries.size(); }
 
     // ── Computed stat helpers (averages across all owned cohorts) ──────────────────
-    private List<Cohort> allCohorts() {
+    public List<Cohort> allCohorts() {
         List<Cohort> all = new ArrayList<>(infantryCohorts.size() + cavalrySquadrons.size() + auxiliaries.size());
         all.addAll(infantryCohorts);
         all.addAll(cavalrySquadrons);
@@ -151,8 +155,21 @@ public class Legion {
         return all;
     }
 
+    /** First surviving infantry cohort, then cavalry, then an auxiliary if all regulars died. */
+    public Cohort getMainCohort() {
+        return allCohorts().stream().filter(Cohort::isAlive).findFirst().orElse(null);
+    }
+
+    public void syncMainPosition() {
+        Cohort main = getMainCohort();
+        if (main == null || !main.hasStoredPosition()) return;
+        storedPosition = main.getStoredPosition();
+        preciseX = main.getPreciseX();
+        preciseZ = main.getPreciseZ();
+    }
+
     private int average(java.util.function.ToIntFunction<Cohort> stat) {
-        List<Cohort> all = allCohorts();
+        List<Cohort> all = allCohorts().stream().filter(Cohort::isAlive).toList();
         if (all.isEmpty()) return 0;
         return (int) all.stream().mapToInt(stat).average().orElse(0);
     }
@@ -168,14 +185,14 @@ public class Legion {
     /** Soldiers from cohorts that are NOT yet assigned to any Army. */
     public int getAvailableSoldiers() {
         return allCohorts().stream()
-                .filter(c -> !c.isDeployed())
+                .filter(c -> c.isAlive() && !c.isDeployed() && !c.isGarrisoned())
                 .mapToInt(Cohort::getSoldierCount)
                 .sum();
     }
 
     //cohort availability check (for army deployment)
     public boolean hasAvailableCohorts() {
-        return allCohorts().stream().anyMatch(c -> !c.isDeployed());
+        return allCohorts().stream().anyMatch(c -> c.isAlive() && !c.isDeployed() && !c.isGarrisoned());
     }
 
     //serialization methods
@@ -190,6 +207,13 @@ public class Legion {
         tag.put("Auxiliaries",      serializeCohortList(auxiliaries));
         tag.putDouble("PreciseX", preciseX);
         tag.putDouble("PreciseZ", preciseZ);
+        ListTag waypointTags = new ListTag();
+        for (BlockPos waypoint : waypoints) {
+            CompoundTag wp = new CompoundTag();
+            wp.putLong("Pos", waypoint.asLong());
+            waypointTags.add(wp);
+        }
+        tag.put("Waypoints", waypointTags);
         return tag;
     }
 
@@ -206,6 +230,17 @@ public class Legion {
         tag.getList("Auxiliaries").ifPresent(list -> deserializeCohortList(list, legion.auxiliaries));
         tag.getDouble("PreciseX").ifPresent(x -> legion.preciseX = x);
         tag.getDouble("PreciseZ").ifPresent(z -> legion.preciseZ = z);
+        for (Cohort cohort : legion.allCohorts()) {
+            if (!cohort.hasStoredPosition()) {
+                cohort.setStoredPosition(pos);
+                cohort.setPrecisePos(legion.preciseX, legion.preciseZ);
+            }
+        }
+        tag.getList("Waypoints").ifPresent(list -> {
+            for (int i = 0; i < list.size(); i++) {
+                list.getCompound(i).ifPresent(wp -> wp.getLong("Pos").ifPresent(p -> legion.addWaypoint(BlockPos.of(p))));
+            }
+        });
         return legion;
     }
 
