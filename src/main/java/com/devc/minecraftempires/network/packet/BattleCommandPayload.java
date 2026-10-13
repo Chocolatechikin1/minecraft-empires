@@ -9,48 +9,41 @@ import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
-
 import java.util.UUID;
 
-//waypoint command class, sent when a player issues a waypoint (client to server)
-public record BattleCommandPayload(UUID battleId, UUID cohortId, double targetX, double targetZ, boolean clearExisting) implements CustomPacketPayload {   // true = overwrite queue; false = append
+/** Validated tactical movement, withdrawal, or deployment formation. */
+public record BattleCommandPayload(UUID battleId, UUID cohortId, double targetX, double targetZ,
+                                   boolean clearExisting, String action) implements CustomPacketPayload {
     public static final Type<BattleCommandPayload> TYPE = new Type<>(Identifier.fromNamespaceAndPath(MinecraftEmpires.MODID, "battle_command"));
     public static final StreamCodec<RegistryFriendlyByteBuf, BattleCommandPayload> STREAM_CODEC = StreamCodec.ofMember(BattleCommandPayload::write, BattleCommandPayload::new);
-
-    public BattleCommandPayload(RegistryFriendlyByteBuf buf) { //decode the data from the buffer when received
-        this(
-            buf.readUUID(),
-            buf.readUUID(),
-            buf.readDouble(),
-            buf.readDouble(),
-            buf.readBoolean()
-        );
+    public BattleCommandPayload(UUID battleId, UUID cohortId, double x, double z, boolean clear) {
+        this(battleId, cohortId, x, z, clear, "MOVE");
     }
-
-    //encode the data into the buffer for transmission
+    public BattleCommandPayload(RegistryFriendlyByteBuf buf) {
+        this(buf.readUUID(), buf.readUUID(), buf.readDouble(), buf.readDouble(), buf.readBoolean(), buf.readUtf(24));
+    }
     private void write(RegistryFriendlyByteBuf buf) {
-        buf.writeUUID(battleId);
-        buf.writeUUID(cohortId);
-        buf.writeDouble(targetX);
-        buf.writeDouble(targetZ);
-        buf.writeBoolean(clearExisting);
+        buf.writeUUID(battleId); buf.writeUUID(cohortId); buf.writeDouble(targetX); buf.writeDouble(targetZ);
+        buf.writeBoolean(clearExisting); buf.writeUtf(action, 24);
     }
-
-    @Override
-    public Type<? extends CustomPacketPayload> type() { return TYPE; }
-
-    //handle the received payload on the server side
+    @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
     public static void handle(BattleCommandPayload payload, IPayloadContext context) {
         context.enqueueWork(() -> {
             if (!(context.player() instanceof ServerPlayer player)) return;
-
-            BattleSession session = BattleManager.get(player.level()).getBattle(payload.battleId());
-            if (session == null || !session.isActive()) return;
-
-            session.getCohortById(payload.cohortId()).ifPresent(cohort -> {
-                if (payload.clearExisting()) cohort.clearOrders();
-                cohort.queueWaypoint(payload.targetX(), payload.targetZ());
-            });
+            BattleManager manager = BattleManager.get(player.level());
+            BattleSession session = manager.getBattle(payload.battleId());
+            if (session == null || !session.isActive() || session.getCohortById(payload.cohortId()).isEmpty()) return;
+            boolean attacker = session.isAttackerCohort(payload.cohortId());
+            if (!manager.canControlSide(player, session, attacker)) return;
+            switch (payload.action()) {
+                case "MOVE" -> session.issueOrder(payload.cohortId(), payload.targetX(), payload.targetZ(), payload.clearExisting());
+                case "WITHDRAW" -> session.withdrawCohort(payload.cohortId());
+                case "LINE" -> session.applyFormation(attacker, BattleSession.Formation.LINE);
+                case "TRIPLEX" -> session.applyFormation(attacker, BattleSession.Formation.TRIPLEX);
+                case "WEDGE" -> session.applyFormation(attacker, BattleSession.Formation.WEDGE);
+                default -> { return; }
+            }
+            manager.setDirty();
         });
     }
 }

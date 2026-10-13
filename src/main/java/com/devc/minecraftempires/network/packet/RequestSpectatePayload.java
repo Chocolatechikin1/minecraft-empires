@@ -48,11 +48,17 @@ public record RequestSpectatePayload(UUID battleId) implements CustomPacketPaylo
         context.enqueueWork(() -> {
             if (!(context.player() instanceof ServerPlayer player)) return;
 
-            BattleSession session = BattleManager.get(player.level()).getBattle(payload.battleId());
-            if (session == null || !session.isActive()) return;
+            BattleManager manager = BattleManager.get(player.level());
+            BattleSession session = manager.getBattle(payload.battleId());
+            if (session == null || !session.isActive() || !manager.canSpectate(player, session)) return;
 
-            // Register this player as a spectator
+            // A player views one battle at a time. Also recover if a screen-switch leave packet
+            // was lost: its old battle must regain its autoresolve countdown.
+            for (BattleSession previous : manager.getAllBattles()) {
+                if (previous != session) previous.removeSpectator(player.getUUID());
+            }
             session.addSpectator(player.getUUID());
+            manager.setDirty();
 
             // Tell them to open the BattleMapScreen
             PacketDistributor.sendToPlayer(player, new OpenBattleMapPayload(
@@ -62,7 +68,8 @@ public record RequestSpectatePayload(UUID battleId) implements CustomPacketPaylo
             ));
 
             // Send them the current battle state immediately
-            PacketDistributor.sendToPlayer(player, BattleSyncPayload.fromSession(session));
+            PacketDistributor.sendToPlayer(player, BattleSyncPayload.fromSession(session,
+                    manager.canControlSide(player, session, true), manager.canControlSide(player, session, false)));
         });
     }
 }

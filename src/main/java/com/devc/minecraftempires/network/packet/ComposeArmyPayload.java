@@ -14,6 +14,10 @@ import java.util.UUID;
 //packet sender from client to server when user forms a new army from "Form Army"
 //server will validate the selected cohorts and create a new army if valid
 public record ComposeArmyPayload(List<UUID> selectedCohortIds, BlockPos initialPosition) implements CustomPacketPayload {
+    public ComposeArmyPayload {
+        selectedCohortIds = List.copyOf(selectedCohortIds);
+        if (selectedCohortIds.size() > 150) throw new IllegalArgumentException("Too many selected cohorts");
+    }
     public static final Type<ComposeArmyPayload> TYPE = new Type<>(Identifier.fromNamespaceAndPath(MinecraftEmpires.MODID, "compose_army"));
     public static final StreamCodec<RegistryFriendlyByteBuf, ComposeArmyPayload> STREAM_CODEC = StreamCodec.ofMember(ComposeArmyPayload::write, ComposeArmyPayload::new);
 
@@ -29,6 +33,7 @@ public record ComposeArmyPayload(List<UUID> selectedCohortIds, BlockPos initialP
 
     private static List<UUID> readUUIDList(RegistryFriendlyByteBuf buffer) {
         int count = buffer.readVarInt();
+        if (count < 0 || count > 150) throw new IllegalArgumentException("Invalid cohort selection size");
         List<UUID> ids = new ArrayList<>(count);
         for (int i = 0; i < count; i++) ids.add(buffer.readUUID());
         return ids;

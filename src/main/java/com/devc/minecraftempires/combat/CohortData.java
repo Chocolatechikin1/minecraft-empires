@@ -7,6 +7,7 @@ import java.util.ArrayDeque;
 import java.util.Queue;
 import java.util.UUID;
 
+//data for a single cohort in a battle
 /** A battle snapshot; health is surviving soldiers / original formation strength. */
 public class CohortData {
     private final UUID cohortId;
