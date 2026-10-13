@@ -6,6 +6,8 @@ import com.devc.minecraftempires.client.map.ClientMapData;
 import com.devc.minecraftempires.client.map.ClientArmyData;
 import com.devc.minecraftempires.network.packet.ArmyMapPayload;
 import com.devc.minecraftempires.network.packet.DisbandArmyPayload;
+import com.devc.minecraftempires.network.packet.ArmyActionPayload;
+import net.minecraft.core.BlockPos;
 import com.devc.minecraftempires.network.packet.MapDataPayload;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
@@ -26,6 +28,7 @@ public final class MapScreen extends Screen {
     private static final int MARGIN = 8;
 
     private InteractiveMapWidget mapWidget;
+    private int actionButtonY = -1;
 
     public MapScreen() {
         super(Component.translatable("gui.minecraftempires.map.title"));
@@ -60,6 +63,9 @@ public final class MapScreen extends Screen {
         ).bounds(panelX + 124, buttonY, buttonWidth, 20).build());
 
         ClientNetworking.requestMapData();
+        this.addRenderableWidget(Button.builder(Component.literal("Manage state and legions"),
+                button -> this.minecraft.gui.setScreen(new EmpireManagementScreen()))
+                .bounds(panelX, buttonY - 24, 180, 20).build());
     }
 
     @Override
@@ -81,6 +87,7 @@ public final class MapScreen extends Screen {
 
         drawDetailsPanel(graphics);
 
+        actionButtonY = -1;
         if (this.mapWidget != null && this.mapWidget.getSelectedArmyId() != null) {
             drawArmyTopBar(graphics, mouseX, mouseY);
         }
@@ -217,6 +224,7 @@ public final class MapScreen extends Screen {
     //all mouse and keyboard input is passed to the map widget, which handles panning, zooming, and selecting chunks, settlements, and states
     @Override
     public boolean mouseClicked(MouseButtonEvent event, boolean doubleClick) {
+        if (super.mouseClicked(event, doubleClick)) return true;
         if (this.mapWidget != null && this.mapWidget.getSelectedArmyId() != null) {
             int panelX = this.width - PANEL_WIDTH;
             ClientArmyData.Snapshot snap = ClientArmyData.get();
@@ -225,12 +233,15 @@ public final class MapScreen extends Screen {
             boolean isLegion = snap.legionsById().containsKey(selectedId);
 
             if (event.button() == 0) {
-                // For Armies: the disband button position is dynamic — we click anywhere
-                // in the "disband zone" in the lower part of the panel.
-                // Simple approach: any left-click below y=100 inside the panel triggers disband for armies.
-                if ((isArmy || isLegion) && event.x() >= panelX + 14 && event.x() <= this.width - 14 && event.y() >= 85 && event.y() <= 135) {
-                    ClientPacketDistributor.sendToServer(new DisbandArmyPayload(selectedId));
-                    this.mapWidget.clearSelectedArmy();
+                if ((isArmy || isLegion) && actionButtonY >= 0 && event.x() >= panelX + 14 && event.x() <= this.width - 14 && event.y() >= actionButtonY && event.y() <= actionButtonY + 20) {
+                    if (isLegion) this.minecraft.gui.setScreen(new ComposeArmyScreen(selectedId));
+                    else if (snap.armiesById().get(selectedId).isOnCampaign()) {
+                        ClientPacketDistributor.sendToServer(new ArmyActionPayload("END_CAMPAIGN", selectedId, BlockPos.ZERO));
+                    } else {
+                        ClientPacketDistributor.sendToServer(new DisbandArmyPayload(selectedId));
+                        this.mapWidget.clearSelectedArmy();
+                    }
+                    ClientNetworking.requestMapData();
                     return true;
                 }
                 // Left-clicking anywhere in the panel clears selection
@@ -241,7 +252,6 @@ public final class MapScreen extends Screen {
             }
         }
 
-        if (super.mouseClicked(event, doubleClick)) return true;
         return this.mapWidget != null && this.mapWidget.mouseClicked(event.x(), event.y(), event.button());
     }
 
@@ -329,6 +339,13 @@ public final class MapScreen extends Screen {
         graphics.fill(panelX + 2, overlayBottom, this.width, overlayBottom + 1, 0xFF485563);
 
         int y = overlayTop + 8;
+        UUID owner = armyData != null ? armyData.ownerStateId() : legionData.ownerStateId();
+        if (!owner.equals(ClientMapData.get().viewerStateId())) {
+            graphics.text(this.font, Component.literal("Foreign force"), textX, y, 0xFFFFD45A);
+            graphics.text(this.font, Component.literal("Soldiers: " + (armyData != null ? armyData.troops() : legionData.availableSoldiers())), textX, y + 16, 0xFFFFFFFF);
+            drawWrappedHint(graphics, textX, y + 36, "Visible through nearby troops or your territory. Manage relations in Diplomacy.");
+            return;
+        }
 
         if (armyData != null) { //army menu text and options
             //draws the top bar of the details panel for selected armies, showing troops, morale, maintenance, campaign status, and a disband button
@@ -357,6 +374,7 @@ public final class MapScreen extends Screen {
             //disband button
             int buttonWidth = PANEL_WIDTH - 28;
             int buttonX = panelX + 14;
+            actionButtonY = y;
             boolean hover = mouseX >= buttonX && mouseX <= buttonX + buttonWidth && mouseY >= y && mouseY <= y + 20;
             graphics.fill(buttonX, y, buttonX + buttonWidth, y + 20, hover ? 0xFFFF6666 : 0xFFCC0000);
             graphics.centeredText(this.font, Component.literal(armyData.isOnCampaign() ? "End Campaign" : "Disband Army"), buttonX + buttonWidth / 2, y + 6, 0xFFFFFFFF);
@@ -377,9 +395,10 @@ public final class MapScreen extends Screen {
             //disband legion button
             int buttonWidth = PANEL_WIDTH - 28;
             int buttonX = panelX + 14;
+            actionButtonY = y;
             boolean hover = mouseX >= buttonX && mouseX <= buttonX + buttonWidth && mouseY >= y && mouseY <= y + 20;
             graphics.fill(buttonX, y, buttonX + buttonWidth, y + 20, hover? 0xFFFF6666 : 0xFFCC0000);
-            graphics.centeredText(this.font, Component.literal("Disband"), buttonX + buttonWidth / 2, y + 6, 0xFFFFFFFF);
+            graphics.centeredText(this.font, Component.literal("Manage cohorts"), buttonX + buttonWidth / 2, y + 6, 0xFFFFFFFF);
             y += 26; //advance y position for the hint text below the button
             // Right-click hint
             drawWrappedHint(graphics, textX, y, "Right-click on map to march.");

@@ -1,7 +1,7 @@
 package com.devc.minecraftempires.client.gui.widget;
 
-import com.devc.minecraftempires.client.ClientNetworking;
 import com.devc.minecraftempires.client.map.ClientBattleData;
+import com.devc.minecraftempires.combat.BattleSession;
 import com.devc.minecraftempires.network.packet.BattleCommandPayload;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
@@ -20,14 +20,14 @@ import java.util.UUID;
  *  - Draws NATO rectangle symbols for each cohort (blue = attacker, red = defender)
  *  - Linearly interpolates cohort positions at render time for 60 FPS smoothness
  *  - Draws movement arrows for moving cohorts
- *  - Handles left-click (select), shift+left-click (multi-select / waypoint), right-click (clear)
+ *  - Handles left-click selection, Shift multi-selection and right-click movement orders
  *  - Sends BattleCommandPayload when the player commands a cohort to move
  */
 //class to house the center battle grid 
 public final class BattleGridWidget {
-    private static final double MIN_ZOOM    =  4.0;
+    private static final double MIN_ZOOM    =  0.25;
     private static final double MAX_ZOOM    = 40.0;
-    private static final double DEFAULT_ZOOM = 10.0;
+    private static final double DEFAULT_ZOOM = 2.0;
 
    //variables that determine the size of the unit icons, set to a square currently
     private static final int NATO_W = 18;
@@ -73,14 +73,15 @@ public final class BattleGridWidget {
         graphics.enableScissor(x, y, x + width, y + height);
 
         drawGrid(graphics);
+        drawField(graphics, data.isDeploymentPhase());
         drawCohorts(graphics, font, data, partialTick, mouseX, mouseY);
         drawMovementArrows(graphics, data, partialTick);
 
         //check if we are in the deployment phase, if we are draw a timer
-        if (data.hasData() && "DEPLOYMENT".equals(data.battlePhase())) {
-            //convert the engine ticks into seconds (4 ticks per second)
-            int seconds = data.deploymentTicksRemaining() / 4;
-            String banner = "Deployment Phase: " + seconds + "s remaining";
+        if (data.hasData() && (data.isDeploymentPhase() || data.hasEnded())) {
+            // The payload sends game ticks, although simulation runs four times per second.
+            int seconds = (data.deploymentTicksRemaining() + 19) / 20;
+            String banner = data.hasEnded() ? data.result().replace('_', ' ') : "Deployment: " + seconds + "s";
 
             //render banner
             int textWidth = font.width(banner);
@@ -108,7 +109,9 @@ public final class BattleGridWidget {
 
     //window grid function, draws the grid lines for the battle map, based on the current zoom level and center position
     private void drawGrid(GuiGraphicsExtractor graphics) {
-        double cellSize = zoom;
+        // Keep grid spacing readable at every zoom level; using zoom itself as the world
+        // interval produced thousands of subpixel lines when fully zoomed out.
+        double cellSize = Math.pow(2, Math.ceil(Math.log(20.0 / zoom) / Math.log(2)));
         int minCX = (int) Math.floor((screenToWorldX(x)     ) / cellSize);
         int maxCX = (int) Math.ceil ((screenToWorldX(x + width) ) / cellSize);
         int minCZ = (int) Math.floor((screenToWorldZ(y)     ) / cellSize);
@@ -124,6 +127,21 @@ public final class BattleGridWidget {
         }
     }
 
+    private void drawField(GuiGraphicsExtractor graphics, boolean deployment) {
+        int left = worldToScreenX(-BattleSession.FIELD_BOUND);
+        int right = worldToScreenX(BattleSession.FIELD_BOUND);
+        int top = worldToScreenZ(-BattleSession.FIELD_BOUND);
+        int bottom = worldToScreenZ(BattleSession.FIELD_BOUND);
+        if (deployment) {
+            graphics.fill(left, worldToScreenZ(-100), right, worldToScreenZ(-8), 0x224477CC);
+            graphics.fill(left, worldToScreenZ(8), right, worldToScreenZ(100), 0x22CC3333);
+        }
+        graphics.fill(left, top, right, top + 1, 0xFF657381);
+        graphics.fill(left, bottom - 1, right, bottom, 0xFF657381);
+        graphics.fill(left, top, left + 1, bottom, 0xFF657381);
+        graphics.fill(right - 1, top, right, bottom, 0xFF657381);
+    }
+
    //cohort drawer
     private void drawCohorts(GuiGraphicsExtractor graphics, Font font, ClientBattleData.Snapshot data, float partialTick, int mouseX, int mouseY) {
         if (!data.hasData()) {
@@ -132,6 +150,7 @@ public final class BattleGridWidget {
         }
 
         for (ClientBattleData.CohortRenderState cohort : data.cohorts().values()) {
+            if (cohort.currentHealth <= 0 || cohort.escaped) continue;
             double wx = data.getRenderX(cohort.cohortId, partialTick);
             double wz = data.getRenderZ(cohort.cohortId, partialTick);
             int sx = worldToScreenX(wx);
@@ -274,26 +293,23 @@ public final class BattleGridWidget {
                 return true;
             }
 
-            // Shift + left-click on empty space = issue move command to all selected cohorts
-            if (shiftHeld && !selectedCohortIds.isEmpty() && battleId != null) {
+        } else if (button == 1) {
+            // Right-click replaces orders; Shift + right-click appends a waypoint.
+            if (!selectedCohortIds.isEmpty() && battleId != null) {
                 double wx = screenToWorldX((int) mouseX);
                 double wz = screenToWorldZ((int) mouseY);
+                ClientBattleData.Snapshot data = ClientBattleData.get();
                 for (UUID id : selectedCohortIds) {
-                    ClientPacketDistributor.sendToServer( new BattleCommandPayload(battleId, id, wx, wz, false));
+                    var cohort = data.cohorts().get(id);
+                    if (data.canControl(cohort) && !cohort.isRouting && !cohort.isEngaged && !cohort.isWithdrawing && !cohort.escaped)
+                        ClientPacketDistributor.sendToServer(new BattleCommandPayload(battleId, id, wx, wz, !shiftHeld));
                 }
-                return true;
-            }
-
-        } else if (button == 1) { // Right click
-            // Clear selection
-            if (!selectedCohortIds.isEmpty()) {
-                selectedCohortIds.clear();
                 return true;
             }
         }
 
-        dragging = true;
-        return false;
+        dragging = button == 0 || button == 2;
+        return dragging;
     }
 
     public boolean mouseReleased(int button) {
@@ -302,7 +318,7 @@ public final class BattleGridWidget {
     }
 
     public boolean mouseDragged(double dragX, double dragY, int button) {
-        if (button == 0 && dragging) {
+        if ((button == 0 || button == 2) && dragging) {
             centerX -= dragX / zoom;
             centerZ -= dragY / zoom;
             return true;
@@ -344,6 +360,7 @@ public final class BattleGridWidget {
         int hh = (int) Math.max(5, NATO_H * zoom / DEFAULT_ZOOM);
 
         for (ClientBattleData.CohortRenderState cohort : data.cohorts().values()) {
+            if (cohort.currentHealth <= 0 || cohort.escaped) continue;
             double wx = data.getRenderX(cohort.cohortId, 1.0f);
             double wz = data.getRenderZ(cohort.cohortId, 1.0f);
             int sx = worldToScreenX(wx);

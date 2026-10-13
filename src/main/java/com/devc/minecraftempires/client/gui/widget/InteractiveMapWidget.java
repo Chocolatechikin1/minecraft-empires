@@ -467,6 +467,12 @@ public final class InteractiveMapWidget {
 
         if (button == 1) {
             if (this.selectedArmyId != null) {
+                UUID viewer = ClientMapData.get().viewerStateId();
+                var snapshot = ClientArmyData.get();
+                UUID owner = selectedIsArmy
+                        ? snapshot.armiesById().containsKey(selectedArmyId) ? snapshot.armiesById().get(selectedArmyId).ownerStateId() : null
+                        : snapshot.legionsById().containsKey(selectedArmyId) ? snapshot.legionsById().get(selectedArmyId).ownerStateId() : null;
+                if (viewer == null || !viewer.equals(owner)) return true;
                 boolean isQueueing = net.minecraft.client.Minecraft.getInstance().options.keyShift.isDown();
                 BlockPos targetPos = new BlockPos(chunkX * 16 + 8, 100, chunkZ * 16 + 8);
 
@@ -504,6 +510,7 @@ public final class InteractiveMapWidget {
 
         for (ArmyMapPayload.ArmySummary army : armies.armiesById().values()) {
             if (!army.isEngaged() || army.battleId() == null) continue;
+            if (!army.ownerStateId().equals(ClientMapData.get().viewerStateId())) continue;
             ChunkPos chunkPos = ChunkPos.unpack(army.packedChunkPos());
             int screenX = chunkToScreenX(chunkPos.x());
             int screenY = chunkToScreenY(chunkPos.z());

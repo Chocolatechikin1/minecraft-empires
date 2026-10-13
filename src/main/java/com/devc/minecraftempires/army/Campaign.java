@@ -2,6 +2,8 @@ package com.devc.minecraftempires.army;
 
 import com.devc.minecraftempires.MinecraftEmpires;
 import com.devc.minecraftempires.territory.ClaimManager;
+import com.devc.minecraftempires.state.StateManager;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
@@ -14,7 +16,7 @@ import java.util.*;
 /**
  * Tracks a multi-battle military operation for one or more Armies.
  *
- * A Campaign is created automatically when an Army is dispatched to
+ * A Campaign is created automatically when an Army physically enters
  * non-friendly territory, or when a battle is triggered against an
  * invading enemy. It persists through multiple battles and sieges until
  * the player manually ends it — subject to an end-condition check.
@@ -24,12 +26,10 @@ import java.util.*;
  *  2. No enemy Army is within THREAT_RANGE_BLOCKS of any chunk conquered
  *     during this campaign.
  *
- * On disband:
- *  - Non-garrisoned cohorts: assignedArmyId cleared (returned to Legion pool).
- *  - Garrisoned cohorts: isGarrisoned stays true, garrisonedSettlementId kept.
- *  - Army objects are removed from ArmyManager.
+ * Ending a campaign clears only its status. Army wrappers must then be released separately.
  */
 public class Campaign {
+    private static final org.slf4j.Logger LOGGER = com.mojang.logging.LogUtils.getLogger();
     public static final int THREAT_RANGE_BLOCKS = 150;
 
     private final UUID campaignId;
@@ -59,36 +59,54 @@ public class Campaign {
         return Collections.unmodifiableSet(conqueredChunkPositions);
     }
 
-    //campaign end conditions check, checks if there are any enemy armies within 150 blocks of any conquered chunk
-    public boolean checkEndConditions(ArmyManager armyManager) {
-        if (conqueredChunkPositions.isEmpty()) return true;
-        Collection<Army> allArmies = armyManager.getAllArmies();
-        for (Long packedPos : conqueredChunkPositions) {
-            ChunkPos chunkPos = ChunkPos.unpack(packedPos);
-            //use block center of the chunk for distance math
-            BlockPos chunkCentre = new BlockPos(chunkPos.x() * 16 + 8, 64, chunkPos.z() * 16 + 8);
-            for (Army enemy : allArmies) {
-                //skip friendly armies
-                if (enemy.getOwningStateId().equals(owningStateId)) continue;
-                //skip armies on the same campaign
-                if (armyIds.contains(enemy.getArmyId())) continue;
-                if (chunkCentre.distSqr(enemy.getStoredPosition()) <= (long) THREAT_RANGE_BLOCKS * THREAT_RANGE_BLOCKS) {
-                    MinecraftEmpires.LOGGER.debug("Cannot end campaign, enemy Army {} is {} blocks from conquered chunk ({}, {}).",enemy.getArmyId(), chunkCentre.distManhattan(enemy.getStoredPosition()),chunkPos.x(), chunkPos.z());
-                    return false;
+    public boolean checkEndConditions(ArmyManager manager, ServerLevel level) {
+        StateManager states = StateManager.get(level);
+        List<BlockPos> protectedPositions = new ArrayList<>();
+        for (UUID id : armyIds) {
+            Army army = manager.getArmy(id);
+            if (army != null) {
+                if (army.isEngaged()) return false;
+                if (army.isViable(manager)) protectedPositions.add(army.getStoredPosition());
+            }
+        }
+        states.getAllSettlements().stream().filter(s -> owningStateId.equals(s.getOwningStateId()))
+                .forEach(s -> protectedPositions.add(s.getCenterAltarPos()));
+        List<BlockPos> threats = new ArrayList<>();
+        manager.getAllArmies().stream().filter(a -> a.isViable(manager) && states.areAtWar(owningStateId, a.getOwningStateId()))
+                .forEach(a -> threats.add(a.getStoredPosition()));
+        manager.getAllLegions().stream().filter(l -> states.areAtWar(owningStateId, l.getOwningStateId()))
+                .flatMap(l -> l.allCohorts().stream()).filter(c -> c.isAlive() && !c.isDeployed())
+                .forEach(c -> threats.add(c.getStoredPosition()));
+        ClaimManager claims = ClaimManager.get(level);
+        for (BlockPos enemy : threats) {
+            if (protectedPositions.stream().anyMatch(p -> ArmyManager.near(p, enemy, THREAT_RANGE_BLOCKS))) return false;
+            // Search the small neighborhood around a threat instead of every historical conquest.
+            int cx = enemy.getX() >> 4, cz = enemy.getZ() >> 4, radius = (THREAT_RANGE_BLOCKS + 15) / 16;
+            for (int x = cx - radius; x <= cx + radius; x++) {
+                for (int z = cz - radius; z <= cz + radius; z++) {
+                    ChunkPos chunk = new ChunkPos(x, z);
+                    if (!conqueredChunkPositions.contains(chunk.pack())) continue;
+                    var claim = claims.getClaim(chunk);
+                    if (claim != null && owningStateId.equals(claim.getOwnerUUID())
+                            && ArmyManager.near(new BlockPos(x * 16 + 8, 0, z * 16 + 8), enemy, THREAT_RANGE_BLOCKS)) return false;
                 }
             }
         }
         return true;
     }
 
-    //disbands all armies, releases non-garrisoned cohorts back to their Legion pools, and sets isActive to false
-    //garrisoned cohorts keep garrisoning their settlements
+    // End the campaign only. The player's next action releases the army wrapper.
     public void disbandCampaign(ArmyManager armyManager) {
         for (UUID armyId : new HashSet<>(armyIds)) {
-            armyManager.disbandArmy(armyId, /*forceDisband=*/true);
+            Army army = armyManager.getArmy(armyId);
+            if (army != null && campaignId.equals(army.getCampaignId())) {
+                army.setCampaignId(null);
+                army.clearWaypoints(); // Ending an operation must not immediately march into another one.
+            }
         }
+        armyIds.clear();
         isActive = false;
-        MinecraftEmpires.LOGGER.info("Campaign {} ended.", campaignId);
+        LOGGER.info("Campaign {} ended.", campaignId);
     }
 
     //getters
