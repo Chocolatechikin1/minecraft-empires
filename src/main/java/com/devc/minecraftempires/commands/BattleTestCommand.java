@@ -3,6 +3,8 @@ package com.devc.minecraftempires.commands;
 import com.devc.minecraftempires.army.Army;
 import com.devc.minecraftempires.army.ArmyManager;
 import com.devc.minecraftempires.army.Cohort;
+import com.devc.minecraftempires.army.Legion;
+import com.devc.minecraftempires.state.StateTier;
 import com.devc.minecraftempires.combat.BattleManager;
 import com.devc.minecraftempires.state.StateData;
 import com.devc.minecraftempires.state.StateManager;
@@ -27,32 +29,25 @@ public class BattleTestCommand {
             }
 
             ArmyManager armyManager = ArmyManager.get(player.level());
-
-            // 1. Mock Data: Generate Player Army
-            Army attacker = new Army(UUID.randomUUID(), playerState.getStateId(), player.blockPosition());
-            Cohort a1 = Cohort.createInfantry();
-            Cohort a2 = Cohort.createInfantry();
-            armyManager.registerCohort(a1);
-            armyManager.registerCohort(a2);
-            attacker.addCohortId(a1.getCohortId());
-            attacker.addCohortId(a2.getCohortId());
-            armyManager.registerArmy(attacker); // register so armyManager.getArmy() resolves during tick/auto-resolve
-
-            // 2. Mock Data: Generate Enemy Army (random state ID)
-            Army defender = new Army(UUID.randomUUID(), UUID.randomUUID(), player.blockPosition());
-            Cohort d1 = Cohort.createInfantry();
-            Cohort d2 = Cohort.createInfantry();
-            armyManager.registerCohort(d1);
-            armyManager.registerCohort(d2);
-            defender.addCohortId(d1.getCohortId());
-            defender.addCohortId(d2.getCohortId());
-            armyManager.registerArmy(defender); // register so armyManager.getArmy() resolves during tick/auto-resolve
+            // Complete persistent fixtures survive a save/load during the test battle.
+            Legion attackingLegion = armyManager.raiseLegion(playerState, player.blockPosition()).orElse(null);
+            if (attackingLegion == null) {
+                player.sendSystemMessage(Component.literal("Your state's legion cap is reached; dissolve an unused legion before creating this fixture."));
+                return 0;
+            }
+            StateData enemyState = stateManager.createState("Battle Test Opponent", UUID.randomUUID(), StateTier.COUNTY);
+            Legion defendingLegion = armyManager.raiseLegion(enemyState, player.blockPosition().offset(50, 0, 0)).orElseThrow();
+            Army attacker = armyManager.autoWrapLegionInArmy(attackingLegion).orElseThrow();
+            Army defender = armyManager.autoWrapLegionInArmy(defendingLegion).orElseThrow();
+            stateManager.declareWar(playerState.getStateId(), enemyState.getStateId());
+            armyManager.createCampaign(playerState.getStateId(), attacker.getArmyId());
+            armyManager.createCampaign(enemyState.getStateId(), defender.getArmyId());
 
             // 3. Force the Engine: Inject them into BattleManager
             // This will automatically call notifyOnlinePlayers which sends the OpenBattleMapPayload
             BattleManager.get(player.level()).startBattle(attacker, defender, player.level());
 
-            player.sendSystemMessage(Component.literal("§a[Minecraft Empires] Test Battle Initialized! GUI should open."));
+            player.sendSystemMessage(Component.literal("§a[Minecraft Empires] Test battle started. The opponent state and surviving forces persist in this test world."));
             return 1;
 
         } catch (Exception e) {

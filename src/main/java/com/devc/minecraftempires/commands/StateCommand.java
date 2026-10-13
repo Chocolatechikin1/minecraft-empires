@@ -22,6 +22,7 @@ public class StateCommand {
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
         dispatcher.register(Commands.literal("state")
             .then(Commands.literal("create")
+                .requires(Commands.hasPermission(Commands.LEVEL_GAMEMASTERS))
                 .then(Commands.argument("name", StringArgumentType.string())
                     .executes(StateCommand::createState)
                 )
@@ -85,12 +86,12 @@ public class StateCommand {
 
                 source.sendSuccess(() -> Component.literal("§6--- State of " + foundState.getStateName() + " ---"), false);
                 source.sendSuccess(() -> Component.literal("§eTier: §f" + foundState.getCurrentTier().name()), false);
-                source.sendSuccess(() -> Component.literal("§eTreasury: §f" + String.format("%.2f", foundState.getTreasuryBalance()) + " coins"), false);
+                source.sendSuccess(() -> Component.literal("§eTreasury: §f" + foundState.getTreasuryBalance() + " emeralds"), false);
                 source.sendSuccess(() -> Component.literal("§ePopulation: §f" + foundState.getTotalPopulation()), false);
                 //dont think we need a siege tick display but if we do uncomment this line
                 //source.sendSuccess(() -> Component.literal("§eSiege Lock Ticks: §f" + foundState.getSiegeImmunityTicks()), false);
             } else {
-                source.sendFailure(Component.literal("§c[Minecraft Empires] You do not lead any states! Use /state create <name> to found one."));
+                source.sendFailure(Component.literal("Place a City Altar to found your state."));
             }
             return 1;
         }
@@ -112,13 +113,16 @@ public class StateCommand {
             }
 
             // Ensure only the leader can destroy the state
-            if (!existingState.getLeaderId().equals(playerId)) {
+            if (!playerId.equals(existingState.getLeaderId())) {
                 source.sendFailure(Component.literal("§c[Minecraft Empires] Only current leader can disband the state."));
                 return 0;
             }
 
             String stateName = existingState.getStateName();
-            manager.disbandState(existingState.getStateId(), level);
+            if (!manager.disbandState(existingState.getStateId(), level)) {
+                source.sendFailure(Component.literal("End all campaigns and battles before disbanding your state."));
+                return 0;
+            }
             source.sendSuccess(() -> Component.literal("§a[Minecraft Empires] " + stateName + " successfully disbanded."), true);
             
             return 1;
@@ -139,7 +143,7 @@ public class StateCommand {
                 return 0;
             }
 
-            if (existingState.getLeaderId().equals(playerId)) {
+            if (playerId.equals(existingState.getLeaderId())) {
                 source.sendFailure(Component.literal("§c[Minecraft Empires] You are the leader of this state! You must transfer leadership or use /state disband."));
                 return 0;
             }
