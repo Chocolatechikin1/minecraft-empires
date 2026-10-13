@@ -15,10 +15,8 @@ public final class BattleTickHandler {
         int tick = event.getServer().getTickCount();
         if (tick % TICK_INTERVAL != 0) return;
 
-        event.getServer().getAllLevels().forEach(level -> {
-            BattleManager.get(level).tick(level);
-            // Advance Legion and Army waypoint movement each tick interval
-            ArmyManager.get(level).tickArmies(level);
-        });
+        var level = event.getServer().overworld();
+        BattleManager.get(level).tick(level);
+        ArmyManager.get(level).tickArmies(level);
     }
 }

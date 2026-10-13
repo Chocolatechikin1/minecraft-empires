@@ -1,129 +1,158 @@
 package com.devc.minecraftempires.combat;
 
 import com.devc.minecraftempires.army.Cohort;
+import net.minecraft.nbt.CompoundTag;
 import org.joml.Vector2d;
-import java.util.LinkedList;
+import java.util.ArrayDeque;
 import java.util.Queue;
 import java.util.UUID;
 
-//data for a single cohort in a battle
+/** A battle snapshot; health is surviving soldiers / original formation strength. */
 public class CohortData {
-    private final UUID cohortId;   //matches the source Cohort's cohortId for result write-back
-    private final String type;     //"INFANTRY", "CAVALRY", "AUXILIARY"
-    private int currentHealth;  //current soldier count alive
-    private final int maxHealth;      //soldier count at battle start
-    private int morale;         //0–100; hitting 0 triggers routing
-    private final double speed;         //battle-units per tick
-    private final int strength;      //raw combat output; affects damage dealt
+    private final UUID cohortId;
+    private final String type;
+    private final int maxHealth;
+    private int currentHealth;
+    private int morale;
+    private final double speed;
+    private final int strength;
+    private final int endurance;
+    private boolean routing;
+    private boolean routAnnounced;
+    private boolean engaged;
+    private boolean withdrawing;
+    private boolean escaped;
+    private int withdrawalSteps;
+    private final Vector2d position;
+    private final Vector2d previousPosition;
+    private final Queue<Vector2d> movementWaypoints = new ArrayDeque<>();
 
-    private final int endurance;     //fatigue resistance (reserved for future attrition calc)
-    private boolean isRouting = false;
-
-    //position variables
-    private Vector2d position;
-    private Vector2d previousPosition; //for client-side lerp (linear interpolation)
-    private final Queue<Vector2d> movementWaypoints;
-
-    public CohortData(UUID cohortId, String type, int maxHealth, int morale, double speed, int strength, int endurance, double startX, double startZ) {
-        this.cohortId          = cohortId;
-        this.type              = type;
-        this.maxHealth         = maxHealth;
-        this.currentHealth     = maxHealth;
-        this.morale            = morale;
-        this.speed             = speed;
-        this.strength          = strength;
-        this.endurance         = endurance;
-        this.position          = new Vector2d(startX, startZ);
-        this.previousPosition  = new Vector2d(startX, startZ);
-        this.movementWaypoints = new LinkedList<>();
+    public CohortData(UUID id, String type, int maxHealth, int morale, double speed,
+                      int strength, int endurance, double x, double z) {
+        this.cohortId = id;
+        this.type = type;
+        this.maxHealth = Math.max(1, maxHealth);
+        this.currentHealth = this.maxHealth;
+        this.morale = Math.clamp(morale, 0, 100);
+        this.speed = Math.max(0.1, speed);
+        this.strength = strength;
+        this.endurance = endurance;
+        position = new Vector2d(x, z);
+        previousPosition = new Vector2d(x, z);
     }
 
-    //pulls cohort data from a Cohort object
-    public static CohortData fromCohort(Cohort cohort, double startX, double startZ) {
-        // speed: Cohort.speed 0–100 → battle speed 0–2.0 (average stat = 50 → 1.0 unit/tick)
-        double battleSpeed = cohort.getSpeed() / 50.0;
-        return new CohortData(
-                cohort.getCohortId(),
-                cohort.getType().name(),
-                cohort.getSoldierCount(),
-                cohort.getMorale(),
-                battleSpeed,
-                cohort.getStrength(),
-                cohort.getEndurance(),
-                startX,
-                startZ
-        );
+    public static CohortData fromCohort(Cohort cohort, double x, double z) {
+        CohortData data = new CohortData(cohort.getCohortId(), cohort.getType().name(),
+                cohort.getMaxSoldiers(), cohort.getMorale(), cohort.getSpeed() / 50.0,
+                cohort.getStrength(), cohort.getEndurance(), x, z);
+        data.currentHealth = cohort.getSoldierCount();
+        data.routing = cohort.isRouting() || cohort.getMorale() == 0;
+        return data;
     }
 
-    //cohort speed variable
     public void tickMovement() {
-        if (movementWaypoints.isEmpty() || morale <= 0) return;
-
-        Vector2d target   = movementWaypoints.peek();
-        double   distance = position.distance(target);
-
         previousPosition.set(position);
-
-        if (distance <= speed) {
+        if (!isAlive() || escaped) return;
+        if (withdrawalSteps > 0) { withdrawalSteps--; return; }
+        if (movementWaypoints.isEmpty() || (engaged && !routing && !withdrawing)) return;
+        Vector2d target = movementWaypoints.peek();
+        double step = speed * (routing ? 1.25 : 1.0);
+        if (position.distance(target) <= step) {
             position.set(target);
             movementWaypoints.poll();
+            if ((routing || withdrawing) && movementWaypoints.isEmpty()) escaped = true;
         } else {
-            Vector2d direction = new Vector2d(target).sub(position).normalize();
-            position.add(direction.mul(speed));
+            position.add(new Vector2d(target).sub(position).normalize().mul(step));
         }
     }
 
-    //combat tracking
-    
-    //damage tracker: damage affects health, morale for morale
     public void applyDamage(int damage, int moraleShock) {
-        this.currentHealth = Math.max(0, this.currentHealth - damage);
-        this.morale        = Math.max(0, this.morale - moraleShock);
-        if (this.morale == 0) {
-            this.isRouting = true;
-        }
+        currentHealth = Math.max(0, currentHealth - Math.max(0, damage));
+        applyMoraleShock(moraleShock);
     }
 
-    //hits a cohort if a neighoring cohort routs
     public void applyMoraleShock(int shock) {
-        this.morale = Math.max(0, this.morale - shock);
-        if (this.morale == 0) {
-            this.isRouting = true;
-        }
+        morale = Math.clamp(morale - Math.max(0, shock), 0, 100);
+        if (morale == 0) routing = true;
     }
 
-    //gets cohort troop count
-    public boolean isAlive() {
-        return currentHealth > 0;
+    public boolean announceRout() {
+        if (!routing || routAnnounced) return false;
+        routAnnounced = true;
+        return true;
     }
 
-    //waypoint queuer
+    public boolean isAlive() { return currentHealth > 0; }
+    public boolean canFight() { return isAlive() && !routing && !escaped; }
+    public boolean canTakeOrders() { return canFight() && !withdrawing; }
+    public void setEngaged(boolean value) {
+        if (value && !engaged && !routing && !withdrawing) clearOrders();
+        engaged = value;
+    }
     public void queueWaypoint(double x, double z) {
-        movementWaypoints.add(new Vector2d(x, z));
+        if (movementWaypoints.size() < 64) movementWaypoints.add(new Vector2d(x, z));
     }
-
-    //if unit retreats, wipes existing waypoints and sets a retreat waypoint
     public void setRetreatWaypoint(double x, double z) {
+        if (escaped) return;
         movementWaypoints.clear();
-        movementWaypoints.add(new Vector2d(x, z));
+        queueWaypoint(x, z);
     }
-
-    public void clearOrders() {
-        movementWaypoints.clear();
+    public void beginWithdrawal(double x, double z) {
+        if (!canTakeOrders()) return;
+        withdrawing = true;
+        withdrawalSteps = engaged ? 12 : 0; // three seconds at four simulation steps/second
+        setRetreatWaypoint(x, z);
     }
-
-    //getters and setters
-    public UUID     getCohortId()           { return cohortId; }
-    public String   getType()               { return type; }
-    public int      getCurrentHealth()      { return currentHealth; }
-    public int      getMaxHealth()          { return maxHealth; }
-    public int      getMorale()             { return morale; }
-    public double   getSpeed()              { return speed; }
-    public int      getStrength()           { return strength; }
-    public int      getEndurance()          { return endurance; }
-    public Vector2d getPosition()           { return position; }
-    public Vector2d getPreviousPosition()   { return previousPosition; }
-    public boolean  isRouting()             { return isRouting; }
-    public void     setRouting(boolean v)   { this.isRouting = v; }
+    public void place(double x, double z) {
+        position.set(x, z);
+        previousPosition.set(position);
+        clearOrders();
+    }
+    public void clearOrders() { movementWaypoints.clear(); }
+    public UUID getCohortId() { return cohortId; }
+    public String getType() { return type; }
+    public int getCurrentHealth() { return currentHealth; }
+    public int getMaxHealth() { return maxHealth; }
+    public int getMorale() { return morale; }
+    public double getSpeed() { return speed; }
+    public int getStrength() { return strength; }
+    public int getEndurance() { return endurance; }
+    public Vector2d getPosition() { return position; }
+    public Vector2d getPreviousPosition() { return previousPosition; }
+    public boolean isRouting() { return routing; }
+    public void setRouting(boolean value) { routing = value; }
+    public boolean isEngaged() { return engaged; }
+    public boolean isWithdrawing() { return withdrawing; }
+    public boolean hasEscaped() { return escaped; }
     public Queue<Vector2d> getMovementWaypoints() { return movementWaypoints; }
+
+    public CompoundTag toNBT() {
+        CompoundTag tag = new CompoundTag();
+        tag.putString("Id", cohortId.toString());
+        tag.putString("Type", type);
+        tag.putInt("Max", maxHealth);
+        tag.putInt("Current", currentHealth);
+        tag.putInt("Morale", morale);
+        tag.putDouble("Speed", speed);
+        tag.putInt("Strength", strength);
+        tag.putInt("Endurance", endurance);
+        tag.putDouble("X", position.x);
+        tag.putDouble("Z", position.y);
+        tag.putBoolean("Routing", routing);
+        tag.putBoolean("Escaped", escaped);
+        tag.putBoolean("Withdrawing", withdrawing);
+        return tag;
+    }
+    public static CohortData fromNBT(CompoundTag tag) {
+        CohortData data = new CohortData(UUID.fromString(tag.getString("Id").orElseThrow()),
+                tag.getString("Type").orElse("INFANTRY"), tag.getInt("Max").orElse(50),
+                tag.getInt("Morale").orElse(50), tag.getDouble("Speed").orElse(1.0),
+                tag.getInt("Strength").orElse(50), tag.getInt("Endurance").orElse(50),
+                tag.getDouble("X").orElse(0.0), tag.getDouble("Z").orElse(0.0));
+        data.currentHealth = Math.clamp(tag.getInt("Current").orElse(data.maxHealth), 0, data.maxHealth);
+        data.routing = tag.getBoolean("Routing").orElse(false);
+        data.escaped = tag.getBoolean("Escaped").orElse(false);
+        data.withdrawing = tag.getBoolean("Withdrawing").orElse(false);
+        return data;
+    }
 }

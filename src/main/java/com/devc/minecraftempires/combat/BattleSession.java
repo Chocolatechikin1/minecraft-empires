@@ -1,270 +1,250 @@
 package com.devc.minecraftempires.combat;
 
-import org.joml.Vector2d;
-
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
 import java.util.*;
 
-/**
- * Represents a single active tactical battle between two Legions.
- *
- * The battle map is a 2-D coordinate space in "battle units" (≈ 1 block).
- * The origin (0, 0) maps to (mapOriginX, mapOriginZ) in grand-strategy world coordinates.
- *
- * Lifecycle: created by BattleManager.startBattle() → ticked by BattleTickHandler every few server ticks
- *            → resolved (ATTACKER_WINS / DEFENDER_WINS) → cleaned up by BattleManager.
- *
- * Pacing notes:
- *  - DEPLOYMENT phase lasts 30 s (600 ticks). Cohorts accept waypoints but don't march or fight.
- *  - Idle grace period: 60 s (1200 ticks) on first creation; drops to 10 s (200 ticks) if a player
- *    spectates and then leaves. BattleManager auto-resolves only after this threshold is exceeded.
- *  - Melee damage fires every 40 ticks (2 s) to slow down combat. Movement still ticks every 5 ticks.
- *  - Routing cohorts passively drain -1 morale per combat tick from nearby friendly units (morale aura).
- */
-//okay explanation ill keep it
+/** Server-owned battle, simulated every five server ticks (four steps per second). */
 public class BattleSession {
-    public enum BattleResult {
-        ONGOING,
-        ATTACKER_WINS,
-        DEFENDER_WINS
-    }
-
-    /** Two-phase battle flow: troops deploy first, then engage. */
-    public enum BattlePhase {
-        DEPLOYMENT,
-        ENGAGEMENT
-    }
-
-    //stat constants (adjust as needed) - this will need rework
+    public enum BattleResult { ONGOING, ATTACKER_WINS, DEFENDER_WINS }
+    public enum BattlePhase { DEPLOYMENT, ENGAGEMENT }
+    public enum Formation { LINE, TRIPLEX, WEDGE }
     private static final double MELEE_RANGE = 3.0;
-    private static final int BASE_MELEE_DAMAGE = 3;
-    private static final int MELEE_MORALE_SHOCK = 2;
-    private static final int ROUT_CHAIN_SHOCK = 10; // morale shock applied to adjacent cohorts when a cohort routs
-
-    private static final double MORALE_AURA_RADIUS = 10.0;
-    private static final int MORALE_AURA_DRAIN = 1;  // morale drained per combat tick per nearby routing unit
-
-    private static final int DEPLOYMENT_TICKS_MAX = 120;
-
-    private static final int INITIAL_GRACE_TICKS = 240;
-
-    //auto resolve grace period after a player spectated and leaves is 10 seconds rather than 60
-    private static final int ABANDONMENT_GRACE_TICKS = 200;
-
-    /** Melee clashes fire once every 8 engine ticks (2 s) to slow down combat. */
-    private static final int MELEE_TICK_INTERVAL = 8;
-
+    private static final int DEPLOYMENT_STEPS = 120;
+    private static final int INITIAL_GRACE_STEPS = 240;
+    private static final int ABANDONMENT_GRACE_STEPS = 40;
+    private static final int MELEE_INTERVAL = 8;
+    public static final double FIELD_BOUND = 160;
     private final UUID battleId;
     private final UUID attackerArmyId;
     private final UUID defenderArmyId;
     private final double mapOriginX;
     private final double mapOriginZ;
-
-    ///combatants
-    private final List<CohortData> attackerCohorts;
-    private final List<CohortData> defenderCohorts;
-
-    //battle state
-    private boolean isActive;
-    private BattleResult result = BattleResult.ONGOING;
-
-    //deployment phase tracking
-    private BattlePhase phase = BattlePhase.DEPLOYMENT;
-    private int deploymentTicks  = 0;
-    private int  idleTicks = 0;
-    private boolean wasEverSpectated = false;
-    private int combatTickCounter = 0;
-
-    //set that tracks number of spectating players
+    private final List<CohortData> attackerCohorts = new ArrayList<>();
+    private final List<CohortData> defenderCohorts = new ArrayList<>();
     private final Set<UUID> spectatingPlayerIds = new HashSet<>();
+    private boolean active = true;
+    private BattleResult result = BattleResult.ONGOING;
+    private BattlePhase phase = BattlePhase.DEPLOYMENT;
+    private int deploymentSteps;
+    private int idleSteps;
+    private int combatSteps;
+    private boolean everSpectated;
 
-    public BattleSession(UUID attackerArmyId, UUID defenderArmyId, double originX, double originZ) {
-        this.battleId        = UUID.randomUUID();
-        this.attackerArmyId  = attackerArmyId;
-        this.defenderArmyId  = defenderArmyId;
-        this.attackerCohorts = new ArrayList<>();
-        this.defenderCohorts = new ArrayList<>();
-        this.mapOriginX      = originX;
-        this.mapOriginZ      = originZ;
-        this.isActive        = true;
+    public BattleSession(UUID attacker, UUID defender, double x, double z) {
+        this(UUID.randomUUID(), attacker, defender, x, z);
     }
-
-    //grace period checker function, returns true if the battle is still in the grace period and cannot be auto-resolved
+    private BattleSession(UUID id, UUID attacker, UUID defender, double x, double z) {
+        battleId = id;
+        attackerArmyId = attacker;
+        defenderArmyId = defender;
+        mapOriginX = x;
+        mapOriginZ = z;
+    }
     public boolean isAutoResolveAllowed() {
-        int threshold = wasEverSpectated ? ABANDONMENT_GRACE_TICKS : INITIAL_GRACE_TICKS;
-        return idleTicks >= threshold;
+        return idleSteps >= (everSpectated ? ABANDONMENT_GRACE_STEPS : INITIAL_GRACE_STEPS);
     }
+    public void resetIdleTicks() { idleSteps = 0; }
+    public void tickIdle() { idleSteps++; }
 
-    //resets if a player returns to spectate
-    public void resetIdleTicks() {
-        idleTicks = 0;
+    public void tick() { tick(true, true); }
+    public void tickDeployment() {
+        if (active && phase == BattlePhase.DEPLOYMENT && ++deploymentSteps >= DEPLOYMENT_STEPS) phase = BattlePhase.ENGAGEMENT;
     }
-
-    //tick simulator for when a player is spectating
-    public void tick() {
-        if (!isActive) return;
-
-        //deplyoment phase: cohorts can be moved but do not march or fight, after 30 seconds the battle enters engagement phase
+    public void tick(boolean advanceAttacker, boolean advanceDefender) {
+        if (!active) return;
         if (phase == BattlePhase.DEPLOYMENT) {
-            deploymentTicks++;
-            if (deploymentTicks >= DEPLOYMENT_TICKS_MAX) {
-                phase = BattlePhase.ENGAGEMENT;
-            }
-            return; // skip movement and combat until ENGAGEMENT
+            tickDeployment();
+            return;
         }
-
-        //start of engagement phase
+        updateEngagements();
+        if (advanceAttacker) advanceIdleUnits(attackerCohorts, defenderCohorts);
+        if (advanceDefender) advanceIdleUnits(defenderCohorts, attackerCohorts);
+        processNewRouts(attackerCohorts, true);
+        processNewRouts(defenderCohorts, false);
         attackerCohorts.forEach(CohortData::tickMovement);
         defenderCohorts.forEach(CohortData::tickMovement);
-
-        //combat tick counter, melee clashes and morale auras only happen every 40 ticks (2 seconds) to slow down combat
-        combatTickCounter++;
-        if (combatTickCounter >= MELEE_TICK_INTERVAL) {
-            combatTickCounter = 0;
-
-            //melee clash: check for overlapping cohorts across sides
-            processMeleeClashes();
-
-            //morale aura: routing cohorts drain morale from nearby friendly units
-            //TODO: make sure that morale loss aura isnt applied every time for some reason
-            processMoraleAuras(attackerCohorts);
-            processMoraleAuras(defenderCohorts);
+        updateEngagements();
+        if (++combatSteps >= MELEE_INTERVAL) {
+            combatSteps = 0;
+            processMelee();
+            processMoraleAura(attackerCohorts);
+            processMoraleAura(defenderCohorts);
         }
-
-        //propagate morale chain-panic for newly routed cohorts (ensure this isn't actually being done each tick, pretty much instant rout here)
-        processNewlyRouted(attackerCohorts);
-        processNewlyRouted(defenderCohorts);
-
-        //check end conditions
+        processNewRouts(attackerCohorts, true);
+        processNewRouts(defenderCohorts, false);
         checkBattleEnd();
     }
-
-    //idle tick counter function, called when no players are spectating the battle, increments idleTicks by 1
-    public void tickIdle() {
-        idleTicks++;
-    }
-
-    //combat damage function
-    private void processMeleeClashes() {
+    private void updateEngagements() {
+        // Compute the whole set first so continuing contacts do not repeatedly clear orders.
+        Set<UUID> contacts = new HashSet<>();
         for (CohortData attacker : attackerCohorts) {
-            if (!attacker.isAlive() || attacker.isRouting()) continue;
+            if (!attacker.isAlive() || attacker.hasEscaped()) continue;
             for (CohortData defender : defenderCohorts) {
-                if (!defender.isAlive() || defender.isRouting()) continue;
-
-                if (attacker.getPosition().distance(defender.getPosition()) <= MELEE_RANGE) {
-                    // Damage scales with strength stat (0–100 scale → 0–BASE_MELEE_DAMAGE * 2)
-                    int aDmg = Math.max(1, (int)(attacker.getStrength() / 50.0 * BASE_MELEE_DAMAGE));
-                    int dDmg = Math.max(1, (int)(defender.getStrength() / 50.0 * BASE_MELEE_DAMAGE));
-                    attacker.applyDamage(dDmg, MELEE_MORALE_SHOCK);
-                    defender.applyDamage(aDmg, MELEE_MORALE_SHOCK);
+                if (defender.isAlive() && !defender.hasEscaped() &&
+                        attacker.getPosition().distance(defender.getPosition()) <= MELEE_RANGE) {
+                    contacts.add(attacker.getCohortId());
+                    contacts.add(defender.getCohortId());
                 }
             }
         }
+        attackerCohorts.forEach(c -> c.setEngaged(contacts.contains(c.getCohortId())));
+        defenderCohorts.forEach(c -> c.setEngaged(contacts.contains(c.getCohortId())));
     }
-
-    /** keep for now, remove this comment later
-     * Morale aura: any routing cohort continuously drains -1 morale per combat tick
-     * from all friendly units within MORALE_AURA_RADIUS. This implements the
-     * "chain-panic" mechanic as a spatial Aura effect rather than a one-time neighbour shock.
-     *
-     * @param cohorts The list of cohorts on one side (attackers or defenders).
-     */
-    private void processMoraleAuras(List<CohortData> cohorts) {
-        for (CohortData routing : cohorts) {
-            if (!routing.isRouting() || !routing.isAlive()) continue;
-
-            for (CohortData friendly : cohorts) {
-                if (friendly == routing || !friendly.isAlive() || friendly.isRouting()) continue;
-
-                if (routing.getPosition().distance(friendly.getPosition()) <= MORALE_AURA_RADIUS) {
-                    friendly.applyMoraleShock(MORALE_AURA_DRAIN);
-                }
+    private void advanceIdleUnits(List<CohortData> allies, List<CohortData> enemies) {
+        for (CohortData cohort : allies) {
+            if (!cohort.canTakeOrders() || cohort.isEngaged() || !cohort.getMovementWaypoints().isEmpty()) continue;
+            enemies.stream().filter(CohortData::canFight)
+                    .min(Comparator.comparingDouble(c -> c.getPosition().distanceSquared(cohort.getPosition())))
+                    .ifPresent(target -> cohort.queueWaypoint(target.getPosition().x, target.getPosition().y));
+        }
+    }
+    private void processMelee() {
+        // One target per cohort avoids multiplying a unit's damage by every nearby enemy.
+        Map<CohortData, Integer> hits = new HashMap<>();
+        collectHits(attackerCohorts, defenderCohorts, hits);
+        collectHits(defenderCohorts, attackerCohorts, hits);
+        hits.forEach((target, damage) -> target.applyDamage(damage, 2));
+    }
+    private void collectHits(List<CohortData> side, List<CohortData> opponents, Map<CohortData, Integer> hits) {
+        for (CohortData cohort : side) {
+            if (!cohort.canFight() || cohort.isWithdrawing()) continue;
+            opponents.stream().filter(c -> c.isAlive() && !c.hasEscaped())
+                    .filter(c -> c.getPosition().distance(cohort.getPosition()) <= MELEE_RANGE)
+                    .min(Comparator.comparingDouble(c -> c.getPosition().distanceSquared(cohort.getPosition())))
+                    .ifPresent(target -> {
+                        double strengthFraction = (double) cohort.getCurrentHealth() / cohort.getMaxHealth();
+                        double resistance = 1.25 - Math.clamp(target.getEndurance(), 0, 100) / 200.0;
+                        int damage = Math.max(1, (int) Math.round(cohort.getStrength() / 50.0 * 3 * strengthFraction * resistance));
+                        hits.merge(target, damage, Integer::sum);
+                    });
+        }
+    }
+    private void processMoraleAura(List<CohortData> side) {
+        for (CohortData cohort : side) {
+            if (!cohort.canFight()) continue;
+            boolean nearbyRout = side.stream().anyMatch(c -> c != cohort && c.isRouting() &&
+                    c.isAlive() && !c.hasEscaped() && c.getPosition().distance(cohort.getPosition()) <= 10);
+            if (nearbyRout) cohort.applyMoraleShock(1);
+        }
+    }
+    private void processNewRouts(List<CohortData> side, boolean attacker) {
+        for (CohortData cohort : side) {
+            if (!cohort.isAlive() || !cohort.announceRout()) continue;
+            cohort.setRetreatWaypoint(cohort.getPosition().x, attacker ? -FIELD_BOUND : FIELD_BOUND);
+            for (CohortData neighbor : side) {
+                if (neighbor != cohort && neighbor.canFight() &&
+                        neighbor.getPosition().distance(cohort.getPosition()) <= 10) neighbor.applyMoraleShock(10);
             }
         }
     }
-
-    //morale at rout processing, if a cohort is routing, it will apply morale shock to its left and right neighbours in the list
-    private void processNewlyRouted(List<CohortData> cohorts) {
-        for (int i = 0; i < cohorts.size(); i++) {
-            CohortData c = cohorts.get(i);
-            if (c.getMorale() <= 0 && !c.isRouting()) {
-                c.setRouting(true);
-                // Left neighbour
-                if (i - 1 >= 0) cohorts.get(i - 1).applyMoraleShock(ROUT_CHAIN_SHOCK);
-                // Right neighbour
-                if (i + 1 < cohorts.size()) cohorts.get(i + 1).applyMoraleShock(ROUT_CHAIN_SHOCK);
-            }
+    public boolean issueOrder(UUID cohortId, double x, double z, boolean clear) {
+        if (!active || !Double.isFinite(x) || !Double.isFinite(z) || Math.abs(x) > FIELD_BOUND || Math.abs(z) > FIELD_BOUND) return false;
+        CohortData cohort = getCohortById(cohortId).orElse(null);
+        if (cohort == null || !cohort.canTakeOrders()) return false;
+        if (phase == BattlePhase.DEPLOYMENT) {
+            boolean attacker = isAttackerCohort(cohortId);
+            // Deployment stays on the player's side and away from the opposing starting line.
+            if ((attacker && (z > -8 || z < -100)) || (!attacker && (z < 8 || z > 100))) return false;
+            cohort.place(x, z);
+        } else {
+            if (cohort.isEngaged()) return false;
+            if (clear) cohort.clearOrders();
+            cohort.queueWaypoint(x, z);
+        }
+        return true;
+    }
+    public void withdrawCohort(UUID cohortId) {
+        if (phase != BattlePhase.ENGAGEMENT) return;
+        getCohortById(cohortId).ifPresent(c -> c.beginWithdrawal(c.getPosition().x,
+                isAttackerCohort(cohortId) ? -FIELD_BOUND : FIELD_BOUND));
+    }
+    public void applyFormation(boolean attacker, Formation formation) {
+        if (phase != BattlePhase.DEPLOYMENT || !active) return;
+        List<CohortData> side = attacker ? attackerCohorts : defenderCohorts;
+        int count = side.size();
+        int columns = Math.min(30, formation == Formation.TRIPLEX ? Math.max(1, (count + 2) / 3) : Math.max(1, count));
+        int rows = Math.max(1, (count + columns - 1) / columns);
+        double maximumDepth = (rows - 1) * 8.0 + (formation == Formation.WEDGE ? (columns - 1) * 1.5 : 0);
+        double depthScale = Math.min(1.0, 80.0 / Math.max(1.0, maximumDepth));
+        for (int i = 0; i < count; i++) {
+            int row = i / columns;
+            int column = i % columns;
+            double x = (column - (Math.min(columns, count - row * columns) - 1) / 2.0) * 6;
+            double depth = formation == Formation.WEDGE ? Math.abs(x) * 0.5 + row * 8 : row * 8;
+            side.get(i).place(x, (attacker ? -1 : 1) * (20 + depth * depthScale));
         }
     }
-
-    //rout function, sets a retreat waypoint for all cohorts on the given side
-    public void signalRetreat(double retreatX, double retreatZ, boolean forSide) {
-        List<CohortData> cohorts = forSide ? attackerCohorts : defenderCohorts;
-        for (CohortData c : cohorts) {
-            if (c.isRouting()) {
-                c.setRetreatWaypoint(retreatX, retreatZ);
-            }
-        }
+    public void signalRetreat(double x, double z, boolean attacker) {
+        (attacker ? attackerCohorts : defenderCohorts).stream().filter(CohortData::isRouting)
+                .forEach(c -> c.setRetreatWaypoint(x, z));
     }
-
-    //withdraw function, called by BattleManager when a player issues a withdrawal command. This will set the retreat waypoint for all cohorts on the given side, regardless of routing status.
-    public void issueWithdrawal(double retreatX, double retreatZ, boolean forSide) {
-        List<CohortData> cohorts = forSide ? attackerCohorts : defenderCohorts;
-        for (CohortData c : cohorts) {
-            c.setRetreatWaypoint(retreatX, retreatZ);
-        }
+    public void issueWithdrawal(double x, double z, boolean attacker) {
+        (attacker ? attackerCohorts : defenderCohorts).forEach(c -> c.beginWithdrawal(x, z));
     }
-
-    //end of battle function, checks if either side has no more fighting cohorts
     private void checkBattleEnd() {
-        //get attacker and defender cohorts that are alive and not routing
-        boolean attackersCanFight = attackerCohorts.stream().anyMatch(c -> c.isAlive() && !c.isRouting());
-        boolean defendersCanFight = defenderCohorts.stream().anyMatch(c -> c.isAlive() && !c.isRouting());
-
-        //whichever side has remaining cohorts is the winner, if both sides have no remaining cohorts, the defender wins by default
-        if (!attackersCanFight) {
-            result   = BattleResult.DEFENDER_WINS;
-            isActive = false;
-        } else if (!defendersCanFight) {
-            result   = BattleResult.ATTACKER_WINS;
-            isActive = false;
-        }
+        if (attackerCohorts.stream().noneMatch(CohortData::canFight)) finish(BattleResult.DEFENDER_WINS);
+        else if (defenderCohorts.stream().noneMatch(CohortData::canFight)) finish(BattleResult.ATTACKER_WINS);
     }
-
-    //cohort getters
+    public void finish(BattleResult result) { this.result = result; active = false; }
+    public void setInactive() { checkBattleEnd(); if (active) finish(BattleResult.DEFENDER_WINS); }
     public void addAttackerCohort(CohortData cohort) { attackerCohorts.add(cohort); }
     public void addDefenderCohort(CohortData cohort) { defenderCohorts.add(cohort); }
-
-    public Optional<CohortData> getCohortById(UUID cohortId) {
-        for (CohortData c : attackerCohorts) {
-            if (c.getCohortId().equals(cohortId)) return Optional.of(c);
-        }
-        for (CohortData c : defenderCohorts) {
-            if (c.getCohortId().equals(cohortId)) return Optional.of(c);
-        }
-        return Optional.empty();
+    public boolean isAttackerCohort(UUID id) { return attackerCohorts.stream().anyMatch(c -> c.getCohortId().equals(id)); }
+    public Optional<CohortData> getCohortById(UUID id) {
+        return java.util.stream.Stream.concat(attackerCohorts.stream(), defenderCohorts.stream())
+                .filter(c -> c.getCohortId().equals(id)).findFirst();
     }
-
-    //spectator management getters
-    public void addSpectator(UUID playerId) {
-        spectatingPlayerIds.add(playerId);
-        wasEverSpectated = true; // once a player has joined, abandonment threshold applies on leave
-        idleTicks = 0;           // reset idle counter while someone is watching
+    public void addSpectator(UUID id) { spectatingPlayerIds.add(id); everSpectated = true; idleSteps = 0; }
+    public void removeSpectator(UUID id) { spectatingPlayerIds.remove(id); }
+    public boolean isSpectated() { return !spectatingPlayerIds.isEmpty(); }
+    public Set<UUID> getSpectatingPlayerIds() { return Collections.unmodifiableSet(spectatingPlayerIds); }
+    public UUID getBattleId() { return battleId; }
+    public UUID getAttackerArmyId() { return attackerArmyId; }
+    public UUID getDefenderArmyId() { return defenderArmyId; }
+    public double getMapOriginX() { return mapOriginX; }
+    public double getMapOriginZ() { return mapOriginZ; }
+    public List<CohortData> getAttackerCohorts() { return Collections.unmodifiableList(attackerCohorts); }
+    public List<CohortData> getDefenderCohorts() { return Collections.unmodifiableList(defenderCohorts); }
+    public boolean isActive() { return active; }
+    public BattleResult getResult() { return result; }
+    public BattlePhase getPhase() { return phase; }
+    /** Protocol uses actual game ticks, not simulation steps. */
+    public int getDeploymentTicksRemaining() { return Math.max(0, DEPLOYMENT_STEPS - deploymentSteps) * 5; }
+    public CompoundTag toNBT() {
+        CompoundTag tag = new CompoundTag();
+        tag.putString("Id", battleId.toString());
+        tag.putString("Attacker", attackerArmyId.toString());
+        tag.putString("Defender", defenderArmyId.toString());
+        tag.putDouble("X", mapOriginX);
+        tag.putDouble("Z", mapOriginZ);
+        tag.putString("Result", result.name());
+        tag.putString("Phase", phase.name());
+        tag.putInt("DeploymentSteps", deploymentSteps);
+        tag.putInt("CombatSteps", combatSteps);
+        ListTag attackers = new ListTag();
+        attackerCohorts.forEach(c -> attackers.add(c.toNBT()));
+        tag.put("AttackingCohorts", attackers);
+        ListTag defenders = new ListTag();
+        defenderCohorts.forEach(c -> defenders.add(c.toNBT()));
+        tag.put("DefendingCohorts", defenders);
+        return tag;
     }
-    public void removeSpectator(UUID playerId) { spectatingPlayerIds.remove(playerId); }
-    public boolean isSpectated()               { return !spectatingPlayerIds.isEmpty(); }
-    public Set<UUID> getSpectatingPlayerIds()  { return Collections.unmodifiableSet(spectatingPlayerIds); }
-
-    //getters
-    public UUID             getBattleId()         { return battleId; }
-    public UUID             getAttackerArmyId()   { return attackerArmyId; }
-    public UUID             getDefenderArmyId()   { return defenderArmyId; }
-    public double           getMapOriginX()       { return mapOriginX; }
-    public double           getMapOriginZ()       { return mapOriginZ; }
-    public List<CohortData> getAttackerCohorts()  { return Collections.unmodifiableList(attackerCohorts); }
-    public List<CohortData> getDefenderCohorts()  { return Collections.unmodifiableList(defenderCohorts); }
-    public boolean          isActive()            { return isActive; }
-    public BattleResult     getResult()           { return result; }
-    public BattlePhase      getPhase()            { return phase; }
-    public int              getDeploymentTicksRemaining() { return Math.max(0, DEPLOYMENT_TICKS_MAX - deploymentTicks); }
-    public void             setInactive()         { isActive = false; }
+    public static BattleSession fromNBT(CompoundTag tag) {
+        BattleSession session = new BattleSession(UUID.fromString(tag.getString("Id").orElseThrow()),
+                UUID.fromString(tag.getString("Attacker").orElseThrow()), UUID.fromString(tag.getString("Defender").orElseThrow()),
+                tag.getDouble("X").orElse(0.0), tag.getDouble("Z").orElse(0.0));
+        tag.getList("AttackingCohorts").ifPresent(list -> {
+            for (int i = 0; i < list.size(); i++) list.getCompound(i).ifPresent(c -> session.addAttackerCohort(CohortData.fromNBT(c)));
+        });
+        tag.getList("DefendingCohorts").ifPresent(list -> {
+            for (int i = 0; i < list.size(); i++) list.getCompound(i).ifPresent(c -> session.addDefenderCohort(CohortData.fromNBT(c)));
+        });
+        BattleResult result = BattleResult.valueOf(tag.getString("Result").orElse("ONGOING"));
+        session.phase = BattlePhase.valueOf(tag.getString("Phase").orElse("DEPLOYMENT"));
+        session.deploymentSteps = Math.clamp(tag.getInt("DeploymentSteps").orElse(0), 0, DEPLOYMENT_STEPS);
+        session.combatSteps = Math.clamp(tag.getInt("CombatSteps").orElse(0), 0, MELEE_INTERVAL);
+        if (result != BattleResult.ONGOING) session.finish(result);
+        return session;
+    }
 }
