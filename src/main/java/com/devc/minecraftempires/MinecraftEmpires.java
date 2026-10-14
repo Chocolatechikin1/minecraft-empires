@@ -48,6 +48,8 @@ import net.neoforged.neoforge.event.tick.ServerTickEvent;
 //custom UI imports
 import com.devc.minecraftempires.network.packet.MapDataPayload; 
 import com.devc.minecraftempires.network.ModNetworking; 
+import com.devc.minecraftempires.network.MapDataService;
+import net.neoforged.neoforge.event.level.ChunkEvent;
 import com.devc.minecraftempires.army.ArmyManager;
 import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import net.neoforged.neoforge.event.level.block.BreakBlockEvent;
@@ -174,12 +176,32 @@ public class MinecraftEmpires {
         BattleManager.resolveAllOnShutdown(event.getServer());
         BattleManager.clearAll();
         ModNetworking.clearAll();
+        MapDataService.clearTerrainRuntime();
         LOGGER.info("[Minecraft Empires] BattleManager cleared on server stop.");
     }
 
     @SubscribeEvent
     public void onPlayerLogout(net.neoforged.neoforge.event.entity.player.PlayerEvent.PlayerLoggedOutEvent event) {
         ModNetworking.clearPlayer(event.getEntity().getUUID());
+    }
+
+    // Terrain has its own small work budget and does not change the army/battle tick interval.
+    @SubscribeEvent
+    public void onTerrainTick(ServerTickEvent.Post event) {
+        MapDataService.tickTerrain(event.getServer().overworld());
+    }
+
+    // Chunk load events only enqueue positions. Sampling waits for a server tick after promotion to FULL.
+    @SubscribeEvent
+    public void onTerrainChunkLoad(ChunkEvent.Load event) {
+        if (event.getLevel() instanceof net.minecraft.server.level.ServerLevel level)
+            level.getServer().execute(() -> MapDataService.watchTerrainChunk(level, event.getChunk().getPos()));
+    }
+
+    @SubscribeEvent
+    public void onTerrainChunkUnload(ChunkEvent.Unload event) {
+        if (event.getLevel() instanceof net.minecraft.server.level.ServerLevel level)
+            level.getServer().execute(() -> MapDataService.unwatchTerrainChunk(level, event.getChunk().getPos()));
     }
 
     //settlement altar protection logic

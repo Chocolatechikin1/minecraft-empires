@@ -37,9 +37,14 @@ public final class ModNetworking {
     //tracks the last time a player opened the map, done to prevent spamming
     private static final Map<UUID, Long> mapRequestCooldowns = new HashMap<>();
     private static final long MAP_REQUEST_COOLDOWN_MS = 2000L; // 2 seconds between map refreshes
+    private static final Map<UUID, Long> terrainRequestCooldowns = new HashMap<>();
 
     public static void registerPayloads(RegisterPayloadHandlersEvent event) {
-        PayloadRegistrar registrar = event.registrar("2");
+        PayloadRegistrar registrar = event.registrar("3");
+        // Independent packets let the client reuse terrain while army positions keep updating.
+        registrar.playToClient(MapDataPayload.TerrainPayload.TYPE, MapDataPayload.TerrainPayload.STREAM_CODEC);
+        registrar.playToServer(RequestMapDataPayload.RequestTerrainPayload.TYPE,
+                RequestMapDataPayload.RequestTerrainPayload.STREAM_CODEC, ModNetworking::handleTerrainRequest);
         registrar.playToClient(ManagementDataPayload.TYPE, ManagementDataPayload.STREAM_CODEC);
         registrar.playToClient(OpenFoundingPayload.TYPE, OpenFoundingPayload.STREAM_CODEC);
         registrar.playToClient(OpenSettlementPayload.TYPE, OpenSettlementPayload.STREAM_CODEC);
@@ -130,6 +135,17 @@ public final class ModNetworking {
         PacketDistributor.sendToPlayer(player, MapDataService.buildArmyPayload(player));
         PacketDistributor.sendToPlayer(player, ManagementDataService.build(player));
     }
-    public static void clearPlayer(UUID id) { mapRequestCooldowns.remove(id); }
-    public static void clearAll() { mapRequestCooldowns.clear(); }
+    private static void handleTerrainRequest(RequestMapDataPayload.RequestTerrainPayload payload, IPayloadContext context) {
+        context.enqueueWork(() -> {
+            if (!(context.player() instanceof ServerPlayer player)) return;
+            long now = System.currentTimeMillis();
+            Long previous = terrainRequestCooldowns.get(player.getUUID());
+            if (previous != null && now - previous < 250) return;
+            terrainRequestCooldowns.put(player.getUUID(), now);
+            MapDataPayload.TerrainPayload response = MapDataService.buildTerrainPayload(player, payload);
+            if (response != null) PacketDistributor.sendToPlayer(player, response);
+        });
+    }
+    public static void clearPlayer(UUID id) { mapRequestCooldowns.remove(id); terrainRequestCooldowns.remove(id); }
+    public static void clearAll() { mapRequestCooldowns.clear(); terrainRequestCooldowns.clear(); }
 }

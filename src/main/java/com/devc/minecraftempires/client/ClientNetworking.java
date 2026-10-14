@@ -12,8 +12,12 @@ public final class ClientNetworking {
     private ClientNetworking() {}
     public static void registerPayloadHandlers(RegisterClientPayloadHandlersEvent event) {
         event.register(MapDataPayload.TYPE, (p, c) -> c.enqueueWork(() -> ClientMapData.accept(p)));
+        event.register(MapDataPayload.TerrainPayload.TYPE, (p, c) -> c.enqueueWork(() -> ClientMapData.acceptTerrain(p)));
         event.register(ArmyMapPayload.TYPE, (p, c) -> c.enqueueWork(() -> ClientArmyData.accept(p)));
-        event.register(ManagementDataPayload.TYPE, (p, c) -> c.enqueueWork(() -> ClientManagementData.accept(p)));
+        event.register(ManagementDataPayload.TYPE, (p, c) -> c.enqueueWork(() -> {
+            ClientManagementData.accept(p);
+            ClientMapData.setTerrainState(p.stateId());
+        }));
         event.register(BattleSyncPayload.TYPE, (p, c) -> c.enqueueWork(() -> {
             if (Minecraft.getInstance().gui.screen() instanceof BattleMapScreen screen && screen.getBattleId().equals(p.battleId()))
                 ClientBattleData.accept(p);
@@ -29,6 +33,7 @@ public final class ClientNetworking {
         }));
     }
     public static void clear() {
+        ClientMapData.clearTerrain();
         ClientMapData.accept(MapDataPayload.empty());
         ClientArmyData.accept(ArmyMapPayload.empty());
         ClientManagementData.clear();
@@ -36,6 +41,10 @@ public final class ClientNetworking {
     }
     public static void requestMapData() {
         if (Minecraft.getInstance().getConnection() != null) ClientPacketDistributor.sendToServer(new RequestMapDataPayload());
+    }
+    public static void requestTerrain(UUID battleId, java.util.List<RequestMapDataPayload.TerrainRequest> tiles) {
+        if (Minecraft.getInstance().getConnection() != null && !tiles.isEmpty())
+            ClientPacketDistributor.sendToServer(new RequestMapDataPayload.RequestTerrainPayload(battleId, tiles));
     }
     public static void requestSpectate(UUID id) {
         if (Minecraft.getInstance().getConnection() != null) ClientPacketDistributor.sendToServer(new RequestSpectatePayload(id));
