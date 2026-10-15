@@ -1,6 +1,7 @@
 package com.devc.minecraftempires.client.gui.widget;
 
 import com.devc.minecraftempires.client.map.ClientBattleData;
+import com.devc.minecraftempires.client.map.ClientMapData;
 import com.devc.minecraftempires.combat.BattleSession;
 import com.devc.minecraftempires.network.packet.BattleCommandPayload;
 import net.minecraft.client.gui.Font;
@@ -72,10 +73,15 @@ public final class BattleGridWidget {
         graphics.fill(x, y, x + width, y + height, COLOR_BG);
         graphics.enableScissor(x, y, x + width, y + height);
 
+        // One local battle unit corresponds to one world block relative to the saved battle origin.
+        if (data.hasData()) ClientMapData.renderTerrain(graphics, font, x, y, width, height,
+                data.mapOriginX() + centerX, data.mapOriginZ() + centerZ, zoom, battleId);
+
         drawGrid(graphics);
         drawField(graphics, data.isDeploymentPhase());
         drawCohorts(graphics, font, data, partialTick, mouseX, mouseY);
         drawMovementArrows(graphics, data, partialTick);
+
 
         //check if we are in the deployment phase, if we are draw a timer
         if (data.hasData() && (data.isDeploymentPhase() || data.hasEnded())) {
@@ -269,7 +275,11 @@ public final class BattleGridWidget {
         if (mouseX < x || mouseX > x + width || mouseY < y || mouseY > y + height) return;
         double wx = screenToWorldX(mouseX);
         double wz = screenToWorldZ(mouseY);
-        String coord = String.format("%.0f, %.0f", wx, wz);
+        var data = ClientBattleData.get();
+        double realX = data.mapOriginX() + wx, realZ = data.mapOriginZ() + wz;
+        Integer elevation = ClientMapData.terrainHeight(realX, realZ);
+        String coord = String.format("%.0f, %.0f", realX, realZ)
+                + (elevation == null ? "" : " | Y " + elevation);
         int tx = x + width - font.width(coord) - 6;
         int ty = y + height - 14;
         graphics.fill(tx - 2, ty - 1, tx + font.width(coord) + 2, ty + 10, 0xAA0D1218);
@@ -336,11 +346,11 @@ public final class BattleGridWidget {
     //coordinate conversion functions between world coordinates and screen coordinates, based on the current center position and zoom level of the battle grid
 
     private int worldToScreenX(double wx) {
-        return (int) ((wx - centerX) * zoom) + x + width / 2;
+        return (int) Math.round((wx - centerX) * zoom + x + width / 2.0);
     }
 
     private int worldToScreenZ(double wz) {
-        return (int) ((wz - centerZ) * zoom) + y + height / 2;
+        return (int) Math.round((wz - centerZ) * zoom + y + height / 2.0);
     }
 
     private double screenToWorldX(int sx) {

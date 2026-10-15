@@ -22,7 +22,7 @@ import java.util.UUID;
 
 //primary class for rendering the interactive map, including panning, zooming, and displaying chunk ownership, settlements, and alerts
 public final class InteractiveMapWidget {
-    private static final double MIN_ZOOM = 3.0;
+    private static final double MIN_ZOOM = 0.5;
     private static final double MAX_ZOOM = 28.0;
     private static final double DEFAULT_ZOOM = 8.0;
 
@@ -40,6 +40,8 @@ public final class InteractiveMapWidget {
     private boolean dragging;
     private long selectedChunk = Long.MIN_VALUE;
     private int loadedSnapshotVersion = -1;
+    private boolean initializedViewport;
+    private UUID viewportStateId;
 
     //currently selected unit (Legion or Army UUID), null = nothing selected
     private UUID selectedArmyId = null;
@@ -64,6 +66,10 @@ public final class InteractiveMapWidget {
         graphics.fill(x, y, x + width, y + height, 0xFF111820);
         graphics.enableScissor(x, y, x + width, y + height);
 
+        // Terrain uses world blocks; the existing political camera uses chunks (16 blocks each).
+        ClientMapData.renderTerrain(graphics, font, x, y, width, height,
+                centerChunkX * 16, centerChunkZ * 16, zoom / 16, null);
+
         drawGrid(graphics);
         if (snapshot.hasData()) {
             drawTerritory(graphics, snapshot);
@@ -81,6 +87,7 @@ public final class InteractiveMapWidget {
 
         //places cohort and army icons in front of the map
         drawArmies(graphics, font, snapshot);
+
 
         graphics.disableScissor();
         graphics.fill(x, y, x + width, y + 1, 0xFF485563);
@@ -227,46 +234,35 @@ public final class InteractiveMapWidget {
         int minChunkZ = Math.max(snapshot.minChunkZ(), floorChunk(screenToChunkZ(y)) - 1);
         int maxChunkZ = Math.min(snapshot.maxChunkZ(), floorChunk(screenToChunkZ(y + height)) + 1);
 
-        int cellSize = Math.max(1, (int) Math.ceil(zoom));
-        for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
-            for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
-                MapDataPayload.MapChunkData chunk = snapshot.getChunk(chunkX, chunkZ);
-                if (chunk == null) {
-                    continue;
-                }
-
-                int left = chunkToScreenX(chunkX);
-                int top = chunkToScreenY(chunkZ);
-                int right = left + cellSize;
-                int bottom = top + cellSize;
-
-                graphics.fill(left, top, right, bottom, stateFillColor(chunk.ownerStateId(), chunk.ownerStateId().equals(snapshot.viewerStateId())));
-
-                if (chunk.settlementId().isBlank() || chunk.contested()) {
-                    drawHatching(graphics, left, top, right, bottom);
-                }
-
-                int provinceMask = snapshot.getProvinceBorderMask(chunkX, chunkZ);
-                int stateMask = snapshot.getBorderMask(chunkX, chunkZ);
-                drawMask(graphics, left, top, right, bottom, provinceMask, 0xAAB8C0C8, 1);
-                drawMask(graphics, left, top, right, bottom, stateMask, 0xFFF4E6A2, zoom >= 10.0 ? 2 : 1);
-
-                if (new ChunkPos(chunkX, chunkZ).pack() == selectedChunk) {
-                    drawMask(
-                            graphics,
-                            left,
-                            top,
-                            right,
-                            bottom,
-                            ClientMapData.BORDER_NORTH
-                                    | ClientMapData.BORDER_EAST
-                                    | ClientMapData.BORDER_SOUTH
-                                    | ClientMapData.BORDER_WEST,
-                            0xFFFFFFFF,
-                            2
-                    );
-                }
+        // Large overview bounds can contain mostly empty space; choose the smaller set to traverse.
+        long cells = (long) (maxChunkX - minChunkX + 1) * (maxChunkZ - minChunkZ + 1);
+        if (cells > snapshot.chunksByPosition().size()) {
+            for (var chunk : snapshot.chunksByPosition().values()) {
+                ChunkPos pos = ChunkPos.unpack(chunk.packedChunkPos());
+                if (pos.x() < minChunkX || pos.x() > maxChunkX || pos.z() < minChunkZ || pos.z() > maxChunkZ) continue;
+                drawTerritoryCell(graphics, snapshot, pos.x(), pos.z(), chunk);
             }
+        } else {
+            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++)
+                for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++)
+                    drawTerritoryCell(graphics, snapshot, chunkX, chunkZ, snapshot.getChunk(chunkX, chunkZ));
+        }
+    }
+
+    private void drawTerritoryCell(GuiGraphicsExtractor graphics, ClientMapData.Snapshot snapshot,
+            int chunkX, int chunkZ, MapDataPayload.MapChunkData chunk) {
+        if (chunk == null) return;
+        int left = chunkToScreenX(chunkX), top = chunkToScreenY(chunkZ);
+        int right = chunkToScreenX(chunkX + 1.0), bottom = chunkToScreenY(chunkZ + 1.0);
+        if (right <= left || bottom <= top) return;
+        graphics.fill(left, top, right, bottom, stateFillColor(chunk.ownerStateId(), chunk.ownerStateId().equals(snapshot.viewerStateId())));
+        if (chunk.settlementId().isBlank() || chunk.contested()) drawHatching(graphics, left, top, right, bottom);
+        drawMask(graphics, left, top, right, bottom, snapshot.getProvinceBorderMask(chunkX, chunkZ), 0xAAB8C0C8, 1);
+        drawMask(graphics, left, top, right, bottom, snapshot.getBorderMask(chunkX, chunkZ), 0xFFF4E6A2, zoom >= 10.0 ? 2 : 1);
+        if (chunk.packedChunkPos() == selectedChunk) {
+            drawMask(graphics, left, top, right, bottom,
+                    ClientMapData.BORDER_NORTH | ClientMapData.BORDER_EAST | ClientMapData.BORDER_SOUTH | ClientMapData.BORDER_WEST,
+                    0xFFFFFFFF, 2);
         }
     }
 
@@ -352,8 +348,8 @@ public final class InteractiveMapWidget {
                 drawSettlementMarker(graphics, markerX, markerY, anchor.capital(), anchor.garrisoned());
             }
 
-            //only draw province markers when close enough
-            if (zoom < 5.5) {
+            // Keep capitals labelled in the overview; other province labels need a little more zoom.
+            if (zoom < 1.0 && !anchor.capital()) {
                 continue;
             }
 
@@ -404,6 +400,8 @@ public final class InteractiveMapWidget {
         int chunkX = floorChunk(screenToChunkX(mouseX));
         int chunkZ = floorChunk(screenToChunkZ(mouseY));
         String text = "Chunk " + chunkX + ", " + chunkZ + "   Zoom " + String.format(java.util.Locale.ROOT, "%.1fx", zoom / DEFAULT_ZOOM);
+        Integer elevation = ClientMapData.terrainHeight(screenToChunkX(mouseX) * 16, screenToChunkZ(mouseY) * 16);
+        if (elevation != null) text += " | Y " + elevation;
         int textWidth = font.width(text);
         int left = x + 7;
         int top = y + height - 18;
@@ -591,10 +589,15 @@ public final class InteractiveMapWidget {
             return;
         }
         //check if this is teh intial load of the map
-        boolean isFirstLoad = (loadedSnapshotVersion == -1);
         loadedSnapshotVersion = snapshot.version();
-        if(isFirstLoad) {
+        if (!java.util.Objects.equals(viewportStateId, snapshot.viewerStateId())) {
+            viewportStateId = snapshot.viewerStateId();
+            initializedViewport = false;
+        }
+        // The first frame can be an empty snapshot while the map request is still travelling.
+        if (!initializedViewport && snapshot.hasData()) {
             resetView();
+            initializedViewport = true;
         }
     }
 
@@ -606,8 +609,8 @@ public final class InteractiveMapWidget {
 
         int chunkWidth = Math.max(1, snapshot.maxChunkX() - snapshot.minChunkX() + 1);
         int chunkHeight = Math.max(1, snapshot.maxChunkZ() - snapshot.minChunkZ() + 1);
-        double horizontalFit = Math.max(1.0, (width - 36.0) / chunkWidth);
-        double verticalFit = Math.max(1.0, (height - 36.0) / chunkHeight);
+        double horizontalFit = Math.max(MIN_ZOOM, (width - 36.0) / chunkWidth);
+        double verticalFit = Math.max(MIN_ZOOM, (height - 36.0) / chunkHeight);
         return clamp(Math.min(horizontalFit, verticalFit), MIN_ZOOM, 12.0);
     }
 
@@ -652,7 +655,7 @@ public final class InteractiveMapWidget {
         int red = 72 + Math.floorMod(hash, 112);
         int green = 72 + Math.floorMod(hash >> 8, 112);
         int blue = 72 + Math.floorMod(hash >> 16, 112);
-        int alpha = viewerState ? 0xB8 : 0x82;
+        int alpha = viewerState ? 0x38 : 0x24;
         return (alpha << 24) | (red << 16) | (green << 8) | blue;
     }
 
