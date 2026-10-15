@@ -221,6 +221,82 @@ public record MapDataPayload( //weird ai formatting, i like it tho
         T read(RegistryFriendlyByteBuf buffer);
     }
 
+    //global terrain constants for the map data packet, used for rendering and analysis of the terrain data
+    // Shared terrain format: each sample stores map colour, signed ground height, and feature flags.
+    public static final int TERRAIN_TILE_BLOCKS = 256;
+    public static final int TERRAIN_KNOWN = 1;
+    public static final int TERRAIN_WATER = 2;
+    public static final int TERRAIN_FOREST = 4;
+    public static final int TERRAIN_SNOW = 8;
+    public static final int TERRAIN_SAND = 16;
+    public static final int TERRAIN_STRUCTURE = 32;
+    public static final int TERRAIN_LAVA = 64;
+
+    public record TerrainKey(int tileX, int tileZ, int step) {
+        public TerrainKey {
+            if ((step != 1 && step != 4 && step != 16)
+                    || Math.abs((long) tileX) > 117188 || Math.abs((long) tileZ) > 117188) {
+                throw new IllegalArgumentException("Invalid terrain tile");
+            }
+        }
+        // The extra row/column on each edge lets shading and contours cross tile seams.
+        public int blocks() { return step == 16 ? TERRAIN_TILE_BLOCKS * 4 : TERRAIN_TILE_BLOCKS; }
+        public int side() { return blocks() / step + 2; }
+    }
+
+    public record TerrainTile(TerrainKey key, long version, byte[] colors, byte[] heights, byte[] features) {
+        public TerrainTile {
+            int samples = key.side() * key.side();
+            if (colors.length != samples || heights.length != samples * 2 || features.length != samples) {
+                throw new IllegalArgumentException("Invalid terrain sample lengths");
+            }
+            colors = colors.clone(); heights = heights.clone(); features = features.clone();
+        }
+        public int heightAt(int index) {
+            return (short) ((heights[index * 2] & 255) << 8 | heights[index * 2 + 1] & 255);
+        }
+        public boolean knownAt(int index) { return (features[index] & TERRAIN_KNOWN) != 0; }
+    }
+
+    public record TerrainPayload(UUID stateId, UUID battleId, List<TerrainTile> tiles) implements CustomPacketPayload {
+        public static final int MAX_TILES = 2;
+        private static final int MAX_SAMPLES = 258 * 258;
+        public static final Type<TerrainPayload> TYPE = new Type<>(
+                Identifier.fromNamespaceAndPath(MinecraftEmpires.MODID, "terrain"));
+        public static final StreamCodec<RegistryFriendlyByteBuf, TerrainPayload> STREAM_CODEC = StreamCodec.ofMember(
+                TerrainPayload::write, TerrainPayload::new);
+
+        public TerrainPayload {
+            tiles = List.copyOf(tiles);
+            if (tiles.size() > MAX_TILES) throw new IllegalArgumentException("Too many terrain tiles");
+        }
+        public TerrainPayload(RegistryFriendlyByteBuf buffer) {
+            this(buffer.readUUID(), readNullableUuid(buffer), readTiles(buffer));
+        }
+        private static List<TerrainTile> readTiles(RegistryFriendlyByteBuf buffer) {
+            int count = buffer.readVarInt();
+            if (count < 0 || count > MAX_TILES) throw new IllegalArgumentException("Invalid terrain tile count");
+            List<TerrainTile> result = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) {
+                TerrainKey key = new TerrainKey(buffer.readInt(), buffer.readInt(), buffer.readVarInt());
+                result.add(new TerrainTile(key, buffer.readLong(), buffer.readByteArray(MAX_SAMPLES),
+                        buffer.readByteArray(MAX_SAMPLES * 2), buffer.readByteArray(MAX_SAMPLES)));
+            }
+            return result;
+        }
+        private void write(RegistryFriendlyByteBuf buffer) {
+            buffer.writeUUID(stateId); writeNullableUuid(buffer, battleId);
+            buffer.writeVarInt(tiles.size());
+            for (TerrainTile tile : tiles) {
+                buffer.writeInt(tile.key().tileX()); buffer.writeInt(tile.key().tileZ());
+                buffer.writeVarInt(tile.key().step()); buffer.writeLong(tile.version());
+                buffer.writeByteArray(tile.colors()); buffer.writeByteArray(tile.heights());
+                buffer.writeByteArray(tile.features());
+            }
+        }
+        @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+    }
+
     @FunctionalInterface
     private interface Writer<T> {
         void write(T value, RegistryFriendlyByteBuf buffer);
