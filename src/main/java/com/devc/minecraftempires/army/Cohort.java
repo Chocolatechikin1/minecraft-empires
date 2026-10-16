@@ -1,5 +1,6 @@
 package com.devc.minecraftempires.army;
 
+import com.devc.minecraftempires.state.StateBalance;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import java.util.UUID;
@@ -63,12 +64,21 @@ public class Cohort {
     private boolean isRouting;
     private UUID lastResolvedBattleId;
 
+    //soldier supply tracking variables
+    // Soldier-ticks preserve partial days and stay with the permanent cohort when it is deployed or garrisoned. The supply manager uses these to track
+    private long carriedSupplySoldierTicks;
+    private long unsupportedSoldierTicks;
+    private long suppliedRecoveryTicks;
+    private int logisticsFatigue;
+
     private UUID assignedArmyId = null; //null=not deployed, otherwise the Army's UUID
     private boolean isGarrisoned = false;
     private UUID garrisonedSettlementId = null;
     private BlockPos storedPosition;
     private double preciseX;
     private double preciseZ;
+    private BlockPos retreatTarget;
+    private UUID retreatOpponent;
 
     //waypoint tracking
     private final Queue<BlockPos> waypoints = new LinkedList<>();
@@ -80,6 +90,7 @@ public class Cohort {
         this.biomeTag = biomeTag;
         this.maxSoldiers = (type == CohortType.CAVALRY) ? MAX_SOLDIERS_CAVALRY : MAX_SOLDIERS_STANDARD;
         this.soldierCount = this.maxSoldiers;
+        this.carriedSupplySoldierTicks = getMaxCarriedSupplySoldierTicks();
 
         // All stats start at 50 — average, not elite, not incompetent
         this.endurance = 50;
@@ -109,7 +120,9 @@ public class Cohort {
 
     //casualty calculator
     public void applyAttrition(int casualties) {
+        int previousSoldiers = this.soldierCount;
         this.soldierCount = Math.max(0, this.soldierCount - Math.max(0, casualties));
+        clampSupplyAfterLosses(previousSoldiers);
     }
     public boolean isAlive() {
         return this.soldierCount > 0;
@@ -159,7 +172,9 @@ public class Cohort {
     //post auto engagement battle outcome application: updates soldier count, morale, routing status, xp, and battle count
     public void applyBattleOutcome(UUID battleId, int survivors, int finalMorale, boolean won) {
         if (hasResolvedBattle(battleId)) return;
+        int previousSoldiers = soldierCount;
         soldierCount = Math.min(soldierCount, Math.max(0, survivors));
+        clampSupplyAfterLosses(previousSoldiers);
         setMorale(Math.max(10, finalMorale));
         setRouting(false);
         if (isAlive()) {
@@ -189,6 +204,8 @@ public class Cohort {
     public int getMaxSoldiers()        { return maxSoldiers; }
 
     public int getEndurance()          { return endurance; }
+    /** Training remains permanent; only effective endurance includes logistics fatigue. */
+    public int getEffectiveEndurance() { return Math.max(1, endurance - logisticsFatigue); }
     public int getStrength()           { return strength; }
     public int getHealth()             { return (int) Math.round(100.0 * soldierCount / maxSoldiers); }
     public int getSpeed()              { return speed; }
@@ -202,6 +219,86 @@ public class Cohort {
 
     public boolean isRouting()         { return isRouting; }
     public void setRouting(boolean v)  { this.isRouting = v; }
+
+    //below is all retreat logic, which is separate from routing logic. Routing is a tactical panic response, while retreating is a strategic decision to disengage from an opponent.
+    // Strategic retreat is separate from tactical zero-morale routing: intercepted survivors can defend themselves.
+    public boolean isRetreating() { return retreatTarget != null; }
+    public BlockPos getRetreatTarget() { return retreatTarget; }
+    public UUID getRetreatOpponent() { return retreatOpponent; }
+    public boolean isDisengagingFrom(UUID opponent) { return isRetreating() && retreatOpponent != null && retreatOpponent.equals(opponent); }
+    public void beginRetreat(BlockPos target, UUID opponent) {
+        retreatTarget = target; retreatOpponent = opponent;
+        clearWaypoints(); addWaypoint(target);
+    }
+    public void finishRetreat() { retreatTarget = null; retreatOpponent = null; clearWaypoints(); }
+    public void clearRetreatOpponent() { retreatOpponent = null; }
+
+    public long getCarriedSupplySoldierTicks() { return carriedSupplySoldierTicks; }
+    public long getMaxCarriedSupplySoldierTicks() { return (long) soldierCount * StateBalance.CARRIED_SUPPLY_DAYS * StateBalance.TICKS_PER_DAY; }
+    public void setCarriedSupplySoldierTicks(long value) { carriedSupplySoldierTicks = Math.clamp(value, 0L, getMaxCarriedSupplySoldierTicks()); }
+    public double getCarriedSupplyDays() { return soldierCount == 0 ? 0.0 : carriedSupplySoldierTicks / ((double) soldierCount * StateBalance.TICKS_PER_DAY); }
+    public boolean isSupplyExhausted() { return carriedSupplySoldierTicks == 0; }
+    public int getLogisticsFatigue() { return logisticsFatigue; }
+    public void setLogisticsFatigue(int value) { logisticsFatigue = Math.clamp(value, 0, StateBalance.MAX_SUPPLY_FATIGUE); }
+    public long getUnsupportedTicks() { return soldierCount == 0 ? 0L : unsupportedSoldierTicks / soldierCount; }
+    public long getUnsupportedSoldierTicks() { return unsupportedSoldierTicks; }
+    public long getSuppliedRecoveryTicks() { return suppliedRecoveryTicks; }
+
+    /**
+     * Supply manager calls this only for online, unengaged cohorts. Camp stock pays
+     * current needs only; settlement-rooted supply also refills one reserve day/day.
+     * Returns the camp soldier-ticks actually used, so stock cannot be allocated twice.
+     */
+    public long processSupply(long elapsedTicks, boolean networkSupplied, long campProvidedSoldierTicks) {
+        if (elapsedTicks <= 0 || !isAlive()) return 0L;
+        elapsedTicks = Math.min(elapsedTicks, Long.MAX_VALUE / soldierCount);
+        long demand = elapsedTicks * soldierCount;
+        long campUsed = networkSupplied ? 0L : Math.clamp(campProvidedSoldierTicks, 0L, demand);
+        if (networkSupplied) {
+            long missingReserve = getMaxCarriedSupplySoldierTicks() - carriedSupplySoldierTicks;
+            carriedSupplySoldierTicks += Math.min(demand, missingReserve);
+        } else {
+            long reserveUsed = Math.min(carriedSupplySoldierTicks, demand - campUsed);
+            carriedSupplySoldierTicks -= reserveUsed;
+            long uncovered = demand - campUsed - reserveUsed;
+            if (uncovered > 0) {
+                suppliedRecoveryTicks = 0;
+                long dailyDemand = soldierCount * StateBalance.TICKS_PER_DAY;
+                // Seven complete reserve days are protected. The first penalty needs
+                // a further complete day of genuinely unmet demand, including fractions.
+                long completeDays = uncovered / dailyDemand;
+                unsupportedSoldierTicks += uncovered % dailyDemand;
+                completeDays += unsupportedSoldierTicks / dailyDemand;
+                unsupportedSoldierTicks %= dailyDemand;
+                if (completeDays > 0) {
+                    tickMorale(-(int) Math.min(100L, completeDays * StateBalance.SUPPLY_MORALE_PENALTY));
+                    setLogisticsFatigue((int) Math.min(StateBalance.MAX_SUPPLY_FATIGUE,
+                            logisticsFatigue + Math.min(completeDays, 100L) * StateBalance.SUPPLY_FATIGUE_PER_DAY));
+                }
+                return campUsed;
+            }
+        }
+        unsupportedSoldierTicks = 0;
+        if (networkSupplied || campUsed == demand) {
+            long completeDays = elapsedTicks / StateBalance.TICKS_PER_DAY;
+            suppliedRecoveryTicks += elapsedTicks % StateBalance.TICKS_PER_DAY;
+            completeDays += suppliedRecoveryTicks / StateBalance.TICKS_PER_DAY;
+            suppliedRecoveryTicks %= StateBalance.TICKS_PER_DAY;
+            if (completeDays > 0) setLogisticsFatigue((int) Math.max(0L,
+                    logisticsFatigue - Math.min(completeDays, 100L) * StateBalance.SUPPLY_FATIGUE_RECOVERY));
+        } else {
+            suppliedRecoveryTicks = 0; // Carried reserve prevents penalties but does not restore readiness.
+        }
+        return campUsed;
+    }
+
+    //supply clamp after losses: ensures that carried supply and unsupported supply are within valid ranges after soldier count changes
+    private void clampSupplyAfterLosses(int previousSoldiers) {
+        carriedSupplySoldierTicks = Math.min(carriedSupplySoldierTicks, getMaxCarriedSupplySoldierTicks());
+        // Preserve the elapsed fraction of a shortage day when the formation shrinks.
+        unsupportedSoldierTicks = previousSoldiers <= 0 ? 0 : unsupportedSoldierTicks * soldierCount / previousSoldiers;
+        if (soldierCount == 0) suppliedRecoveryTicks = 0;
+    }
 
     // ── Deployment tracking getters/setters ───────────────────────────────────
     public UUID getAssignedArmyId()                    { return assignedArmyId; }
@@ -230,7 +327,11 @@ public class Cohort {
         storedPosition = new BlockPos((int) Math.floor(x), getStoredPosition().getY(), (int) Math.floor(z));
     }
 
-    //serialization methods
+    //serialization methods below
+    /**
+     * Converts the cohort to a CompoundTag for saving to disk.
+     * @return The CompoundTag representing the cohort.
+     */
     public CompoundTag toNBT() {
         CompoundTag tag = new CompoundTag();
         tag.putString("CohortId",   cohortId.toString());
@@ -248,7 +349,14 @@ public class Cohort {
         tag.putInt("Battles",       battlesParticipated);
         tag.putInt("StatLevelIdx",  statLevelIndex);
         tag.putBoolean("IsRouting", isRouting);
+        tag.putInt("LogisticsVersion", 1);
+        tag.putLong("CarriedSupplySoldierTicks", carriedSupplySoldierTicks);
+        tag.putLong("UnsupportedSoldierTicks", unsupportedSoldierTicks);
+        tag.putLong("SuppliedRecoveryTicks", suppliedRecoveryTicks);
+        tag.putInt("LogisticsFatigue", logisticsFatigue);
         if (lastResolvedBattleId != null) tag.putString("LastResolvedBattle", lastResolvedBattleId.toString());
+        if (retreatTarget != null) tag.putLong("RetreatTarget", retreatTarget.asLong());
+        if (retreatOpponent != null) tag.putString("RetreatOpponent", retreatOpponent.toString());
         // Deployment tracking
         tag.putString("AssignedArmyId",         assignedArmyId != null ? assignedArmyId.toString() : "");
         tag.putBoolean("IsGarrisoned",           isGarrisoned);
@@ -268,6 +376,11 @@ public class Cohort {
         return tag;
     }
 
+    /**
+     * Creates a cohort from a CompoundTag.
+     * @param tag The CompoundTag representing the cohort.
+     * @return The created cohort.
+     */
     public static Cohort fromNBT(CompoundTag tag) {
         UUID id        = UUID.fromString(tag.getString("CohortId").orElseThrow());
         CohortType t   = CohortType.valueOf(tag.getString("Type").orElse(CohortType.INFANTRY.name()));
@@ -289,6 +402,14 @@ public class Cohort {
             c.statLevelIndex = oldNext < 2 ? oldNext : Math.max(2, oldNext - 1);
         }
         c.isRouting          = tag.getBoolean("IsRouting").orElse(false);
+        // Legacy cohorts receive their starting reserve once; subsequent reloads
+        // respect even an explicitly saved zero instead of granting free resupply.
+        c.setCarriedSupplySoldierTicks(tag.getInt("LogisticsVersion").orElse(0) >= 1
+                ? tag.getLong("CarriedSupplySoldierTicks").orElse(0L) : c.getMaxCarriedSupplySoldierTicks());
+        c.setLogisticsFatigue(tag.getInt("LogisticsFatigue").orElse(0));
+        long dailyDemand = c.soldierCount * StateBalance.TICKS_PER_DAY;
+        c.unsupportedSoldierTicks = dailyDemand == 0 ? 0 : Math.clamp(tag.getLong("UnsupportedSoldierTicks").orElse(0L), 0L, dailyDemand - 1);
+        c.suppliedRecoveryTicks = Math.clamp(tag.getLong("SuppliedRecoveryTicks").orElse(0L), 0L, StateBalance.TICKS_PER_DAY - 1);
         tag.getString("LastResolvedBattle").ifPresent(value -> {
             try { c.lastResolvedBattleId = UUID.fromString(value); } catch (IllegalArgumentException ignored) {}
         });
@@ -306,6 +427,8 @@ public class Cohort {
                 list.getCompound(i).ifPresent(wp -> wp.getLong("Pos").ifPresent(pos -> c.addWaypoint(BlockPos.of(pos))));
             }
         });
+        tag.getLong("RetreatTarget").ifPresent(value -> c.retreatTarget = BlockPos.of(value));
+        tag.getString("RetreatOpponent").ifPresent(value -> c.retreatOpponent = UUID.fromString(value));
         return c;
     }
 

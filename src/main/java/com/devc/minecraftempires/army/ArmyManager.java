@@ -5,6 +5,7 @@ import com.devc.minecraftempires.combat.BattleManager;
 import com.devc.minecraftempires.network.packet.*;
 import com.devc.minecraftempires.network.ModNetworking;
 import com.devc.minecraftempires.state.StateData;
+import com.devc.minecraftempires.state.StateBalance;
 import com.devc.minecraftempires.state.StateManager;
 import com.devc.minecraftempires.territory.ClaimManager;
 import com.devc.minecraftempires.territory.ChunkData;
@@ -113,7 +114,7 @@ public class ArmyManager extends SavedData {
             Cohort cohort = resolveCohort(id);
             Legion parent = getParentLegion(id);
             if (cohort == null || parent == null || !stateId.equals(parent.getOwningStateId())
-                    || !cohort.isAlive() || cohort.isDeployed() || cohort.isGarrisoned()
+                    || !cohort.isAlive() || cohort.isDeployed() || cohort.isGarrisoned() || cohort.isRetreating()
                     || !near(first.getStoredPosition(), cohort.getStoredPosition(), ASSEMBLY_RANGE)
                     || !army.canAddCohort(cohort, this)) return Optional.empty();
             army.addCohortId(id); // Local, unpublished candidate only.
@@ -147,7 +148,7 @@ public class ArmyManager extends SavedData {
     //disband army function: removes the army from the manager and releases its cohorts in place
     public boolean disbandArmy(UUID armyId, boolean forceDisband) {
         Army army = getArmy(armyId);
-        if (army == null || (!forceDisband && (army.isEngaged() || army.isOnCampaign()))) return false;
+        if (army == null || (!forceDisband && (army.isEngaged() || army.isOnCampaign() || army.isRetreating()))) return false;
         syncCohortPositions(army);
         for (UUID id : army.getDeployedCohortIds()) {
             Cohort cohort = resolveCohort(id);
@@ -196,7 +197,8 @@ public class ArmyManager extends SavedData {
     public boolean endCampaign(UUID campaignId, ServerPlayer player) {
         Campaign campaign = getCampaign(campaignId);
         if (campaign == null || !controls(player, campaign.getOwningStateId())) return false;
-        if (!campaign.checkEndConditions(this, player.level())) {
+        if (campaign.getArmyIds().stream().map(this::getArmy).filter(Objects::nonNull).anyMatch(Army::isRetreating)
+                || !campaign.checkEndConditions(this, player.level())) {
             tell(player, "Cannot end campaign while a battle or hostile threat remains near your armies, conquered land, or settlements.");
             return false;
         }
@@ -245,20 +247,32 @@ public class ArmyManager extends SavedData {
         boolean changed = false;
         for (Army army : new ArrayList<>(activeArmies.values())) {
             if (army.isEngaged() || !army.isViable(this)) continue;
+            boolean retreating = army.isRetreating();
+            if (retreating && army.getWaypoints().isEmpty()) army.addWaypoint(army.getRetreatTarget());
             if (!army.getWaypoints().isEmpty()) {
-                move(army.getPreciseX(), army.getPreciseZ(), army.getWaypoints(), army::setPrecisePos);
+                move(level, army.getOwningStateId(), army.getPreciseX(), army.getPreciseZ(), army.getWaypoints(), retreating, army::setPrecisePos);
                 syncCohortPositions(army);
-                enterTerritory(army, level);
+                if (retreating) {
+                    boolean separated = updateRetreatDisengagement(army);
+                    boolean arrived = army.getWaypoints().isEmpty();
+                    if (arrived) army.finishRetreat();
+                    for (UUID id : army.getDeployedCohortIds()) {
+                        Cohort cohort = resolveCohort(id);
+                        if (cohort == null) continue;
+                        if (separated) cohort.clearRetreatOpponent();
+                        if (arrived) cohort.finishRetreat();
+                    }
+                } else enterTerritory(army, level);
                 changed = true;
             }
         }
         for (Legion legion : new ArrayList<>(activeLegions.values())) {
             Cohort main = legion.getMainCohort();
-            if (main == null || main.isDeployed() || main.isGarrisoned() || legion.getWaypoints().isEmpty()) continue;
+            if (main == null || main.isDeployed() || main.isGarrisoned() || main.isRetreating() || legion.getWaypoints().isEmpty()) continue;
             BlockPos oldPosition = main.getStoredPosition();
             List<Cohort> travelling = legion.allCohorts().stream().filter(c -> c.isAlive() && !c.isDeployed()
                     && !c.isGarrisoned() && c.getWaypoints().isEmpty() && near(oldPosition, c.getStoredPosition(), ASSEMBLY_RANGE)).toList();
-            move(legion.getPreciseX(), legion.getPreciseZ(), legion.getWaypoints(), legion::setPrecisePos);
+            move(level, legion.getOwningStateId(), legion.getPreciseX(), legion.getPreciseZ(), legion.getWaypoints(), false, legion::setPrecisePos);
             for (Cohort cohort : travelling) {
                 cohort.setStoredPosition(legion.getStoredPosition());
                 cohort.setPrecisePos(legion.getPreciseX(), legion.getPreciseZ());
@@ -269,10 +283,19 @@ public class ArmyManager extends SavedData {
         }
         // Regrouping physically moves each detached cohort; it never teleports to its parent.
         for (Cohort cohort : new ArrayList<>(cohortRegistry.values())) {
-            if (!cohort.isAlive() || cohort.isDeployed() || cohort.isGarrisoned() || cohort.getWaypoints().isEmpty()) continue;
-            move(cohort.getPreciseX(), cohort.getPreciseZ(), cohort.getWaypoints(), cohort::setPrecisePos);
+            if (!cohort.isAlive() || cohort.isDeployed() || cohort.isGarrisoned()) continue;
+            boolean retreating = cohort.isRetreating();
+            if (retreating && cohort.getWaypoints().isEmpty()) cohort.addWaypoint(cohort.getRetreatTarget());
+            if (cohort.getWaypoints().isEmpty()) continue;
             Legion parent = getParentLegion(cohort.getCohortId());
-            if (parent != null && needsCampaign(parent.getOwningStateId(), cohort.getStoredPosition(), level)) {
+            if (parent == null) continue;
+            move(level, parent.getOwningStateId(), cohort.getPreciseX(), cohort.getPreciseZ(), cohort.getWaypoints(), retreating, cohort::setPrecisePos);
+            if (retreating) {
+                Army opponent = getArmy(cohort.getRetreatOpponent());
+                if (opponent == null || !near(cohort.getStoredPosition(), opponent.getStoredPosition(), ENGAGEMENT_RANGE)) cohort.clearRetreatOpponent();
+                if (cohort.getWaypoints().isEmpty()) cohort.finishRetreat();
+            }
+            if (!retreating && needsCampaign(parent.getOwningStateId(), cohort.getStoredPosition(), level)) {
                 List<BlockPos> remaining = new ArrayList<>(cohort.getWaypoints());
                 raiseArmy(parent.getOwningStateId(), cohort.getStoredPosition(), List.of(cohort.getCohortId())).ifPresent(a -> {
                     remaining.forEach(a::addWaypoint);
@@ -285,7 +308,7 @@ public class ArmyManager extends SavedData {
         if (level.getGameTime() % 20 == 0) {
             for (Army army : new ArrayList<>(activeArmies.values())) {
                 if (army.isEngaged() || !army.isViable(this)) continue;
-                if (army.isOnCampaign()) {
+                if (army.isOnCampaign() && !army.isRetreating()) {
                     Campaign campaign = getCampaign(army.getCampaignId());
                     if (campaign != null) {
                         List<ChunkPos> acquired = ClaimManager.get(level).claimCampaignArea(level, army);
@@ -298,9 +321,9 @@ public class ArmyManager extends SavedData {
             // A stationary legion or detached garrison must also react to an enemy.
             for (Legion legion : new ArrayList<>(activeLegions.values())) {
                 for (Cohort cohort : legion.allCohorts()) {
-                    if (!cohort.isAlive() || cohort.isDeployed()) continue;
+                    if (!cohort.isAlive() || cohort.isDeployed() || cohort.isRetreating()) continue;
                     if (hasEnemyNear(legion.getOwningStateId(), cohort.getStoredPosition(), level)) {
-                        Army defender = wrapNearbyDefenders(legion.getOwningStateId(), cohort.getStoredPosition());
+                        Army defender = wrapNearbyDefenders(legion.getOwningStateId(), cohort.getStoredPosition(), null);
                         if (defender != null) changed |= checkCollisionAndEngage(defender, level);
                         break;
                     }
@@ -353,11 +376,12 @@ public class ArmyManager extends SavedData {
     }
 
     /** Includes a garrison in its defensive battle without losing its settlement assignment. */
-    private Army wrapNearbyDefenders(UUID stateId, BlockPos position) {
+    private Army wrapNearbyDefenders(UUID stateId, BlockPos position, UUID aggressor) {
         Army defender = new Army(UUID.randomUUID(), stateId, position);
         for (Legion legion : getLegionsForState(stateId)) {
             for (Cohort cohort : legion.allCohorts()) {
                 if (cohort.isAlive() && !cohort.isDeployed() && near(position, cohort.getStoredPosition(), ASSEMBLY_RANGE)
+                        && (!cohort.isRetreating() || aggressor != null && !cohort.isDisengagingFrom(aggressor))
                         && defender.canAddCohort(cohort, this)) defender.addCohortId(cohort.getCohortId());
             }
         }
@@ -368,10 +392,11 @@ public class ArmyManager extends SavedData {
 
     //engagement check function: checks if the army is within engagement range of any enemy armies or legions, and starts a battle if so
     private boolean checkCollisionAndEngage(Army army, ServerLevel level) {
-        if (army.isEngaged() || !army.isViable(this)) return false;
+        if (army.isEngaged() || army.isRetreating() || !army.isViable(this)) return false;
         StateManager states = StateManager.get(level);
         for (Army other : new ArrayList<>(activeArmies.values())) {
             if (other.isEngaged() || !other.isViable(this) || !states.areAtWar(army.getOwningStateId(), other.getOwningStateId())) continue;
+            if (!canEngage(army, other)) continue;
             if (near(army.getStoredPosition(), other.getStoredPosition(), ENGAGEMENT_RANGE)) {
                 createCampaign(army.getOwningStateId(), army.getArmyId());
                 createCampaign(other.getOwningStateId(), other.getArmyId());
@@ -382,8 +407,9 @@ public class ArmyManager extends SavedData {
         for (Legion legion : new ArrayList<>(activeLegions.values())) {
             if (!states.areAtWar(army.getOwningStateId(), legion.getOwningStateId())) continue;
             for (Cohort cohort : legion.allCohorts()) {
-                if (cohort.isAlive() && !cohort.isDeployed() && near(army.getStoredPosition(), cohort.getStoredPosition(), ENGAGEMENT_RANGE)) {
-                    Army defender = wrapNearbyDefenders(legion.getOwningStateId(), cohort.getStoredPosition());
+                if (cohort.isAlive() && !cohort.isDeployed() && !cohort.isDisengagingFrom(army.getArmyId())
+                        && near(army.getStoredPosition(), cohort.getStoredPosition(), ENGAGEMENT_RANGE)) {
+                    Army defender = wrapNearbyDefenders(legion.getOwningStateId(), cohort.getStoredPosition(), army.getArmyId());
                     if (defender != null) {
                         createCampaign(army.getOwningStateId(), army.getArmyId());
                         createCampaign(defender.getOwningStateId(), defender.getArmyId());
@@ -397,16 +423,39 @@ public class ArmyManager extends SavedData {
     }
 
     //army movement function: moves the army towards its next waypoint, and removes the waypoint if it has been reached
-    private static void move(double x, double z, Queue<BlockPos> waypoints, BiConsumer<Double, Double> setter) {
+    private static void move(ServerLevel level, UUID owner, double x, double z, Queue<BlockPos> waypoints, boolean retreating, BiConsumer<Double, Double> setter) {
         BlockPos target = waypoints.peek();
         if (target == null) return;
         double dx = target.getX() + 0.5 - x, dz = target.getZ() + 0.5 - z;
         double distance = Math.hypot(dx, dz);
         double speed = 0.2; // 0.8 blocks/second at five-tick intervals; terrain modifiers are deferred. and also check if this is too fast or slow
+        if (retreating) speed *= StateBalance.ROUT_SPEED_MULTIPLIER;
+        // Roads spend this movement interval at the appropriate speed on each side of a chunk boundary.
+        if (distance > 0) speed = LogisticsManager.get(level).movementDistance(owner, x, z, dx / distance, dz / distance, speed, level);
+        advanceMovement(x, z, waypoints, speed, setter);
+    }
+    //army movement function: moves the army towards its next waypoint, and removes the waypoint if it has been reached
+    /** Shared strategic step, including forced retreat, without changing position at order time. */
+    public static void advanceMovement(double x, double z, Queue<BlockPos> waypoints, double speed, BiConsumer<Double, Double> setter) {
+        BlockPos target = waypoints.peek();
+        if (target == null || speed <= 0) return;
+        double dx = target.getX() + .5 - x, dz = target.getZ() + .5 - z;
+        double distance = Math.hypot(dx, dz);
         if (distance <= speed) {
             setter.accept(target.getX() + 0.5, target.getZ() + 0.5);
             waypoints.poll();
         } else setter.accept(x + dx / distance * speed, z + dz / distance * speed);
+    }
+
+    public static boolean canEngage(Army first, Army second) {
+        return !first.isDisengagingFrom(second.getArmyId()) && !second.isDisengagingFrom(first.getArmyId());
+    }
+    //retreat disengagement update function: checks if the army has retreated far enough from its opponent to disengage from battle
+    public boolean updateRetreatDisengagement(Army army) {
+        Army opponent = getArmy(army.getRetreatOpponent());
+        boolean separated = opponent == null || !near(army.getStoredPosition(), opponent.getStoredPosition(), ENGAGEMENT_RANGE);
+        if (separated) army.clearRetreatOpponent();
+        return separated;
     }
 
     //checks if two block positions are within a certain range of each other
@@ -440,6 +489,7 @@ public class ArmyManager extends SavedData {
             Army army = manager.getArmy(payload.armyId());
             if (army == null || !controls(player, army.getOwningStateId()) || army.isEngaged()
                     || !army.isViable(manager) || !validTarget(player.level(), payload.targetPos())) return;
+            if (army.isRetreating()) { tell(player, "This army must finish retreating to its rally point before accepting new orders."); return; }
             if (!payload.isQueueing()) army.clearWaypoints();
             if (army.getWaypoints().size() < MAX_WAYPOINTS) army.addWaypoint(payload.targetPos());
             manager.setDirty();
@@ -454,7 +504,7 @@ public class ArmyManager extends SavedData {
             Legion legion = manager.getLegion(payload.legionId());
             if (legion == null || !controls(player, legion.getOwningStateId()) || !validTarget(player.level(), payload.targetPos())) return;
             Cohort main = legion.getMainCohort();
-            if (main == null || main.isDeployed() || main.isGarrisoned()) {
+            if (main == null || main.isDeployed() || main.isGarrisoned() || main.isRetreating()) {
                 tell(player, "Move the army containing the main cohort, or release its assignment first.");
                 return;
             }
@@ -534,7 +584,7 @@ public class ArmyManager extends SavedData {
             Legion parent = getParentLegion(id);
             if (cohort == null || parent == null || !cohort.isAlive() || !stateId.equals(parent.getOwningStateId())) return false;
             Army army = getArmy(cohort.getAssignedArmyId());
-            if (army != null && army.isEngaged()) return false;
+            if (cohort.isRetreating() || army != null && (army.isEngaged() || army.isRetreating())) return false;
             if (ungarrison) {
                 if (!cohort.isGarrisoned() || !settlement.getSettlementId().equals(cohort.getGarrisonedSettlementId())) return false;
             } else {
@@ -609,7 +659,7 @@ public class ArmyManager extends SavedData {
                     Cohort main = legion.getMainCohort();
                     if (main == null) return;
                     for (Cohort cohort : legion.allCohorts()) {
-                        if (cohort != main && cohort.isAlive() && !cohort.isDeployed() && !cohort.isGarrisoned()) {
+                        if (cohort != main && cohort.isAlive() && !cohort.isDeployed() && !cohort.isGarrisoned() && !cohort.isRetreating()) {
                             cohort.clearWaypoints();
                             cohort.addWaypoint(main.getStoredPosition());
                         }

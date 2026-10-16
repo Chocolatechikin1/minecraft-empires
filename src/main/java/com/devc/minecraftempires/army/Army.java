@@ -28,6 +28,8 @@ public class Army {
     private BlockPos storedPosition;
     private BlockPos campPosition = null;
     private UUID currentBattleId = null;
+    private BlockPos retreatTarget;
+    private UUID retreatOpponent;
     private final Queue<BlockPos> waypoints = new LinkedList<>();
 
     public Army(UUID armyId, UUID owningStateId, BlockPos storedPosition) {
@@ -138,6 +140,18 @@ public class Army {
     public void addWaypoint(BlockPos pos)           { waypoints.offer(pos); }
     public void clearWaypoints()                    { waypoints.clear(); }
 
+    public boolean isRetreating() { return retreatTarget != null; }
+    public BlockPos getRetreatTarget() { return retreatTarget; }
+    public UUID getRetreatOpponent() { return retreatOpponent; }
+    public boolean isDisengagingFrom(UUID opponent) { return isRetreating() && retreatOpponent != null && retreatOpponent.equals(opponent); }
+    /** A forced, saved march replaces the former post-battle position jump. */
+    public void beginRetreat(BlockPos target, UUID opponent) {
+        retreatTarget = target; retreatOpponent = opponent;
+        clearWaypoints(); addWaypoint(target);
+    }
+    public void finishRetreat() { retreatTarget = null; retreatOpponent = null; clearWaypoints(); }
+    public void clearRetreatOpponent() { retreatOpponent = null; }
+
     //serializer
     public CompoundTag toNBT() {
         CompoundTag tag = new CompoundTag();
@@ -154,6 +168,8 @@ public class Army {
         if (campPosition != null)   tag.putLong("CampPos",     campPosition.asLong());
         if (currentBattleId != null) tag.putString("BattleId", currentBattleId.toString());
         if (campaignId != null)      tag.putString("CampaignId", campaignId.toString());
+        if (retreatTarget != null) tag.putLong("RetreatTarget", retreatTarget.asLong());
+        if (retreatOpponent != null) tag.putString("RetreatOpponent", retreatOpponent.toString());
 
         // Deployed cohort ID list
         ListTag cohortList = new ListTag();
@@ -207,6 +223,8 @@ public class Army {
         });
         tag.getDouble("PreciseX").ifPresent(x -> army.preciseX = x);
         tag.getDouble("PreciseZ").ifPresent(z -> army.preciseZ = z);
+        tag.getLong("RetreatTarget").ifPresent(value -> army.retreatTarget = BlockPos.of(value));
+        tag.getString("RetreatOpponent").ifPresent(value -> army.retreatOpponent = UUID.fromString(value));
 
         return army;
     }
