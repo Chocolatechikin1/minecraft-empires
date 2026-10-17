@@ -3,13 +3,16 @@ package com.devc.minecraftempires.combat;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import java.util.*;
+import org.joml.Vector2d;
 
 /** Server-owned battle, simulated every five server ticks (four steps per second). */
+//this class handles only user or spectated battles, auto resolve ones are in AutoResolveEngine.java
 public class BattleSession {
     public enum BattleResult { ONGOING, ATTACKER_WINS, DEFENDER_WINS }
     public enum BattlePhase { DEPLOYMENT, ENGAGEMENT }
     public enum Formation { LINE, TRIPLEX, WEDGE }
-    private static final double MELEE_RANGE = 3.0;
+    public static final double COHORT_SPACING = 10.0;
+    private static final double MELEE_RANGE = COHORT_SPACING + .5;
     private static final int DEPLOYMENT_STEPS = 120;
     private static final int INITIAL_GRACE_STEPS = 240;
     private static final int ABANDONMENT_GRACE_STEPS = 40;
@@ -62,8 +65,9 @@ public class BattleSession {
         if (advanceDefender) advanceIdleUnits(defenderCohorts, attackerCohorts);
         processNewRouts(attackerCohorts, true);
         processNewRouts(defenderCohorts, false);
-        attackerCohorts.forEach(CohortData::tickMovement);
-        defenderCohorts.forEach(CohortData::tickMovement);
+        List<CohortData> bodies = new ArrayList<>(attackerCohorts);
+        bodies.addAll(defenderCohorts);
+        for (CohortData cohort : bodies) cohort.tickMovement(next -> resolveMovement(cohort, next, bodies));
         updateEngagements();
         if (++combatSteps >= MELEE_INTERVAL) {
             combatSteps = 0;
@@ -74,6 +78,41 @@ public class BattleSession {
         processNewRouts(attackerCohorts, true);
         processNewRouts(defenderCohorts, false);
         checkBattleEnd();
+    }
+    // Treat each formation as a body, not a point. Swept tests also prevent fast units crossing one another.
+    //just prevents from overlapping with other cohorts, if it does overlap it will try to move in a different direction
+    private Vector2d resolveMovement(CohortData cohort, Vector2d next, List<CohortData> bodies) {
+        Vector2d start = cohort.getPosition();
+        Vector2d delta = new Vector2d(next).sub(start);
+        int turn = (cohort.getCohortId().hashCode() & 1) == 0 ? 1 : -1;
+        for (double angle : new double[]{0, turn * Math.PI / 4, -turn * Math.PI / 4, turn * Math.PI / 2, -turn * Math.PI / 2}) {
+            double cos = Math.cos(angle), sin = Math.sin(angle);
+            Vector2d candidate = new Vector2d(start.x + delta.x * cos - delta.y * sin,
+                    start.y + delta.x * sin + delta.y * cos);
+            if (Math.abs(candidate.x) > FIELD_BOUND || Math.abs(candidate.y) > FIELD_BOUND) continue;
+            if (clearMovement(cohort, candidate, bodies)) return candidate;
+        }
+        return new Vector2d(start);
+    }
+
+    //movement update function, checks if the movement is clear of other cohorts
+    private boolean clearMovement(CohortData cohort, Vector2d end, List<CohortData> bodies) {
+        Vector2d start = cohort.getPosition();
+        double dx = end.x - start.x, dz = end.y - start.y, length = dx * dx + dz * dz;
+        for (CohortData other : bodies) {
+            if (other == cohort || !other.isAlive() || other.hasEscaped()) continue;
+            Vector2d obstacle = other.getPosition();
+            double before = start.distanceSquared(obstacle), after = end.distanceSquared(obstacle);
+            // Legacy/manual positions may already overlap: allow only movement that separates them.
+            if (before < COHORT_SPACING * COHORT_SPACING - 1.0e-8) {
+                if (after > before + 1.0e-8 && dx * (start.x - obstacle.x) + dz * (start.y - obstacle.y) >= 0) continue;
+                return false;
+            }
+            double t = length == 0 ? 0 : Math.clamp(((obstacle.x - start.x) * dx + (obstacle.y - start.y) * dz) / length, 0, 1);
+            double nearX = start.x + t * dx - obstacle.x, nearZ = start.y + t * dz - obstacle.y;
+            if (nearX * nearX + nearZ * nearZ < COHORT_SPACING * COHORT_SPACING - 1.0e-8) return false;
+        }
+        return true;
     }
     private void updateEngagements() {
         // Compute the whole set first so continuing contacts do not repeatedly clear orders.
@@ -93,10 +132,11 @@ public class BattleSession {
     }
     private void advanceIdleUnits(List<CohortData> allies, List<CohortData> enemies) {
         for (CohortData cohort : allies) {
-            if (!cohort.canTakeOrders() || cohort.isEngaged() || !cohort.getMovementWaypoints().isEmpty()) continue;
+            if (!cohort.canTakeOrders() || cohort.isEngaged()
+                    || !cohort.getMovementWaypoints().isEmpty() && !cohort.isAutomaticallyAdvancing()) continue;
             enemies.stream().filter(CohortData::canFight)
                     .min(Comparator.comparingDouble(c -> c.getPosition().distanceSquared(cohort.getPosition())))
-                    .ifPresent(target -> cohort.queueWaypoint(target.getPosition().x, target.getPosition().y));
+                    .ifPresent(target -> cohort.advanceToward(target.getPosition().x, target.getPosition().y));
         }
     }
     private void processMelee() {
@@ -146,6 +186,9 @@ public class BattleSession {
             boolean attacker = isAttackerCohort(cohortId);
             // Deployment stays on the player's side and away from the opposing starting line.
             if ((attacker && (z > -8 || z < -100)) || (!attacker && (z < 8 || z > 100))) return false;
+            if (java.util.stream.Stream.concat(attackerCohorts.stream(), defenderCohorts.stream())
+                    .anyMatch(other -> other != cohort && other.isAlive() && !other.hasEscaped()
+                            && other.getPosition().distanceSquared(x, z) < COHORT_SPACING * COHORT_SPACING - 1.0e-8)) return false;
             cohort.place(x, z);
         } else {
             if (cohort.isEngaged()) return false;
@@ -165,13 +208,13 @@ public class BattleSession {
         int count = side.size();
         int columns = Math.min(30, formation == Formation.TRIPLEX ? Math.max(1, (count + 2) / 3) : Math.max(1, count));
         int rows = Math.max(1, (count + columns - 1) / columns);
-        double maximumDepth = (rows - 1) * 8.0 + (formation == Formation.WEDGE ? (columns - 1) * 1.5 : 0);
+        double maximumDepth = (rows - 1) * 12.0 + (formation == Formation.WEDGE ? (columns - 1) * COHORT_SPACING / 8 : 0);
         double depthScale = Math.min(1.0, 80.0 / Math.max(1.0, maximumDepth));
         for (int i = 0; i < count; i++) {
             int row = i / columns;
             int column = i % columns;
-            double x = (column - (Math.min(columns, count - row * columns) - 1) / 2.0) * 6;
-            double depth = formation == Formation.WEDGE ? Math.abs(x) * 0.5 + row * 8 : row * 8;
+            double x = (column - (Math.min(columns, count - row * columns) - 1) / 2.0) * COHORT_SPACING;
+            double depth = formation == Formation.WEDGE ? Math.abs(x) * .25 + row * 12 : row * 12;
             side.get(i).place(x, (attacker ? -1 : 1) * (20 + depth * depthScale));
         }
     }
