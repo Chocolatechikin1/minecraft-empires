@@ -23,6 +23,8 @@ public class SettlementData {
     private int protectiveRadius; //base radius for claim protection
     //siege protection variable
     private int localSiegeImmunityTicks;
+    // Preparation pauses with the owning state's supply clock, unlike capture immunity.
+    private long supplyPreparationTicks;
 
     /** note to either add or remove this feature later
      * STUB — Martial Law flag set when an Army cohort garrisons this settlement during a campaign.
@@ -47,7 +49,7 @@ public class SettlementData {
         this.settlementTier = 1;
         this.localPopulation = com.devc.minecraftempires.state.StateBalance.STARTING_POPULATION;
         this.garrisonCapacity = 50; 
-        this.protectiveRadius = 100; //gives a protective area of 156 chunks
+        this.protectiveRadius = com.devc.minecraftempires.state.StateBalance.SETTLEMENT_RADIUS; // New settlements use 64 blocks; older saves retain their former protection.
         this.localSiegeImmunityTicks = 0; //no immunity by default
         this.biomeTallies = new HashMap<>(); //hash map for quick biome tallying
         this.guardTowerNodes = new ArrayList<>(); //arraylist for easy addition/removal of guard tower nodes
@@ -74,6 +76,13 @@ public class SettlementData {
         }
     }
     public boolean isLocallyImmune() { return this.localSiegeImmunityTicks > 0; }
+
+    public long getSupplyPreparationTicks() { return supplyPreparationTicks; }
+    public void setSupplyPreparationTicks(long ticks) { supplyPreparationTicks = Math.max(0L, ticks); }
+    public void advanceSupplyPreparationTicks(long elapsedTicks) {
+        supplyPreparationTicks = Math.max(0L, supplyPreparationTicks - Math.max(0L, elapsedTicks));
+    }
+    public boolean isSupplyReady() { return supplyPreparationTicks == 0; }
 
     // Martial Law stub (loyalty system pending)
     public boolean isMartialLaw()                  { return isMartialLaw; }
@@ -138,7 +147,9 @@ public class SettlementData {
         tag.putInt("LocalPopulation", localPopulation);
         tag.putInt("GarrisonCap", garrisonCapacity);
         tag.putInt("Radius", protectiveRadius);
+        tag.putInt("FootprintVersion", 1);
         tag.putInt("LocalImmunity", localSiegeImmunityTicks);
+        tag.putLong("SupplyPreparationTicks", supplyPreparationTicks);
         tag.putBoolean("MartialLaw", isMartialLaw);
 
         // Biome tallies
@@ -171,7 +182,12 @@ public class SettlementData {
         settlement.localPopulation = Math.max(0, tag.getInt("LocalPopulation").orElse(com.devc.minecraftempires.state.StateBalance.STARTING_POPULATION));
         settlement.garrisonCapacity = Math.max(0, tag.getInt("GarrisonCap").orElse(50));
         settlement.localSiegeImmunityTicks = Math.max(0, tag.getInt("LocalImmunity").orElse(0));
-        settlement.protectiveRadius = com.devc.minecraftempires.state.StateBalance.SETTLEMENT_RADIUS;
+        // Earlier loaders ignored Radius, so an old small value did not describe its
+        // actual protection. Preserve the effective 100 blocks until this version saves it.
+        settlement.protectiveRadius = tag.getInt("FootprintVersion").orElse(0) >= 1
+                ? Math.max(1, tag.getInt("Radius").orElse(com.devc.minecraftempires.state.StateBalance.LEGACY_SETTLEMENT_RADIUS))
+                : com.devc.minecraftempires.state.StateBalance.LEGACY_SETTLEMENT_RADIUS;
+        settlement.supplyPreparationTicks = Math.max(0L, tag.getLong("SupplyPreparationTicks").orElse(0L));
         settlement.isMartialLaw = tag.getBoolean("MartialLaw").orElse(false);
 
         // Load biome tallies

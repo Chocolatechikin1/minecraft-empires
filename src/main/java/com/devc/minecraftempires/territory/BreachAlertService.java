@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Deque;
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -24,7 +25,7 @@ import java.util.WeakHashMap;
 public final class BreachAlertService {
     private static final int MAX_ALERTS_PER_LEVEL = 64;
     private static final long ALERT_LIFETIME_TICKS = 2_400L;
-    private static final Map<ServerLevel, Deque<MapDataPayload.BreachAlert>> ALERTS =
+    private static final Map<ServerLevel, BreachHistory> ALERTS =
             Collections.synchronizedMap(new WeakHashMap<>());
 
     private BreachAlertService() {}
@@ -39,19 +40,9 @@ public final class BreachAlertService {
             return;
         }
 
-        MapDataPayload.BreachAlert alert = new MapDataPayload.BreachAlert(
-                chunkPos.pack(),
-                defenderStateId,
-                attackerStateId,
-                level.getGameTime()
-        );
-
         synchronized (ALERTS) {
-            Deque<MapDataPayload.BreachAlert> levelAlerts = ALERTS.computeIfAbsent(level, ignored -> new ArrayDeque<>());
-            levelAlerts.addFirst(alert);
-            while (levelAlerts.size() > MAX_ALERTS_PER_LEVEL) {
-                levelAlerts.removeLast();
-            }
+            BreachHistory history = ALERTS.computeIfAbsent(level, ignored -> new BreachHistory());
+            if (!history.record(chunkPos.pack(), defenderStateId, attackerStateId, level.getGameTime())) return;
         }
 
         StateManager stateManager = StateManager.get(level);
@@ -80,11 +71,11 @@ public final class BreachAlertService {
         List<MapDataPayload.BreachAlert> result = new ArrayList<>();
 
         synchronized (ALERTS) {
-            Deque<MapDataPayload.BreachAlert> levelAlerts = ALERTS.get(level);
-            if (levelAlerts == null) {
+            BreachHistory history = ALERTS.get(level);
+            if (history == null) {
                 return List.of();
             }
-
+            Deque<MapDataPayload.BreachAlert> levelAlerts = history.alerts;
             levelAlerts.removeIf(alert -> alert.gameTime() < cutoff);
             for (MapDataPayload.BreachAlert alert : levelAlerts) {
                 boolean viewerInvolved = viewerStateId != null
@@ -97,5 +88,38 @@ public final class BreachAlertService {
         }
 
         return result;
+    }
+
+    //breach history class, stores recent breaches for a given world and allows for retrieval of alerts for players to see
+    //also handles quiet periods for repeated breaches and limits the number of stored alerts to prevent memory issues
+    /** Per-world bookkeeping also supports domain checks without a Minecraft server. */
+    public static final class BreachHistory {
+        private record Breach(long chunk, UUID defender, UUID attacker) {}
+        private record Sides(UUID defender, UUID attacker) {}
+        private final Deque<MapDataPayload.BreachAlert> alerts = new ArrayDeque<>();
+        private final LinkedHashMap<Breach, Long> lastSeen = new LinkedHashMap<>(128, .75f, true);
+        private final Map<Sides, Long> lastWarning = new LinkedHashMap<>();
+        private long lastTick = Long.MIN_VALUE;
+
+        /** Record each continuous breach once; chat combines one side's captures in the same server pass. */
+        public boolean record(long chunk, UUID defender, UUID attacker, long now) {
+            if (defender == null || attacker == null || defender.equals(attacker)) return false;
+            if (now < lastTick) { alerts.clear(); lastSeen.clear(); lastWarning.clear(); }
+            if (now != lastTick) {
+                long cutoff = now - ALERT_LIFETIME_TICKS;
+                lastSeen.values().removeIf(tick -> tick < cutoff);
+                lastWarning.values().removeIf(tick -> tick < cutoff);
+                alerts.removeIf(alert -> alert.gameTime() < cutoff);
+                lastTick = now;
+            }
+            Long previous = lastSeen.put(new Breach(chunk, defender, attacker), now);
+            // Refresh the quiet-period clock even on a repeated flip, so ongoing border churn stays silent.
+            if (previous != null && now - previous <= ALERT_LIFETIME_TICKS) return false;
+            while (lastSeen.size() > 16_384) lastSeen.remove(lastSeen.keySet().iterator().next());
+            alerts.addFirst(new MapDataPayload.BreachAlert(chunk, defender, attacker, now));
+            while (alerts.size() > MAX_ALERTS_PER_LEVEL) alerts.removeLast();
+            Long last = lastWarning.put(new Sides(defender, attacker), now);
+            return last == null || last != now;
+        }
     }
 }
