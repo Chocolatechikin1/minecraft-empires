@@ -15,17 +15,20 @@ import java.util.UUID;
 /** A complete server snapshot including terminal results and viewer command permissions. */
 public record BattleSyncPayload(UUID battleId, List<CohortSnapshot> attackerCohorts, List<CohortSnapshot> defenderCohorts,
                                 String battlePhase, int deploymentTicksRemaining, String result,
-                                boolean controlsAttacker, boolean controlsDefender) implements CustomPacketPayload {
+                                boolean controlsAttacker, boolean controlsDefender,
+                                double mapOriginX, double mapOriginZ) implements CustomPacketPayload {
     public static final Type<BattleSyncPayload> TYPE = new Type<>(Identifier.fromNamespaceAndPath(MinecraftEmpires.MODID, "battle_sync"));
     public static final StreamCodec<RegistryFriendlyByteBuf, BattleSyncPayload> STREAM_CODEC = StreamCodec.ofMember(BattleSyncPayload::write, BattleSyncPayload::new);
     public BattleSyncPayload { attackerCohorts = List.copyOf(attackerCohorts); defenderCohorts = List.copyOf(defenderCohorts); }
     public BattleSyncPayload(RegistryFriendlyByteBuf buf) {
-        this(buf.readUUID(), readSnapshots(buf), readSnapshots(buf), buf.readUtf(24), buf.readVarInt(), buf.readUtf(24), buf.readBoolean(), buf.readBoolean());
+        this(buf.readUUID(), readSnapshots(buf), readSnapshots(buf), buf.readUtf(24), buf.readVarInt(), buf.readUtf(24), buf.readBoolean(), buf.readBoolean(), buf.readDouble(), buf.readDouble());
     }
     private void write(RegistryFriendlyByteBuf buf) {
         buf.writeUUID(battleId); writeSnapshots(buf, attackerCohorts); writeSnapshots(buf, defenderCohorts);
         buf.writeUtf(battlePhase, 24); buf.writeVarInt(deploymentTicksRemaining); buf.writeUtf(result, 24);
         buf.writeBoolean(controlsAttacker); buf.writeBoolean(controlsDefender);
+        // Local battle coordinates map to real blocks relative to this world origin.
+        buf.writeDouble(mapOriginX); buf.writeDouble(mapOriginZ);
     }
     private static void writeSnapshots(RegistryFriendlyByteBuf buf, List<CohortSnapshot> list) {
         buf.writeVarInt(list.size()); list.forEach(c -> c.write(buf));
@@ -41,7 +44,8 @@ public record BattleSyncPayload(UUID battleId, List<CohortSnapshot> attackerCoho
     public static BattleSyncPayload fromSession(BattleSession session) { return fromSession(session, false, false); }
     public static BattleSyncPayload fromSession(BattleSession session, boolean attacker, boolean defender) {
         return new BattleSyncPayload(session.getBattleId(), snapshots(session.getAttackerCohorts()), snapshots(session.getDefenderCohorts()),
-                session.getPhase().name(), session.getDeploymentTicksRemaining(), session.getResult().name(), attacker, defender);
+                session.getPhase().name(), session.getDeploymentTicksRemaining(), session.getResult().name(), attacker, defender,
+                session.getMapOriginX(), session.getMapOriginZ());
     }
     private static List<CohortSnapshot> snapshots(List<CohortData> cohorts) {
         return cohorts.stream().map(c -> new CohortSnapshot(c.getCohortId(), c.getPosition().x, c.getPosition().y,

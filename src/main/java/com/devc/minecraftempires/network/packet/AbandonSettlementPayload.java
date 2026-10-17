@@ -16,7 +16,7 @@ import java.util.UUID;
  *
  * The server:
  *  1. Verifies the player's state owns the settlement (security check).
- *  2. Calls StateManager.disbandSettlement() to wipe data and claims.
+ *  2. Calls StateManager.disbandSettlement() to remove settlement data and retain its land as state-owned claims.
  *  3. Calls StateManager.markAltarAbandoned(altarPos) so the block can now be broken.
  *  4. Sends the player a confirmation message.
  */

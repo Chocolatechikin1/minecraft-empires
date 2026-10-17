@@ -10,16 +10,20 @@ import java.util.*;
 public final class ManagementDataService {
     private ManagementDataService() {}
     public static ManagementDataPayload build(ServerPlayer player) {
-        var states = StateManager.get(player.level());
+        var level = player.level().getServer().overworld();
+        var states = StateManager.get(level);
         var state = states.getStateByPlayer(player.getUUID());
         if (state == null) return ManagementDataPayload.empty();
-        var armies = ArmyManager.get(player.level());
+        var armies = ArmyManager.get(level);
+        var logistics = LogisticsManager.get(level);
         var settlements = states.settlementsFor(state).stream()
                 .sorted(Comparator.comparing(s -> s.getSettlementName().toLowerCase(Locale.ROOT)))
                 .map(s -> new ManagementDataPayload.SettlementEntry(s.getSettlementId(), s.getSettlementName(),
-                        s.getCenterAltarPos(), s.getSettlementTier(), s.getLocalPopulation(), s.getGarrisonCapacity(), s.isMartialLaw())).toList();
+                        s.getCenterAltarPos(), s.getSettlementTier(), s.getLocalPopulation(), s.getGarrisonCapacity(),
+                        s.isMartialLaw(), s.getSupplyPreparationTicks())).toList();
         var legions = new ArrayList<ManagementDataPayload.LegionEntry>();
         var cohorts = new ArrayList<ManagementDataPayload.CohortEntry>();
+        var supplies = new ArrayList<ManagementDataPayload.CohortSupplyEntry>();
         var ordered = armies.getLegionsForState(state.getStateId()).stream().sorted(Comparator.comparing(Legion::getLegionId)).toList();
         int number = 0;
         for (var legion : ordered) {
@@ -36,6 +40,10 @@ public final class ManagementDataService {
                         c.getStoredPosition(), c.getSoldierCount(), c.getMaxSoldiers(), c.getHealth(), c.getMorale(),
                         c.getEndurance(), c.getStrength(), c.getSpeed(), c.getXp(), c.getGearTier().name(),
                         c.getAssignedArmyId(), c.getGarrisonedSettlementId()));
+                var supply = logistics.describe(state.getStateId(), c, level);
+                supplies.add(new ManagementDataPayload.CohortSupplyEntry(c.getCohortId(), supply.status(),
+                        supply.reason(), supply.sourceName(), supply.sourceId(), supply.campId(), supply.cost(),
+                        c.getCarriedSupplyDays(), c.getLogisticsFatigue(), c.getEffectiveEndurance()));
             }
         }
         UUID own = state.getStateId();
@@ -43,9 +51,20 @@ public final class ManagementDataService {
                 .sorted(Comparator.comparing(StateData::getStateName, String.CASE_INSENSITIVE_ORDER))
                 .map(s -> new ManagementDataPayload.RelationEntry(s.getStateId(), s.getStateName(), states.areAtWar(own, s.getStateId()),
                         states.hasPassage(s.getStateId(), own), states.hasPassage(own, s.getStateId()), states.hasPeaceOffer(s.getStateId(), own))).toList();
+        // Only the owning state receives camp stock and rooted-connection details.
+        var camps = logistics.getCamps().stream().filter(c -> own.equals(c.ownerId()))
+                .sorted(Comparator.comparing(LogisticsManager.Camp::id))
+                .map(c -> new ManagementDataPayload.CampEntry(c.id(), c.position(), c.stock(),
+                        StateBalance.CAMP_STOCK_CAPACITY, logistics.isCampConnected(c.id(), level))).toList();
+        var selection = logistics.selectedRoute(player);
+        var selectedRoute = selection == null ? ManagementDataPayload.SelectedSupplyRoute.empty()
+                : new ManagementDataPayload.SelectedSupplyRoute(selection.targetId(),
+                        selection.points().stream().limit(ManagementDataPayload.SelectedSupplyRoute.MAX_POINTS).toList(),
+                        selection.truncated() || selection.points().size() > ManagementDataPayload.SelectedSupplyRoute.MAX_POINTS);
         return new ManagementDataPayload(own, state.getStateName(), state.getCurrentTier().name(), state.getTreasuryBalance(),
                 (int) ((state.getGraceTicksRemaining() + StateBalance.TICKS_PER_DAY - 1) / StateBalance.TICKS_PER_DAY),
                 EconomyTickHandler.calculateTax(state, states), EconomyTickHandler.calculateMaintenance(state, states, armies),
-                states.canClaimFreeLegion(player.getUUID()), state.hasEndgameChoice(), settlements, legions, cohorts, relations);
+                states.canClaimFreeLegion(player.getUUID()), state.hasEndgameChoice(), settlements, legions, cohorts, relations,
+                supplies, camps, selectedRoute);
     }
 }

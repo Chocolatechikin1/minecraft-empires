@@ -8,6 +8,7 @@ import com.devc.minecraftempires.network.packet.BattleSyncPayload;
 import com.devc.minecraftempires.network.packet.OpenBattleMapPayload;
 import com.devc.minecraftempires.state.StateData;
 import com.devc.minecraftempires.state.StateManager;
+import com.devc.minecraftempires.state.StateBalance;
 import com.mojang.serialization.Codec;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
@@ -42,6 +43,7 @@ public final class BattleManager extends SavedData {
         if (attacker.isEngaged()) return getBattle(attacker.getCurrentBattleId());
         if (defender.isEngaged()) return getBattle(defender.getCurrentBattleId());
         if (attacker.getArmyId().equals(defender.getArmyId())) return null;
+        if (!ArmyManager.canEngage(attacker, defender)) return null;
         ArmyManager manager = ArmyManager.get(level);
         if (!attacker.isViable(manager) || !defender.isViable(manager)) return null;
         BlockPos origin = attacker.getStoredPosition();
@@ -172,33 +174,42 @@ public final class BattleManager extends SavedData {
             return;
         }
         BlockPos position = army == null ? new BlockPos((int)session.getMapOriginX(), 64, (int)session.getMapOriginZ()) : army.getStoredPosition();
-        // A defeated formation retreats 500 blocks from the field; this is the abstract battle's recovery leg.
-        BlockPos retreat = position.offset(0, 0, attacking ? -500 : 500);
+        // A defeated formation retreats 200 blocks from the field; this is the abstract battle's recovery leg.
+        // Keep its current position and save a mandatory march instead of jumping to the rally point.
+        BlockPos retreat = position.offset(0, 0, attacking ? -StateBalance.POST_BATTLE_RETREAT_DISTANCE : StateBalance.POST_BATTLE_RETREAT_DISTANCE);
+        UUID opponent = attacking ? session.getDefenderArmyId() : session.getAttackerArmyId();
         if (army != null) {
             army.setCurrentBattleId(null);
-            army.clearWaypoints();
-            if (!won) army.setStoredPosition(retreat);
+            army.finishRetreat();
+            if (!won) army.beginRetreat(retreat, opponent);
             army.setCampPosition(null);
         }
         for (CohortData data : snapshots) {
             Cohort cohort = manager.resolveCohort(data.getCohortId());
             if (cohort == null || cohort.hasResolvedBattle(session.getBattleId())) continue;
             cohort.applyBattleOutcome(session.getBattleId(), data.getCurrentHealth(), data.getMorale(), won);
-            cohort.clearWaypoints();
+            cohort.finishRetreat();
+            var parent = manager.getParentLegion(cohort.getCohortId());
+            if (parent != null && parent.getMainCohort() == cohort) parent.clearWaypoints();
+            boolean fleeing = !won || data.isRouting() || data.hasEscaped() || data.isWithdrawing();
+            boolean wasGarrisoned = cohort.isGarrisoned();
             if (cohort.isGarrisoned()) {
                 // A routed garrison abandons its post; successful defenders stay at the altar.
-                if (!won || data.isRouting() || data.hasEscaped()) {
+                if (fleeing) {
                     cohort.setIsGarrisoned(false);
                     cohort.setGarrisonedSettlementId(null);
-                    cohort.setStoredPosition(retreat);
                 }
-            } else cohort.setStoredPosition(!won || data.isRouting() || data.hasEscaped() ? retreat : position);
-            if (army != null && (cohort.isGarrisoned() || won && (data.isRouting() || data.hasEscaped()) || !cohort.isAlive())) {
+            } else cohort.setStoredPosition(position);
+            if (fleeing && cohort.isAlive()) cohort.beginRetreat(retreat, opponent);
+            if (army != null && (cohort.isGarrisoned() || wasGarrisoned && fleeing || won && fleeing || !cohort.isAlive())) {
                 army.removeCohortId(cohort.getCohortId());
                 cohort.setAssignedArmyId(null);
             }
         }
-        if (army != null) manager.syncCohortPositions(army);
+        if (army != null) {
+            if (!army.isViable(manager)) army.finishRetreat();
+            manager.syncCohortPositions(army);
+        }
     }
     private void notifyOnlinePlayers(BattleSession session, Army attacker, Army defender, ServerLevel level) {
         OpenBattleMapPayload payload = new OpenBattleMapPayload(session.getBattleId(), attacker.getArmyId(), defender.getArmyId());

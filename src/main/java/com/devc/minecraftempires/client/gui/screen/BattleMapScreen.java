@@ -3,6 +3,7 @@ package com.devc.minecraftempires.client.gui.screen;
 import com.devc.minecraftempires.client.ClientNetworking;
 import com.devc.minecraftempires.client.gui.widget.BattleGridWidget;
 import com.devc.minecraftempires.client.map.ClientBattleData;
+import com.devc.minecraftempires.client.map.ClientMapData;
 import com.devc.minecraftempires.network.packet.BattleCommandPayload;
 import com.devc.minecraftempires.network.packet.RequestSpectatePayload;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
@@ -48,6 +49,10 @@ public final class BattleMapScreen extends Screen {
             var data = ClientBattleData.get();
             for (UUID id : grid.getSelectedCohortIds()) if (data.canControl(data.cohorts().get(id))) send(id, "WITHDRAW");
         }).bounds(6, height - 90, panelWidth - 12, 20).build());
+        addRenderableWidget(Button.builder(ClientMapData.terrainViewButton(true), b -> {
+            ClientMapData.cycleTerrainView(true);
+            b.setMessage(ClientMapData.terrainViewButton(true));
+        }).bounds(6, height - 136, panelWidth - 12, 20).build());
         addRenderableWidget(Button.builder(Component.literal("Auto-resolve"), b -> onClose())
                 .tooltip(Tooltip.create(Component.literal("Leave this battle. It resolves from the current troops once all viewers leave for 10 seconds.")))
                 .bounds(6, height - 68, panelWidth - 12, 20).build());
@@ -73,7 +78,7 @@ public final class BattleMapScreen extends Screen {
         graphics.centeredText(font, Component.literal("Attacker " + attackers + "  |  Defender " + defenders),
                 panelWidth + (width - panelWidth) / 2, 8, 0xFFF3F5F7);
         if (grid != null) grid.render(graphics, font, mouseX, mouseY, partialTick);
-        var cohort = grid == null ? null : data.cohorts().get(grid.getFirstSelectedCohortId());
+        var cohort = grid == null ? null : data.getCohort(grid.getFirstSelectedCohortId());
         if (cohort == null) {
             text(graphics, "Select a formation", 30, 0xFFAAB4BE);
             text(graphics, "on the battlefield.", 42, 0xFFAAB4BE);
@@ -97,7 +102,7 @@ public final class BattleMapScreen extends Screen {
         super.extractRenderState(graphics, mouseX, mouseY, partialTick);
     }
     private void text(GuiGraphicsExtractor graphics, String value, int y, int color) {
-        if (y < height - 115) graphics.text(font, Component.literal(value), 7, y, color);
+        if (y < height - 139) graphics.text(font, Component.literal(value), 7, y, color);
     }
     @Override public boolean mouseClicked(MouseButtonEvent event, boolean doubleClick) {
         if (super.mouseClicked(event, doubleClick)) return true;

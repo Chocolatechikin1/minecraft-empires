@@ -6,6 +6,7 @@ import org.joml.Vector2d;
 import java.util.ArrayDeque;
 import java.util.Queue;
 import java.util.UUID;
+import java.util.function.UnaryOperator;
 
 //data for a single cohort in a battle
 /** A battle snapshot; health is surviving soldiers / original formation strength. */
@@ -24,6 +25,7 @@ public class CohortData {
     private boolean withdrawing;
     private boolean escaped;
     private int withdrawalSteps;
+    private boolean automaticAdvance;
     private final Vector2d position;
     private final Vector2d previousPosition;
     private final Queue<Vector2d> movementWaypoints = new ArrayDeque<>();
@@ -45,25 +47,29 @@ public class CohortData {
     public static CohortData fromCohort(Cohort cohort, double x, double z) {
         CohortData data = new CohortData(cohort.getCohortId(), cohort.getType().name(),
                 cohort.getMaxSoldiers(), cohort.getMorale(), cohort.getSpeed() / 50.0,
-                cohort.getStrength(), cohort.getEndurance(), x, z);
+                cohort.getStrength(), cohort.getEffectiveEndurance(), x, z);
         data.currentHealth = cohort.getSoldierCount();
         data.routing = cohort.isRouting() || cohort.getMorale() == 0;
         return data;
     }
 
     public void tickMovement() {
+        tickMovement(UnaryOperator.identity());
+    }
+    /** The battle resolves swept movement against other formation bodies before committing a step. */
+    public void tickMovement(UnaryOperator<Vector2d> resolveMovement) {
         previousPosition.set(position);
         if (!isAlive() || escaped) return;
         if (withdrawalSteps > 0) { withdrawalSteps--; return; }
         if (movementWaypoints.isEmpty() || (engaged && !routing && !withdrawing)) return;
         Vector2d target = movementWaypoints.peek();
         double step = speed * (routing ? 1.25 : 1.0);
-        if (position.distance(target) <= step) {
-            position.set(target);
+        Vector2d next = position.distance(target) <= step ? new Vector2d(target)
+                : new Vector2d(target).sub(position).normalize().mul(step).add(position);
+        position.set(resolveMovement.apply(next));
+        if (position.distanceSquared(target) < 1.0e-8) {
             movementWaypoints.poll();
             if ((routing || withdrawing) && movementWaypoints.isEmpty()) escaped = true;
-        } else {
-            position.add(new Vector2d(target).sub(position).normalize().mul(step));
         }
     }
 
@@ -91,7 +97,12 @@ public class CohortData {
         engaged = value;
     }
     public void queueWaypoint(double x, double z) {
+        automaticAdvance = false;
         if (movementWaypoints.size() < 64) movementWaypoints.add(new Vector2d(x, z));
+    }
+    public boolean isAutomaticallyAdvancing() { return automaticAdvance; }
+    public void advanceToward(double x, double z) {
+        clearOrders(); queueWaypoint(x, z); automaticAdvance = true;
     }
     public void setRetreatWaypoint(double x, double z) {
         if (escaped) return;
@@ -109,7 +120,7 @@ public class CohortData {
         previousPosition.set(position);
         clearOrders();
     }
-    public void clearOrders() { movementWaypoints.clear(); }
+    public void clearOrders() { movementWaypoints.clear(); automaticAdvance = false; }
     public UUID getCohortId() { return cohortId; }
     public String getType() { return type; }
     public int getCurrentHealth() { return currentHealth; }

@@ -2,6 +2,17 @@ package com.devc.minecraftempires.client.map;
 
 import com.devc.minecraftempires.network.packet.MapDataPayload;
 import net.minecraft.world.level.ChunkPos;
+import com.devc.minecraftempires.client.ClientNetworking;
+import com.devc.minecraftempires.network.packet.RequestMapDataPayload;
+import com.mojang.blaze3d.platform.NativeImage;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.Font;
+import net.minecraft.client.gui.GuiGraphicsExtractor;
+import net.minecraft.client.renderer.texture.DynamicTexture;
+import net.minecraft.network.chat.Component;
+import net.minecraft.resources.Identifier;
+import net.minecraft.world.level.material.MapColor;
+import java.util.Comparator;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -31,8 +42,269 @@ public final class ClientMapData {
     }
 
     public static void accept(MapDataPayload payload) {
+        if (!Objects.equals(snapshot.viewerStateId(), payload.viewerStateId())) setTerrainState(payload.viewerStateId());
         snapshot = Snapshot.from(payload, VERSION_COUNTER.incrementAndGet());
     }
+
+    //terrain view toggle: these are local styles over the same server-surveyed pixels.
+    //3 styles selected: stylized (default), topographic (elevation), atlas (political)
+    public enum TerrainView {
+        STYLIZED("stylized"), TOPOGRAPHIC("topographic"), ATLAS("atlas");
+        private final String key;
+        TerrainView(String key) { this.key = key; }
+        public Component label() { return Component.translatable("gui.minecraftempires.map.view." + key); }
+        public TerrainView next() { return values()[(ordinal() + 1) % values().length]; }
+    }
+    private static TerrainView empireView = TerrainView.STYLIZED, battleView = TerrainView.STYLIZED;
+    public static TerrainView terrainView(boolean battle) { return battle ? battleView : empireView; }
+    public static Component terrainViewButton(boolean battle) {
+        return Component.translatable("gui.minecraftempires.map.view", terrainView(battle).label());
+    }
+    public static void cycleTerrainView(boolean battle) {
+        if (battle) battleView = battleView.next(); else empireView = empireView.next();
+    }
+
+    // Local overlay preferences affect drawing only. Ownership can join this set when its control is added.
+    public enum MapLayer { ROADS }
+    private static final java.util.EnumSet<MapLayer> visibleLayers = java.util.EnumSet.allOf(MapLayer.class);
+    public static boolean isLayerVisible(MapLayer layer) { return visibleLayers.contains(layer); }
+    public static void toggleLayer(MapLayer layer) {
+        if (!visibleLayers.remove(layer)) visibleLayers.add(layer);
+    }
+
+    //terrain cache for backend/server side: CPU samples and GPU textures have separate bounds, including a smaller fine-detail budget.
+    private static final int MAX_TERRAIN_TILES = 768, MAX_FINE_TILES = 64;
+    private static final Map<MapDataPayload.TerrainKey, MapDataPayload.TerrainTile> terrainTiles = new LinkedHashMap<>(128, .75f, true);
+    private static final Map<TextureKey, Identifier> terrainTextures = new LinkedHashMap<>(128, .75f, true);
+    private static final Map<MapDataPayload.TerrainKey, Long> terrainRequests = new LinkedHashMap<>();
+    private static UUID terrainState;
+    private static long nextTerrainRequest, textureSerial;
+
+    public static void setTerrainState(UUID stateId) {
+        if (!Objects.equals(terrainState, stateId)) {
+            clearTerrain(); terrainState = stateId;
+        }
+    }
+    public static void clearTerrain() {
+        var manager = Minecraft.getInstance().getTextureManager();
+        for (Identifier texture : terrainTextures.values()) manager.release(texture);
+        terrainTextures.clear(); terrainTiles.clear(); terrainRequests.clear();
+        terrainState = null; nextTerrainRequest = 0;
+    }
+    public static void acceptTerrain(MapDataPayload.TerrainPayload payload) {
+        // Management snapshots provide membership even if a battle opens before the empire map.
+        UUID membership = ClientManagementData.get().stateId();
+        if (!Objects.equals(membership, payload.stateId())) return;
+        if (terrainState != null && !terrainState.equals(payload.stateId())) return;
+        terrainState = payload.stateId();
+        for (var tile : payload.tiles()) {
+            MapDataPayload.TerrainTile previous = terrainTiles.put(tile.key(), tile);
+            if (previous == null || previous.version() != tile.version()) releaseTerrainTextures(tile.key());
+        }
+        while (terrainTiles.size() > MAX_TERRAIN_TILES) removeTerrainTile(terrainTiles.keySet().iterator().next());
+        while (terrainTiles.keySet().stream().filter(key -> key.step() == 1).count() > MAX_FINE_TILES) {
+            var oldest = terrainTiles.keySet().stream().filter(key -> key.step() == 1).findFirst().orElseThrow();
+            removeTerrainTile(oldest);
+        }
+    }
+    private static void removeTerrainTile(MapDataPayload.TerrainKey key) {
+        terrainTiles.remove(key); releaseTerrainTextures(key);
+    }
+    private static void releaseTerrainTextures(MapDataPayload.TerrainKey key) {
+        var iterator = terrainTextures.entrySet().iterator();
+        while (iterator.hasNext()) {
+            var entry = iterator.next();
+            if (entry.getKey().tile.equals(key)) {
+                Minecraft.getInstance().getTextureManager().release(entry.getValue()); iterator.remove();
+            }
+        }
+    }
+
+    //terrain renderer: both widgets pass a camera in world blocks, so borders and units stay aligned
+    //shared with all 3 views
+    public static void renderTerrain(GuiGraphicsExtractor graphics, Font font, int x, int y, int width, int height,
+            double centerX, double centerZ, double pixelsPerBlock, UUID battleId) {
+        TerrainView view = terrainView(battleId != null);
+        int step = pixelsPerBlock >= .75 ? 1 : pixelsPerBlock >= .09 ? 4 : 16;
+        int background = view == TerrainView.ATLAS ? 0xFFC6B99C : view == TerrainView.TOPOGRAPHIC ? 0xFF273431 : 0xFF202D35;
+        graphics.fill(x, y, x + width, y + height, background);
+        trimTerrainTextures();
+        double minX = centerX - width / (2.0 * pixelsPerBlock), maxX = centerX + width / (2.0 * pixelsPerBlock);
+        double minZ = centerZ - height / (2.0 * pixelsPerBlock), maxZ = centerZ + height / (2.0 * pixelsPerBlock);
+        List<MapDataPayload.TerrainKey> wanted = visibleTerrainKeys(minX, maxX, minZ, maxZ, step, centerX, centerZ);
+        requestVisibleTerrain(wanted, battleId);
+        int[] textureBudget = {4};
+        // Existing coarse tiles remain visible while the sharper tiles arrive after a zoom change.
+        for (int detail : new int[]{16, 4, 1}) {
+            if (detail < step) continue;
+            for (var key : visibleTerrainKeys(minX, maxX, minZ, maxZ, detail, centerX, centerZ)) {
+                var tile = terrainTiles.get(key);
+                if (tile == null) continue;
+                Identifier texture = terrainTexture(tile, view, textureBudget);
+                if (texture == null) continue;
+                int left = (int) Math.round(x + width / 2.0 + (key.tileX() * (double) key.blocks() - centerX) * pixelsPerBlock);
+                int top = (int) Math.round(y + height / 2.0 + (key.tileZ() * (double) key.blocks() - centerZ) * pixelsPerBlock);
+                int right = (int) Math.round(x + width / 2.0 + ((key.tileX() + 1.0) * key.blocks() - centerX) * pixelsPerBlock);
+                int bottom = (int) Math.round(y + height / 2.0 + ((key.tileZ() + 1.0) * key.blocks() - centerZ) * pixelsPerBlock);
+                float edge = 1f / key.side();
+                graphics.blit(texture, left, top, right, bottom, edge, 1 - edge, edge, 1 - edge);
+            }
+        }
+        if (font != null && ClientManagementData.get().stateId() != null
+                && !wanted.isEmpty() && wanted.stream().noneMatch(terrainTiles::containsKey)) {
+            String loading = font.plainSubstrByWidth(Component.translatable("gui.minecraftempires.map.terrain_loading").getString(), width - 20);
+            graphics.fill(x + 6, y + 38, x + 16 + font.width(loading), y + 51, 0xBB111820);
+            graphics.text(font, Component.literal(loading), x + 11, y + 41, 0xFFE5E5D9);
+        }
+    }
+
+    //terrain rendering: determine which tiles are visible in the current viewport, sorted by distance to the center for progressive loading
+    private static List<MapDataPayload.TerrainKey> visibleTerrainKeys(double minX, double maxX, double minZ,
+            double maxZ, int step, double centerX, double centerZ) {
+        int blocks = step == 16 ? 1024 : 256;
+        int minTileX = Math.max(-117188, (int) Math.floor(minX / blocks));
+        int maxTileX = Math.min(117188, (int) Math.floor(maxX / blocks));
+        int minTileZ = Math.max(-117188, (int) Math.floor(minZ / blocks));
+        int maxTileZ = Math.min(117188, (int) Math.floor(maxZ / blocks));
+        List<MapDataPayload.TerrainKey> result = new ArrayList<>();
+        // Defensive viewport bounds avoid an accidental enormous camera producing unbounded work.
+        if ((long) (maxTileX - minTileX + 1) * (maxTileZ - minTileZ + 1) > 4096) return result;
+        for (int tz = minTileZ; tz <= maxTileZ; tz++) for (int tx = minTileX; tx <= maxTileX; tx++)
+            result.add(new MapDataPayload.TerrainKey(tx, tz, step));
+        result.sort(Comparator.comparingDouble(key -> {
+            double dx = (key.tileX() + .5) * blocks - centerX, dz = (key.tileZ() + .5) * blocks - centerZ;
+            return dx * dx + dz * dz;
+        }));
+        return result;
+    }
+
+    //terrain rendering: request the server to send any tiles that are visible but not yet cached, with a rate limit to avoid flooding the server
+    private static void requestVisibleTerrain(List<MapDataPayload.TerrainKey> visible, UUID battleId) {
+        if (ClientManagementData.get().stateId() == null) return;
+        long now = System.currentTimeMillis();
+        if (now < nextTerrainRequest) return;
+        nextTerrainRequest = now + 300;
+        List<RequestMapDataPayload.TerrainRequest> requests = new ArrayList<>();
+        for (var key : visible) {
+            var tile = terrainTiles.get(key);
+            long previous = terrainRequests.getOrDefault(key, 0L);
+            if (now - previous < (tile == null ? 1500 : 4000)) continue;
+            requests.add(new RequestMapDataPayload.TerrainRequest(key, tile == null ? Long.MIN_VALUE : tile.version()));
+            terrainRequests.put(key, now);
+            if (requests.size() == RequestMapDataPayload.RequestTerrainPayload.MAX_TILES) break;
+        }
+        while (terrainRequests.size() > 4096) terrainRequests.remove(terrainRequests.keySet().iterator().next());
+        ClientNetworking.requestTerrain(battleId, requests);
+    }
+
+    // Release old textures before submitting this frame, never while a submitted quad still references one.
+    private static void trimTerrainTextures() {
+        while (terrainTextures.size() > MAX_TERRAIN_TILES
+                || terrainTextures.keySet().stream().filter(key -> key.tile.step() == 1).count() > MAX_FINE_TILES) {
+            var key = terrainTextures.keySet().iterator().next();
+            Minecraft.getInstance().getTextureManager().release(terrainTextures.remove(key));
+        }
+    }
+
+    //for the stylized, topographic, and atlas views, generate a texture for the given tile and view, caching it for reuse. If the texture budget is exceeded, return null to avoid overloading the GPU.
+    private static Identifier terrainTexture(MapDataPayload.TerrainTile tile, TerrainView view, int[] budget) {
+        TextureKey key = new TextureKey(tile.key(), view);
+        Identifier existing = terrainTextures.get(key);
+        if (existing != null) return existing;
+        if (budget[0]-- <= 0) return null;
+        int side = tile.key().side();
+        NativeImage image = new NativeImage(side, side, false);
+        for (int z = 0; z < side; z++) for (int x = 0; x < side; x++)
+            image.setPixel(x, z, terrainPixel(tile, view, x, z));
+        Identifier id = Identifier.fromNamespaceAndPath("minecraftempires", "terrain/runtime_" + textureSerial++);
+        DynamicTexture texture = new DynamicTexture(() -> id.toString(), image);
+        Minecraft.getInstance().getTextureManager().register(id, texture);
+        terrainTextures.put(key, id); return id;
+    }
+
+    // PALETTES AND RELIEF: use global sample coordinates for paper grain, avoiding visible tile boundaries.
+    private static int terrainPixel(MapDataPayload.TerrainTile tile, TerrainView view, int x, int z) {
+        int side = tile.key().side(), index = z * side + x;
+        int wx = tile.key().tileX() * tile.key().blocks() + (x - 1) * tile.key().step();
+        int wz = tile.key().tileZ() * tile.key().blocks() + (z - 1) * tile.key().step();
+        int grain = Math.floorMod(wx * 73428767 ^ wz * 912931, 7) - 3;
+        if (!tile.knownAt(index)) {
+            int unknown = view == TerrainView.ATLAS ? 0xBFB297 : view == TerrainView.TOPOGRAPHIC ? 0x273431 : 0x202D35;
+            return shade(unknown, 1 + grain * .006);
+        }
+        int flags = tile.features()[index] & 255, height = tile.heightAt(index);
+        boolean water = (flags & MapDataPayload.TERRAIN_WATER) != 0;
+        int source = MapColor.byId(tile.colors()[index] & 63).col;
+        int color;
+        if (view == TerrainView.TOPOGRAPHIC) {
+            color = water ? 0x537F99 : elevationColor(height);
+        } else if (view == TerrainView.ATLAS) {
+            color = water ? 0x70878A : (flags & MapDataPayload.TERRAIN_FOREST) != 0 ? 0xAFAC86 : 0xD8C9A5;
+            if ((flags & MapDataPayload.TERRAIN_STRUCTURE) != 0) color = 0x9B8B70;
+        } else {
+            color = blend(source, 0x8B9279, .30);
+            if (water) color = 0x427D9B;
+            else if ((flags & MapDataPayload.TERRAIN_FOREST) != 0) color = blend(source, 0x547655, .45);
+            else if ((flags & MapDataPayload.TERRAIN_SNOW) != 0) color = 0xD5DCD1;
+            else if ((flags & MapDataPayload.TERRAIN_SAND) != 0) color = 0xC7B58B;
+        }
+        if ((flags & MapDataPayload.TERRAIN_LAVA) != 0) color = view == TerrainView.ATLAS ? 0x9B7553 : 0xB4653C;
+        int west = z * side + Math.max(0, x - 1), north = Math.max(0, z - 1) * side + x;
+        double relief = 0;
+        if (!water && tile.knownAt(west) && tile.knownAt(north)) {
+            relief = Math.clamp((tile.heightAt(west) + tile.heightAt(north) - 2.0 * height)
+                    / (tile.key().step() * 2.0), -2, 2);
+        }
+        color = shade(color, 1 + relief * .065 + grain * .003);
+        if (view != TerrainView.STYLIZED && !water) {
+            int interval = tile.key().step() == 16 ? 20 : 10;
+            int band = Math.floorDiv(height, interval);
+            boolean contour = tile.knownAt(west) && (tile.features()[west] & MapDataPayload.TERRAIN_WATER) == 0
+                    && band != Math.floorDiv(tile.heightAt(west), interval)
+                    || tile.knownAt(north) && (tile.features()[north] & MapDataPayload.TERRAIN_WATER) == 0
+                    && band != Math.floorDiv(tile.heightAt(north), interval);
+            if (contour) color = blend(color, view == TerrainView.ATLAS ? 0x8D7959 : 0x455346, .55) & 0xFFFFFF;
+        }
+        return 0xFF000000 | color;
+    }
+
+    //coloring for stylized option (check if accurate)
+    private static int elevationColor(int height) {
+        if (height < 64) return blend(0x739779, 0xA9B48B, Math.clamp((height + 64) / 128.0, 0, 1));
+        if (height < 128) return blend(0xA9B48B, 0xC2B38B, (height - 64) / 64.0);
+        if (height < 192) return blend(0xC2B38B, 0xB69D87, (height - 128) / 64.0);
+        return blend(0xB69D87, 0xDBD9CD, Math.clamp((height - 192) / 128.0, 0, 1));
+    }
+
+    //blend two colors together by a given amount, returning the resulting color
+    private static int blend(int first, int second, double amount) {
+        int red = (int) ((first >> 16 & 255) * (1 - amount) + (second >> 16 & 255) * amount);
+        int green = (int) ((first >> 8 & 255) * (1 - amount) + (second >> 8 & 255) * amount);
+        int blue = (int) ((first & 255) * (1 - amount) + (second & 255) * amount);
+        return red << 16 | green << 8 | blue;
+    }
+    //darken a color by a given amount, returning the resulting color
+    private static int shade(int color, double amount) {
+        int red = Math.clamp((int) ((color >> 16 & 255) * amount), 0, 255);
+        int green = Math.clamp((int) ((color >> 8 & 255) * amount), 0, 255);
+        int blue = Math.clamp((int) ((color & 255) * amount), 0, 255);
+        return 0xFF000000 | red << 16 | green << 8 | blue;
+    }
+
+    //for topographic view: terrain height lookup - given world coordinates, find the corresponding terrain tile and return the height at that location, or null if unknown
+    public static Integer terrainHeight(double worldX, double worldZ) {
+        int wx = (int) Math.floor(worldX), wz = (int) Math.floor(worldZ);
+        for (int step : new int[]{1, 4, 16}) {
+            int blocks = step == 16 ? 1024 : 256;
+            var key = new MapDataPayload.TerrainKey(Math.floorDiv(wx, blocks), Math.floorDiv(wz, blocks), step);
+            var tile = terrainTiles.get(key);
+            if (tile == null) continue;
+            int index = (Math.floorMod(wz, blocks) / step + 1) * key.side() + Math.floorMod(wx, blocks) / step + 1;
+            if (tile.knownAt(index)) return tile.heightAt(index);
+        }
+        return null;
+    }
+    private record TextureKey(MapDataPayload.TerrainKey tile, TerrainView view) {}
 
     public record ProvinceAnchor(
             String settlementId,
@@ -56,6 +328,9 @@ public final class ClientMapData {
             Map<String, MapDataPayload.SettlementSummary> settlementsById,
             List<ProvinceAnchor> provinceAnchors,
             List<MapDataPayload.BreachAlert> breachAlerts,
+            List<MapDataPayload.RoadSummary> roads,
+            List<MapDataPayload.CampSummary> camps,
+            boolean logisticsTruncated,
             int minChunkX,
             int maxChunkX,
             int minChunkZ,
@@ -73,6 +348,7 @@ public final class ClientMapData {
                     Map.of(),
                     List.of(),
                     List.of(),
+                    List.of(), List.of(), false,
                     0,
                     0,
                     0,
@@ -94,6 +370,9 @@ public final class ClientMapData {
                         indexSettlements(payload == null ? List.of() : payload.settlements()),
                         List.of(),
                         payload == null ? List.of() : List.copyOf(payload.breachAlerts()),
+                        payload == null ? List.of() : List.copyOf(payload.roads()),
+                        payload == null ? List.of() : List.copyOf(payload.camps()),
+                        payload != null && payload.logisticsTruncated(),
                         0,
                         0,
                         0,
@@ -146,6 +425,9 @@ public final class ClientMapData {
                     settlements,
                     List.copyOf(anchors),
                     List.copyOf(payload.breachAlerts()),
+                    List.copyOf(payload.roads()),
+                    List.copyOf(payload.camps()),
+                    payload.logisticsTruncated(),
                     minX,
                     maxX,
                     minZ,
@@ -270,11 +552,9 @@ public final class ClientMapData {
 
         //uses hashing to group chunks by their settlement ID, accumulating the sum of their coordinates and garrison status for later use in calculating province anchors
         Map<String, Accumulator> groups = new HashMap<>();
-        Set<Long> unorganizedChunks = new java.util.HashSet<>();
         for (MapDataPayload.MapChunkData chunk : chunks.values()) {
             String settlementId = chunk.settlementId();
             if (settlementId == null || settlementId.isBlank()) {
-                unorganizedChunks.add(chunk.packedChunkPos());
                 continue;
             }
             ChunkPos position = ChunkPos.unpack(chunk.packedChunkPos());
@@ -332,87 +612,8 @@ public final class ClientMapData {
             ));
         }
 
-        addUnorganizedAnchors(chunks, unorganizedChunks, anchors);
         anchors.sort((left, right) -> left.displayName().compareToIgnoreCase(right.displayName()));
         return anchors;
-    }
-
-    //handles unorganized chunks that aren't part of a settlement
-    private static void addUnorganizedAnchors(
-            Map<Long, MapDataPayload.MapChunkData> chunks,
-            Set<Long> unvisited,
-            List<ProvinceAnchor> anchors
-    ) {
-        int componentIndex = 0;
-        while (!unvisited.isEmpty()) {
-            long seed = unvisited.iterator().next();
-            unvisited.remove(seed);
-
-            //use BFS to find all connected and unorganized chunks
-            java.util.ArrayDeque<Long> queue = new java.util.ArrayDeque<>();
-            queue.add(seed);
-            MapDataPayload.MapChunkData seedChunk = chunks.get(seed);
-            UUID stateId = seedChunk.ownerStateId();
-            long sumX = 0;
-            long sumZ = 0;
-            int count = 0;
-            boolean garrisoned = false;
-
-            while (!queue.isEmpty()) { //if statisfied, add to the province anchor list
-                long packed = queue.removeFirst();
-                MapDataPayload.MapChunkData current = chunks.get(packed);
-                if (current == null || !stateId.equals(current.ownerStateId())) {
-                    continue;
-                }
-
-                ChunkPos position = ChunkPos.unpack(packed);
-                sumX += position.x();
-                sumZ += position.z();
-                count++;
-                garrisoned |= current.garrisoned();
-
-                addUnorganizedNeighbor(position.x(), position.z() - 1, stateId, chunks, unvisited, queue);
-                addUnorganizedNeighbor(position.x() + 1, position.z(), stateId, chunks, unvisited, queue);
-                addUnorganizedNeighbor(position.x(), position.z() + 1, stateId, chunks, unvisited, queue);
-                addUnorganizedNeighbor(position.x() - 1, position.z(), stateId, chunks, unvisited, queue);
-            }
-
-            if (count > 0) {
-                anchors.add(new ProvinceAnchor(
-                        "unorganized:" + stateId + ":" + componentIndex++,
-                        "Unorganized Territory",
-                        stateId,
-                        (double) sumX / count + 0.5,
-                        (double) sumZ / count + 0.5,
-                        false,
-                        garrisoned,
-                        false
-                ));
-            }
-        }
-    }
-
-    //handles adding neighboring unorganized chunks to the BFS queue for processing, ensuring that all connected unorganized chunks are grouped together
-    private static void addUnorganizedNeighbor(
-            int x,
-            int z,
-            UUID stateId,
-            Map<Long, MapDataPayload.MapChunkData> chunks,
-            Set<Long> unvisited,
-            java.util.ArrayDeque<Long> queue
-    ) {
-        long packed = new ChunkPos(x, z).pack();
-        if (!unvisited.contains(packed)) {
-            return;
-        }
-
-        MapDataPayload.MapChunkData neighbor = chunks.get(packed);
-        if (neighbor != null
-                && neighbor.settlementId().isBlank()
-                && stateId.equals(neighbor.ownerStateId())) {
-            unvisited.remove(packed);
-            queue.addLast(packed);
-        }
     }
 
     private static String abbreviatedId(String settlementId) {

@@ -13,9 +13,9 @@
   "minecraftempires.configuration.magicNumber": "Magic Number",
 
   "key.category.minecraftempires.empire_management": "Minecraft Empires",
-  "key.minecraftempires.open_map": "Open Empire Map",
+  "key.minecraftempires.open_map": "Open Map",
 
-  "gui.minecraftempires.map.title": "Empire Map",
+  "gui.minecraftempires.map.title": "Map",
   "gui.minecraftempires.map.awaiting_data": "Awaiting map data...",
   "gui.minecraftempires.map.no_state": "No state membership found.",
   "gui.minecraftempires.map.reset": "Reset",
@@ -23,5 +23,20 @@
   "gui.minecraftempires.map.close": "Close",
   "gui.minecraftempires.map.inventory_button": "Map",
 
-  "message.minecraftempires.border_breach": "Border breach by %1$s near chunk %2$s, %3$s!"
+  "message.minecraftempires.border_breach": "Border breach by %1$s near chunk %2$s, %3$s!",
+
+  "gui.minecraftempires.map.view": "View: %s",
+  "gui.minecraftempires.map.view.stylized": "Stylized",
+  "gui.minecraftempires.map.view.topographic": "Topographic",
+  "gui.minecraftempires.map.view.atlas": "Parchment atlas",
+  "gui.minecraftempires.map.terrain_loading": "Surveying available terrain...",
+  "gui.minecraftempires.map.elevation": "Ground elevation: %s",
+
+  "gui.minecraftempires.map.unassigned": "Unassigned land",
+  "gui.minecraftempires.map.unassigned.description": "Claimed territory without an assigned settlement.",
+  "gui.minecraftempires.map.controls": "Controls",
+  "gui.minecraftempires.map.controls.general": "Left-click: select or inspect. Drag: pan. Wheel over map: zoom. Wheel over this panel: scroll.",
+  "gui.minecraftempires.map.controls.selection": "Right-click: clear territory selection.",
+  "gui.minecraftempires.map.controls.military": "Right-click on map: march. Shift + right-click: queue a waypoint. Escape: clear unit selection.",
+  "gui.minecraftempires.map.controls.foreign": "Escape: clear unit selection."
 }

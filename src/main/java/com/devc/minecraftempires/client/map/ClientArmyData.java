@@ -7,6 +7,8 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
+import java.util.List;
+import java.util.ArrayList;
 
 //client side data store for the army map, storing the current state of legions and armies on the map
 //legions are standalone legions with available cohorts, while armies are operational army groupings actively on the map
@@ -29,10 +31,12 @@ public final class ClientArmyData {
 
             //army data
             Map<UUID, ArmyMapPayload.ArmySummary> armiesById,
-            Map<Long, UUID> armiesByChunk
+            Map<Long, UUID> armiesByChunk,
+            Map<UUID, ArmyMapPayload.CohortSummary> cohortsById,
+            Map<Long, List<UUID>> cohortsByChunk
     ) {
         static Snapshot empty() {
-            return new Snapshot(Map.of(), Map.of(), Map.of(), Map.of());
+            return new Snapshot(Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
         }
 
         //returns a snapshot of the current state of legions and armies on the map, based on the given payload from the server
@@ -41,6 +45,8 @@ public final class ClientArmyData {
             Map<Long, UUID>                          legionsByChunk = new HashMap<>();
             Map<UUID, ArmyMapPayload.ArmySummary>   armiesById   = new HashMap<>();
             Map<Long, UUID>                          armiesByChunk = new HashMap<>();
+            Map<UUID, ArmyMapPayload.CohortSummary> cohortsById = new HashMap<>();
+            Map<Long, List<UUID>> cohortsByChunk = new HashMap<>();
 
             for (ArmyMapPayload.LegionSummary s : payload.legions()) {
                 legionsById.put(s.legionId(), s);
@@ -51,16 +57,23 @@ public final class ClientArmyData {
                 armiesById.put(s.armyId(), s);
                 armiesByChunk.put(s.packedChunkPos(), s.armyId());
             }
+            for (var c : payload.cohorts()) {
+                cohortsById.put(c.cohortId(), c);
+                cohortsByChunk.computeIfAbsent(ChunkPos.containing(c.position()).pack(), ignored -> new ArrayList<>()).add(c.cohortId());
+            }
+            cohortsByChunk.replaceAll((chunk, ids) -> ids.stream().sorted().toList());
 
             return new Snapshot(
                     Collections.unmodifiableMap(legionsById),
                     Collections.unmodifiableMap(legionsByChunk),
                     Collections.unmodifiableMap(armiesById),
-                    Collections.unmodifiableMap(armiesByChunk)
+                    Collections.unmodifiableMap(armiesByChunk),
+                    Collections.unmodifiableMap(cohortsById), Collections.unmodifiableMap(cohortsByChunk)
             );
         }
 
-        public boolean hasAnyUnits() { return !legionsById.isEmpty() || !armiesById.isEmpty(); }
+        public boolean hasAnyUnits() { return !legionsById.isEmpty() || !armiesById.isEmpty() || !cohortsById.isEmpty(); }
+        public List<UUID> getCohortIdsAtChunk(int x, int z) { return cohortsByChunk.getOrDefault(new ChunkPos(x, z).pack(), List.of()); }
 
         @Deprecated
         public boolean hasArmies() { return !armiesById.isEmpty(); }

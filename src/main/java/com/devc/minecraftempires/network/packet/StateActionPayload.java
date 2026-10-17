@@ -1,6 +1,7 @@
 package com.devc.minecraftempires.network.packet;
 
 import com.devc.minecraftempires.MinecraftEmpires;
+import com.devc.minecraftempires.army.LogisticsManager;
 import com.devc.minecraftempires.network.ModNetworking;
 import com.devc.minecraftempires.state.StateData;
 import com.devc.minecraftempires.state.StateManager;
@@ -17,18 +18,44 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
 import java.util.UUID;
+import java.util.ArrayList;
+import java.util.List;
 
 /** All state mutations are authenticated against current server ownership. */
-public record StateActionPayload(String action, UUID targetId, BlockPos position, String text) implements CustomPacketPayload {
+public record StateActionPayload(String action, UUID targetId, BlockPos position, String text,
+        List<BlockPos> routePoints) implements CustomPacketPayload {
     public static final Type<StateActionPayload> TYPE = new Type<>(Identifier.fromNamespaceAndPath(MinecraftEmpires.MODID, "state_action"));
     public static final StreamCodec<RegistryFriendlyByteBuf, StateActionPayload> STREAM_CODEC = StreamCodec.ofMember(StateActionPayload::write, StateActionPayload::new);
-    public StateActionPayload(RegistryFriendlyByteBuf buf) { this(buf.readUtf(32), buf.readUUID(), buf.readBlockPos(), buf.readUtf(80)); }
-    private void write(RegistryFriendlyByteBuf buf) { buf.writeUtf(action, 32); buf.writeUUID(targetId); buf.writeBlockPos(position); buf.writeUtf(text, 80); }
+    public static final int MAX_ROUTE_POINTS = 64;
+    public StateActionPayload {
+        routePoints = routePoints.stream().map(BlockPos::immutable).toList();
+        if (routePoints.size() > MAX_ROUTE_POINTS) throw new IllegalArgumentException("Too many road control points");
+    }
+    public StateActionPayload(String action, UUID targetId, BlockPos position, String text) {
+        this(action, targetId, position, text, List.of());
+    }
+    public StateActionPayload(RegistryFriendlyByteBuf buf) { this(buf.readUtf(32), buf.readUUID(), buf.readBlockPos(), buf.readUtf(80), readRoute(buf)); }
+    private void write(RegistryFriendlyByteBuf buf) {
+        buf.writeUtf(action, 32); buf.writeUUID(targetId); buf.writeBlockPos(position); buf.writeUtf(text, 80);
+        buf.writeVarInt(routePoints.size()); routePoints.forEach(buf::writeBlockPos);
+    }
+    private static List<BlockPos> readRoute(RegistryFriendlyByteBuf buf) {
+        int count = buf.readVarInt();
+        if (count < 0 || count > MAX_ROUTE_POINTS) throw new IllegalArgumentException("Invalid road control point count");
+        List<BlockPos> points = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) points.add(buf.readBlockPos());
+        return points;
+    }
     @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
 
     public static void handle(StateActionPayload payload, IPayloadContext context) {
         context.enqueueWork(() -> {
             if (!(context.player() instanceof ServerPlayer player)) return;
+            // Clearing private inspection is safe in any dimension, including a world-transition callback.
+            if (payload.action.equals("SELECT_SUPPLY") && payload.targetId.equals(new UUID(0, 0))) {
+                LogisticsManager.clearPlayer(player.getUUID());
+                return;
+            }
             if (player.level() != player.level().getServer().overworld()) {
                 player.sendSystemMessage(Component.literal("Manage your state from the Overworld."));
                 return;
@@ -38,6 +65,14 @@ public record StateActionPayload(String action, UUID targetId, BlockPos position
             if (payload.action.equals("FOUND")) {
                 player.sendSystemMessage(Component.literal(manager.confirmFounding(player, payload.position, payload.text)));
                 ModNetworking.sendSnapshots(player);
+                return;
+            }
+            // Inspecting an owned route is read-only; state members can inspect without leader privileges.
+            if (payload.action.equals("SELECT_SUPPLY") && state != null) {
+                String result = LogisticsManager.get(player.level()).handleAction(payload.action, player, state,
+                        payload.targetId, payload.routePoints);
+                if (!result.isBlank()) player.sendSystemMessage(Component.literal(result));
+                ModNetworking.sendSupplySelectionSnapshot(player);
                 return;
             }
             if (state == null || !player.getUUID().equals(state.getLeaderId())) {
@@ -52,6 +87,8 @@ public record StateActionPayload(String action, UUID targetId, BlockPos position
                         payload.action.equals("CHOOSE_REPUBLIC") ? StateTier.REPUBLIC : StateTier.EMPIRE)
                         ? "Government chosen permanently." : "Your state has not met the requirements for this choice.";
                 case "DECLARE_WAR", "GRANT_PASSAGE", "REVOKE_PASSAGE", "OFFER_PEACE", "ACCEPT_PEACE" -> diplomacy(player, manager, state, payload);
+                case "BUILD_ROAD", "REMOVE_ROAD", "CREATE_CAMP", "DISMANTLE_CAMP" ->
+                        LogisticsManager.get(player.level()).handleAction(payload.action, player, state, payload.targetId, payload.routePoints);
                 default -> "Unknown state action.";
             };
             manager.setDirty();
@@ -65,6 +102,7 @@ public record StateActionPayload(String action, UUID targetId, BlockPos position
         String clean = StateManager.cleanName(name);
         if (clean.isBlank()) return "Choose a settlement name first.";
         settlement.setSettlementName(clean);
+        manager.markLogisticsChanged(); // Refresh the source name retained in cached supply routes.
         return "Settlement renamed to " + clean + ".";
     }
     private static String deposit(ServerPlayer player, StateData state, String amountText) {

@@ -27,6 +27,7 @@ public class ClaimManager extends SavedData {
     private final Map<ChunkPos, ChunkData> claims = new HashMap<>();
     private final Map<String, ChunkPos> settlementCenters = new HashMap<>();
     private final Map<UUID, Integer> claimCounts = new HashMap<>();
+    private long topologyRevision;
 
     //codec and type for saving/loading
     private static final Codec<ClaimManager> CODEC = CompoundTag.CODEC.xmap(ClaimManager::fromTag, ClaimManager::toTag);
@@ -40,13 +41,13 @@ public class ClaimManager extends SavedData {
         ChunkData old = claims.put(pos, new ChunkData(owner, settlement, garrisoned, tier));
         if (old != null && old.getOwnerUUID() != null) claimCounts.merge(old.getOwnerUUID(), -1, Integer::sum);
         claimCounts.merge(owner, 1, Integer::sum);
-        setDirty();
+        markTopologyChanged();
     }
     public void removeClaim(ChunkPos pos) {
         ChunkData old = claims.remove(pos);
         if (old != null) {
             if (old.getOwnerUUID() != null) claimCounts.merge(old.getOwnerUUID(), -1, Integer::sum);
-            setDirty();
+            markTopologyChanged();
         }
     }
     public void rebuildClaimCounts() {
@@ -60,24 +61,41 @@ public class ClaimManager extends SavedData {
     public Map<ChunkPos, ChunkData> getClaimsView() { return Collections.unmodifiableMap(claims); }
     public Map<String, ChunkPos> getSettlementCentersView() { return Collections.unmodifiableMap(settlementCenters); }
     public int getClaimCountForState(UUID state) { return claimCounts.getOrDefault(state, 0); }
+    public long getTopologyRevision() { return topologyRevision; }
+    /** Also called after direct claim-owner updates such as settlement capture. */
+    public void markTopologyChanged() { topologyRevision++; setDirty(); }
     public double getChunkDistance(ChunkPos a, ChunkPos b) { return Math.hypot((double) a.x() - b.x(), (double) a.z() - b.z()); }
     public double getProtectiveRadius(int ignoredTier) { return StateBalance.SETTLEMENT_RADIUS / 16.0; }
+    public double getProtectiveRadius(SettlementData settlement) { return settlement.getProtectiveRadius() / 16.0; }
     
     //settlement center management
-    public void registerSettlementCenter(String settlement, ChunkPos pos) { settlementCenters.put(settlement, pos); setDirty(); }
-    public void removeSettlementCenter(String settlement) { if (settlementCenters.remove(settlement) != null) setDirty(); }
+    public void registerSettlementCenter(String settlement, ChunkPos pos) { settlementCenters.put(settlement, pos); markTopologyChanged(); }
+    public void removeSettlementCenter(String settlement) { if (settlementCenters.remove(settlement) != null) markTopologyChanged(); }
     public void clearAllClaimsForState(UUID state) {
-        if (claims.values().removeIf(data -> state.equals(data.getOwnerUUID()))) { rebuildClaimCounts(); setDirty(); }
+        if (claims.values().removeIf(data -> state.equals(data.getOwnerUUID()))) { rebuildClaimCounts(); markTopologyChanged(); }
     }
-    public void clearAllClaimsForSettlement(String settlement) {
-        if (claims.values().removeIf(data -> settlement.equals(data.getSettlementID()))) { rebuildClaimCounts(); setDirty(); }
+    /** Disbanding a settlement releases its administration, not its state's ownership of the land. */
+    public void releaseSettlementClaims(String settlement) {
+        if (settlement == null || settlement.isBlank()) return;
+        boolean changed = settlementCenters.remove(settlement) != null;
+        for (ChunkData data : claims.values()) {
+            if (!settlement.equals(data.getSettlementID())) continue;
+            // Retain each current owner, including any chunks since captured by another state.
+            data.setSettlementID("");
+            data.setIsGarrisoned(false);
+            data.setSettlementTier(0);
+            changed = true;
+        }
+        // Ownership/counts are unchanged, but settlement-dependent map/supply caches must refresh.
+        if (changed) markTopologyChanged();
     }
 
     /** Do not force world generation merely to sample water on the map's distant edge. */
     //land claim checker
     public static boolean isClaimableLand(ServerLevel level, ChunkPos chunk) {
         BlockPos sample = new BlockPos(chunk.x() * 16 + 8, 64, chunk.z() * 16 + 8);
-        // If the chunk is not generated, we cannot determine if it is claimable. This prevents players from claiming ungenerated chunks.
+        // If the chunk is not available, we cannot determine if it is claimable. The
+        // existing abstract claim fallback permits it without generating remote chunks.
         if (!level.getWorldBorder().isWithinBounds(sample)) return false;
         return !level.hasChunkAt(sample) || (!level.getBiome(sample).is(BiomeTags.IS_OCEAN) && !level.getBiome(sample).is(BiomeTags.IS_RIVER));
     }
@@ -105,7 +123,7 @@ public class ClaimManager extends SavedData {
         // Older saves had a 3x3 footprint. Protection still uses the agreed radius even
         // when a nearby chunk lacks the settlement id; it never silently grants land.
         for (SettlementData settlement : states.getAllSettlements()) {
-            if (!attacker.equals(settlement.getOwningStateId()) && StateManager.isInSettlementFootprint(settlement.getCenterAltarPos(), pos)) return true;
+            if (!attacker.equals(settlement.getOwningStateId()) && StateManager.isInSettlementFootprint(settlement, pos)) return true;
         }
         return false;
     }
@@ -113,7 +131,7 @@ public class ClaimManager extends SavedData {
     //campaign area claimer, with additional checks for nearby enemies and settlement capture.
     public List<ChunkPos> claimCampaignArea(ServerLevel level, Army army) {
         List<ChunkPos> acquired = new ArrayList<>();
-        if (level != level.getServer().overworld() || !army.isOnCampaign() || army.isEngaged()) return acquired;
+        if (level != level.getServer().overworld() || !army.isOnCampaign() || army.isEngaged() || army.isRetreating()) return acquired;
         UUID attacker = army.getOwningStateId();
         StateManager states = StateManager.get(level);
         if (states.getState(attacker) == null) return acquired;

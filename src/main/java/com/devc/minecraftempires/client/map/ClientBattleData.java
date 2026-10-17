@@ -14,32 +14,34 @@ public final class ClientBattleData {
 
     public record Snapshot(UUID battleId, Map<UUID, CohortRenderState> cohorts, String battlePhase,
                            int deploymentTicksRemaining, int ticksSinceLastPacket, String result,
-                           boolean controlsAttacker, boolean controlsDefender) {
-        static Snapshot empty() { return new Snapshot(null, Map.of(), "DEPLOYMENT", 0, 0, "ONGOING", false, false); }
+                           boolean controlsAttacker, boolean controlsDefender, double mapOriginX, double mapOriginZ) {
+        static Snapshot empty() { return new Snapshot(null, Map.of(), "DEPLOYMENT", 0, 0, "ONGOING", false, false, 0, 0); }
         static Snapshot from(BattleSyncPayload payload, Snapshot previous) {
             Map<UUID, CohortRenderState> map = new LinkedHashMap<>();
             for (var cohort : payload.attackerCohorts()) map.put(cohort.cohortId(), CohortRenderState.from(cohort, previous.cohorts.get(cohort.cohortId()), true));
             for (var cohort : payload.defenderCohorts()) map.put(cohort.cohortId(), CohortRenderState.from(cohort, previous.cohorts.get(cohort.cohortId()), false));
             return new Snapshot(payload.battleId(), Collections.unmodifiableMap(map), payload.battlePhase(),
-                    payload.deploymentTicksRemaining(), 0, payload.result(), payload.controlsAttacker(), payload.controlsDefender());
+                    payload.deploymentTicksRemaining(), 0, payload.result(), payload.controlsAttacker(), payload.controlsDefender(), payload.mapOriginX(), payload.mapOriginZ());
         }
         public Snapshot advanceTick() {
-            return new Snapshot(battleId, cohorts, battlePhase, deploymentTicksRemaining, Math.min(5, ticksSinceLastPacket + 1), result, controlsAttacker, controlsDefender);
+            return new Snapshot(battleId, cohorts, battlePhase, deploymentTicksRemaining, Math.min(5, ticksSinceLastPacket + 1), result, controlsAttacker, controlsDefender, mapOriginX, mapOriginZ);
         }
         public boolean hasData() { return battleId != null; }
         public boolean isDeploymentPhase() { return "DEPLOYMENT".equals(battlePhase) && !hasEnded(); }
         public boolean hasEnded() { return !"ONGOING".equals(result); }
+        // No selection is normal on the first frame; Map.of() rejects null lookup keys.
+        public CohortRenderState getCohort(UUID id) { return id == null ? null : cohorts.get(id); }
         public boolean canControl(CohortRenderState cohort) {
             return cohort != null && !hasEnded() && (cohort.isAttacker ? controlsAttacker : controlsDefender);
         }
         public double getRenderX(UUID id, float partialTick) {
-            CohortRenderState cohort = cohorts.get(id);
+            CohortRenderState cohort = getCohort(id);
             if (cohort == null) return 0;
             double t = Math.clamp((ticksSinceLastPacket + partialTick) / 5.0, 0, 1);
             return cohort.prevX + (cohort.currentX - cohort.prevX) * t;
         }
         public double getRenderZ(UUID id, float partialTick) {
-            CohortRenderState cohort = cohorts.get(id);
+            CohortRenderState cohort = getCohort(id);
             if (cohort == null) return 0;
             double t = Math.clamp((ticksSinceLastPacket + partialTick) / 5.0, 0, 1);
             return cohort.prevZ + (cohort.currentZ - cohort.prevZ) * t;
