@@ -13,9 +13,9 @@
   "minecraftempires.configuration.magicNumber": "Magic Number",
 
   "key.category.minecraftempires.empire_management": "Minecraft Empires",
-  "key.minecraftempires.open_map": "Open Empire Map",
+  "key.minecraftempires.open_map": "Open Map",
 
-  "gui.minecraftempires.map.title": "Empire Map",
+  "gui.minecraftempires.map.title": "Map",
   "gui.minecraftempires.map.awaiting_data": "Awaiting map data...",
   "gui.minecraftempires.map.no_state": "No state membership found.",
   "gui.minecraftempires.map.reset": "Reset",

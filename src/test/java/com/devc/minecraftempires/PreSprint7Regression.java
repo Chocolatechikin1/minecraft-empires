@@ -34,6 +34,7 @@ public final class PreSprint7Regression {
         logisticsPacketBounds();
         supplyReservesAndReadiness();
         settlementFootprintMigrationAndPreparation();
+        settlementAbandonmentRetainsClaims();
         logisticsTopologyRevisions();
         strategicSupplyEngine();
         roadGeometryAndBoundaryMovement();
@@ -730,6 +731,72 @@ public final class PreSprint7Regression {
         fresh.advanceSupplyPreparationTicks(StateBalance.TICKS_PER_DAY);
         check(fresh.isSupplyReady() && fresh.getSupplyPreparationTicks() == 0,
                 "A fully prepared source clamps at zero and becomes eligible");
+    }
+
+    private static void settlementAbandonmentRetainsClaims() {
+        var claims = new com.devc.minecraftempires.territory.ClaimManager();
+        UUID owner = UUID.randomUUID(), neighbor = UUID.randomUUID();
+        String settlement = UUID.randomUUID().toString(), otherSettlement = UUID.randomUUID().toString();
+        var inherited = new net.minecraft.world.level.ChunkPos(-4, 3);
+        var founded = new net.minecraft.world.level.ChunkPos(-3, 3);
+        var captured = new net.minecraft.world.level.ChunkPos(-2, 3);
+        var otherTown = new net.minecraft.world.level.ChunkPos(8, 10);
+        var unassigned = new net.minecraft.world.level.ChunkPos(9, 10);
+        var foreign = new net.minecraft.world.level.ChunkPos(10, 10);
+        claims.setClaim(inherited, owner, "", false, 1);
+        claims.setClaim(inherited, owner, settlement, true, 2); // Settlement founded on existing state land.
+        claims.setClaim(founded, owner, settlement, false, 1); // Land acquired when the town was founded.
+        claims.setClaim(captured, neighbor, settlement, true, 2); // Stale association after a foreign capture.
+        claims.setClaim(otherTown, owner, otherSettlement, true, 2);
+        claims.setClaim(unassigned, owner, "", false, 1);
+        claims.setClaim(foreign, neighbor, "", false, 1);
+        claims.registerSettlementCenter(settlement, inherited);
+        claims.registerSettlementCenter(otherSettlement, otherTown);
+        var beforeOtherTown = claims.getClaim(otherTown).toNBT();
+        var beforeUnassigned = claims.getClaim(unassigned).toNBT();
+        int ownedBefore = claims.getClaimCountForState(owner), foreignBefore = claims.getClaimCountForState(neighbor);
+        long revision = claims.getTopologyRevision();
+        claims.releaseSettlementClaims(settlement);
+        check(claims.isClaimed(inherited) && owner.equals(claims.getClaim(inherited).getOwnerUUID()),
+                "Abandoning a settlement returns previously owned land to the owner's unassigned territory");
+        check(claims.isClaimed(founded) && owner.equals(claims.getClaim(founded).getOwnerUUID()),
+                "Land acquired by founding also remains with the settlement's state");
+        check(java.util.List.of(inherited, founded, captured).stream().map(claims::getClaim)
+                        .allMatch(c -> c.getSettlementID().isEmpty() && !c.isGarrisoned() && c.getSettlementTier() == 0),
+                "Released chunks lose settlement/garrison/tier metadata without losing claims");
+        check(neighbor.equals(claims.getClaim(captured).getOwnerUUID()) && neighbor.equals(claims.getClaim(foreign).getOwnerUUID()),
+                "Abandonment never takes chunks back from their current foreign owner");
+        check(claims.getClaimCountForState(owner) == ownedBefore && claims.getClaimCountForState(neighbor) == foreignBefore
+                        && claims.getClaimsView().size() == 6, "Settlement release preserves both states' claim counts and the full territory map");
+        check(beforeOtherTown.equals(claims.getClaim(otherTown).toNBT()) && beforeUnassigned.equals(claims.getClaim(unassigned).toNBT()),
+                "Other settlements and unrelated unassigned territory retain their original metadata");
+        check(!claims.getSettlementCentersView().containsKey(settlement) && claims.getSettlementCentersView().containsKey(otherSettlement),
+                "Only the removed settlement's map center disappears");
+        check(claims.getTopologyRevision() > revision, "Removing settlement administration invalidates map/supply topology");
+        revision = claims.getTopologyRevision();
+        claims.releaseSettlementClaims(settlement);
+        claims.releaseSettlementClaims(""); claims.releaseSettlementClaims(null);
+        check(claims.getTopologyRevision() == revision && beforeUnassigned.equals(claims.getClaim(unassigned).toNBT()),
+                "Repeated or empty settlement release cannot clear arbitrary state land or invalidate topology endlessly");
+        try {
+            var save = claims.getClass().getDeclaredMethod("toTag"); save.setAccessible(true);
+            var load = claims.getClass().getDeclaredMethod("fromTag", CompoundTag.class); load.setAccessible(true);
+            var restored = (com.devc.minecraftempires.territory.ClaimManager) load.invoke(null, save.invoke(claims));
+            check(owner.equals(restored.getClaim(inherited).getOwnerUUID()) && restored.getClaim(inherited).getSettlementID().isEmpty()
+                            && !restored.getSettlementCentersView().containsKey(settlement), "Save/reload preserves the returned state land and removed center");
+            check(restored.getClaimCountForState(owner) == ownedBefore && restored.getClaimCountForState(neighbor) == foreignBefore,
+                    "Claim counts remain correct when rebuilt from the saved released territory");
+            restored.clearAllClaimsForState(owner);
+            check(restored.getClaimCountForState(owner) == 0 && !restored.isClaimed(inherited)
+                            && restored.getClaimCountForState(neighbor) == foreignBefore,
+                    "Disbanding the entire state still removes its territory while retaining other states' land");
+        } catch (ReflectiveOperationException failure) { throw new AssertionError("Settlement release save/reload", failure); }
+        String rebuilt = UUID.randomUUID().toString();
+        claims.setClaim(inherited, owner, rebuilt, false, 1);
+        claims.registerSettlementCenter(rebuilt, inherited);
+        claims.releaseSettlementClaims(rebuilt);
+        check(owner.equals(claims.getClaim(inherited).getOwnerUUID()) && claims.getClaimCountForState(owner) == ownedBefore,
+                "Founding and abandoning again on retained land does not erode ownership");
     }
 
     private static void logisticsTopologyRevisions() {

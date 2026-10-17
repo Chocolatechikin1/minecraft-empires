@@ -159,7 +159,7 @@ public class StateManager extends SavedData {
         abandonedAltarPositions.remove(pos); pendingAltars.remove(pos); setDirty(); 
     }
 
-    //disband a settlement, removing it from the active settlements, releasing its garrison, and clearing its claims
+    //disband a settlement, removing it from the active settlements, releasing its garrison, and returning its land to unassigned state territory
     public void disbandSettlement(UUID id, ServerLevel level) {
         SettlementData settlement = activeSettlements.remove(id);
         if (settlement == null) return;
@@ -170,8 +170,7 @@ public class StateManager extends SavedData {
             state.removeSettlement(id);
             if (id.equals(state.getCapitalSettlementId())) state.setCapitalSettlementId(null);
         }
-        ClaimManager.get(level).clearAllClaimsForSettlement(id.toString());
-        ClaimManager.get(level).removeSettlementCenter(id.toString());
+        ClaimManager.get(level).releaseSettlementClaims(id.toString());
         markAltarAbandoned(settlement.getCenterAltarPos());
         refreshProgression(level);
         setDirty();

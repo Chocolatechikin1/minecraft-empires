@@ -74,8 +74,20 @@ public class ClaimManager extends SavedData {
     public void clearAllClaimsForState(UUID state) {
         if (claims.values().removeIf(data -> state.equals(data.getOwnerUUID()))) { rebuildClaimCounts(); markTopologyChanged(); }
     }
-    public void clearAllClaimsForSettlement(String settlement) {
-        if (claims.values().removeIf(data -> settlement.equals(data.getSettlementID()))) { rebuildClaimCounts(); markTopologyChanged(); }
+    /** Disbanding a settlement releases its administration, not its state's ownership of the land. */
+    public void releaseSettlementClaims(String settlement) {
+        if (settlement == null || settlement.isBlank()) return;
+        boolean changed = settlementCenters.remove(settlement) != null;
+        for (ChunkData data : claims.values()) {
+            if (!settlement.equals(data.getSettlementID())) continue;
+            // Retain each current owner, including any chunks since captured by another state.
+            data.setSettlementID("");
+            data.setIsGarrisoned(false);
+            data.setSettlementTier(0);
+            changed = true;
+        }
+        // Ownership/counts are unchanged, but settlement-dependent map/supply caches must refresh.
+        if (changed) markTopologyChanged();
     }
 
     /** Do not force world generation merely to sample water on the map's distant edge. */
