@@ -15,6 +15,7 @@ import net.neoforged.neoforge.network.handling.IPayloadContext;
 import net.neoforged.neoforge.network.registration.PayloadRegistrar;
 import com.devc.minecraftempires.network.packet.DispatchArmyPayload;
 import com.devc.minecraftempires.army.ArmyManager; 
+import com.devc.minecraftempires.army.LogisticsManager;
 import com.devc.minecraftempires.network.packet.DisbandArmyPayload;
 import com.devc.minecraftempires.network.packet.ComposeArmyPayload;
 import com.devc.minecraftempires.network.packet.DispatchLegionPayload;
@@ -38,9 +39,11 @@ public final class ModNetworking {
     private static final Map<UUID, Long> mapRequestCooldowns = new HashMap<>();
     private static final long MAP_REQUEST_COOLDOWN_MS = 2000L; // 2 seconds between map refreshes
     private static final Map<UUID, Long> terrainRequestCooldowns = new HashMap<>();
+    private static final Map<UUID, Long> supplySelectionCooldowns = new HashMap<>();
+    private static final long SUPPLY_SELECTION_COOLDOWN_MS = 200L;
 
     public static void registerPayloads(RegisterPayloadHandlersEvent event) {
-        PayloadRegistrar registrar = event.registrar("3");
+        PayloadRegistrar registrar = event.registrar("5");
         // Independent packets let the client reuse terrain while army positions keep updating.
         registrar.playToClient(MapDataPayload.TerrainPayload.TYPE, MapDataPayload.TerrainPayload.STREAM_CODEC);
         registrar.playToServer(RequestMapDataPayload.RequestTerrainPayload.TYPE,
@@ -135,6 +138,14 @@ public final class ModNetworking {
         PacketDistributor.sendToPlayer(player, MapDataService.buildArmyPayload(player));
         PacketDistributor.sendToPlayer(player, ManagementDataService.build(player));
     }
+    /** Selection is saved before this response is throttled; the next normal refresh always uses the latest target. */
+    public static void sendSupplySelectionSnapshot(ServerPlayer player) {
+        long now = System.currentTimeMillis();
+        Long previous = supplySelectionCooldowns.get(player.getUUID());
+        if (previous != null && now >= previous && now - previous < SUPPLY_SELECTION_COOLDOWN_MS) return;
+        supplySelectionCooldowns.put(player.getUUID(), now);
+        PacketDistributor.sendToPlayer(player, ManagementDataService.build(player));
+    }
     private static void handleTerrainRequest(RequestMapDataPayload.RequestTerrainPayload payload, IPayloadContext context) {
         context.enqueueWork(() -> {
             if (!(context.player() instanceof ServerPlayer player)) return;
@@ -146,6 +157,10 @@ public final class ModNetworking {
             if (response != null) PacketDistributor.sendToPlayer(player, response);
         });
     }
-    public static void clearPlayer(UUID id) { mapRequestCooldowns.remove(id); terrainRequestCooldowns.remove(id); }
-    public static void clearAll() { mapRequestCooldowns.clear(); terrainRequestCooldowns.clear(); }
+    public static void clearPlayer(UUID id) {
+        mapRequestCooldowns.remove(id); terrainRequestCooldowns.remove(id); supplySelectionCooldowns.remove(id); LogisticsManager.clearPlayer(id);
+    }
+    public static void clearAll() {
+        mapRequestCooldowns.clear(); terrainRequestCooldowns.clear(); supplySelectionCooldowns.clear(); LogisticsManager.clearAllSelections();
+    }
 }

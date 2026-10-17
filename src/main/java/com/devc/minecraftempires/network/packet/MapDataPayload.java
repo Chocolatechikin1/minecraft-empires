@@ -1,6 +1,7 @@
 package com.devc.minecraftempires.network.packet;
 
 import com.devc.minecraftempires.MinecraftEmpires;
+import net.minecraft.core.BlockPos;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
@@ -17,7 +18,10 @@ public record MapDataPayload( //weird ai formatting, i like it tho
         List<MapChunkData> chunks,
         List<StateSummary> states,
         List<SettlementSummary> settlements,
-        List<BreachAlert> breachAlerts
+        List<BreachAlert> breachAlerts,
+        List<RoadSummary> roads,
+        List<CampSummary> camps,
+        boolean logisticsTruncated
 ) implements CustomPacketPayload {
     //method to register the packet type with the network system
     public static final Type<MapDataPayload> TYPE = new Type<>(
@@ -37,6 +41,17 @@ public record MapDataPayload( //weird ai formatting, i like it tho
         states = List.copyOf(states);
         settlements = List.copyOf(settlements);
         breachAlerts = List.copyOf(breachAlerts);
+        roads = List.copyOf(roads);
+        camps = List.copyOf(camps);
+        if (roads.size() > MAX_ROAD_POINTS || camps.size() > MAX_VISIBLE_CAMPS
+                || roads.stream().mapToInt(road -> road.points().size()).sum() > MAX_ROAD_POINTS)
+            throw new IllegalArgumentException("Too much map infrastructure geometry");
+    }
+
+    // Existing snapshots/tests can omit infrastructure while the extended codec stays versioned.
+    public MapDataPayload(UUID viewerStateId, String viewerStateName, List<MapChunkData> chunks,
+            List<StateSummary> states, List<SettlementSummary> settlements, List<BreachAlert> breachAlerts) {
+        this(viewerStateId, viewerStateName, chunks, states, settlements, breachAlerts, List.of(), List.of(), false);
     }
 
     //constructor for deserializing the packet data from a buffer
@@ -47,7 +62,10 @@ public record MapDataPayload( //weird ai formatting, i like it tho
                 readList(buffer, MapChunkData::new),
                 readList(buffer, StateSummary::new),
                 readList(buffer, SettlementSummary::new),
-                readList(buffer, BreachAlert::new)
+                readList(buffer, BreachAlert::new),
+                readRoads(buffer),
+                readBoundedList(buffer, CampSummary::new, MAX_VISIBLE_CAMPS),
+                buffer.readBoolean()
         );
     }
 
@@ -59,6 +77,9 @@ public record MapDataPayload( //weird ai formatting, i like it tho
         writeList(buffer, states, StateSummary::write);
         writeList(buffer, settlements, SettlementSummary::write);
         writeList(buffer, breachAlerts, BreachAlert::write);
+        writeList(buffer, roads, RoadSummary::write);
+        writeList(buffer, camps, CampSummary::write);
+        buffer.writeBoolean(logisticsTruncated);
     }
 
     //method for getting the packet type
@@ -215,6 +236,46 @@ public record MapDataPayload( //weird ai formatting, i like it tho
         }
     }
 
+    public static final int MAX_ROAD_POINTS = 8192;
+    public static final int MAX_VISIBLE_CAMPS = 2048;
+
+    private static List<RoadSummary> readRoads(RegistryFriendlyByteBuf buffer) {
+        int count = buffer.readVarInt();
+        if (count < 0 || count > MAX_ROAD_POINTS) throw new IllegalArgumentException("Invalid road count");
+        List<RoadSummary> roads = new ArrayList<>(count);
+        int points = 0;
+        for (int i = 0; i < count; i++) {
+            RoadSummary road = new RoadSummary(buffer);
+            points += road.points().size();
+            if (points > MAX_ROAD_POINTS) throw new IllegalArgumentException("Too many road points");
+            roads.add(road);
+        }
+        return roads;
+    }
+
+    // A road can have several visible runs with the same ID. Never join across hidden or removed cells.
+    public record RoadSummary(UUID id, UUID ownerId, List<BlockPos> points) {
+        public RoadSummary {
+            points = points.stream().map(BlockPos::immutable).toList();
+            if (points.size() > MAX_ROAD_POINTS) throw new IllegalArgumentException("Road geometry too large");
+        }
+        public RoadSummary(RegistryFriendlyByteBuf buffer) {
+            this(buffer.readUUID(), buffer.readUUID(), readBoundedList(buffer, value -> value.readBlockPos(), MAX_ROAD_POINTS));
+        }
+        private void write(RegistryFriendlyByteBuf buffer) {
+            buffer.writeUUID(id); buffer.writeUUID(ownerId);
+            writeList(buffer, points, (point, b) -> b.writeBlockPos(point));
+        }
+    }
+
+    // Public markers carry no foreign stock, connection status or source information.
+    public record CampSummary(UUID id, UUID ownerId, BlockPos position) {
+        public CampSummary(RegistryFriendlyByteBuf buffer) { this(buffer.readUUID(), buffer.readUUID(), buffer.readBlockPos()); }
+        private void write(RegistryFriendlyByteBuf buffer) {
+            buffer.writeUUID(id); buffer.writeUUID(ownerId); buffer.writeBlockPos(position);
+        }
+    }
+
     //gets the interface
     @FunctionalInterface
     private interface Reader<T> {
@@ -304,7 +365,14 @@ public record MapDataPayload( //weird ai formatting, i like it tho
 
     //helper methods for reading and writing lists and nullable UUIDs
     private static <T> List<T> readList(RegistryFriendlyByteBuf buffer, Reader<T> reader) {
+        return readBoundedList(buffer, reader, Integer.MAX_VALUE);
+    }
+
+    private static <T> List<T> readBoundedList(RegistryFriendlyByteBuf buffer, Reader<T> reader, int maximum) {
         int size = buffer.readVarInt();
+        // Every record consumes bytes. Bound allocation by the actual packet rather than
+        // imposing a new territory limit that the legacy snapshot writer does not share.
+        if (size < 0 || size > maximum || size > buffer.readableBytes()) throw new IllegalArgumentException("Invalid map list size");
         List<T> values = new ArrayList<>(size); //use ArrayList for better performance when the size is known
         for (int index = 0; index < size; index++) {
             values.add(reader.read(buffer));//use the reader to read each value from the buffer and add it to the list

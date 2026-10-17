@@ -3,6 +3,8 @@ package com.devc.minecraftempires.network;
 import com.devc.minecraftempires.army.Army;
 import com.devc.minecraftempires.army.ArmyManager;
 import com.devc.minecraftempires.army.Legion;
+import com.devc.minecraftempires.army.Cohort;
+import com.devc.minecraftempires.army.LogisticsManager;
 import com.devc.minecraftempires.network.packet.ArmyMapPayload;
 import com.devc.minecraftempires.network.packet.MapDataPayload;
 import com.devc.minecraftempires.state.StateData;
@@ -68,7 +70,7 @@ public final class MapDataService {
     //builds the map data payload for a given player, applying fog-of-war
     public static MapDataPayload buildPayload(ServerPlayer player) {
         //get all player details and managers
-        ServerLevel level = player.level();
+        ServerLevel level = player.level().getServer().overworld();
         StateManager stateManager = StateManager.get(level);
         ClaimManager claimManager = ClaimManager.get(level);
         StateData viewerState = stateManager.getStateByPlayer(player.getUUID());
@@ -191,9 +193,44 @@ public final class MapDataService {
         settlementSummaries.sort(Comparator.comparing(MapDataPayload.SettlementSummary::settlementName,
                 String.CASE_INSENSITIVE_ORDER));
 
+        // Infrastructure uses the same current visibility mask as claims; never bridge unseen road cells.
+        LogisticsManager logistics = LogisticsManager.get(level);
+        List<MapDataPayload.RoadSummary> roads = new ArrayList<>();
+        int roadPointCount = 0;
+        boolean logisticsTruncated = false;
+        for (var road : logistics.getRoads().stream().sorted(Comparator.comparing(LogisticsManager.Road::id)).toList()) {
+            List<BlockPos> run = new ArrayList<>();
+            BlockPos previous = null;
+            for (BlockPos point : road.points()) {
+                long packed = new ChunkPos(point.getX() >> 4, point.getZ() >> 4).pack();
+                boolean visible = visibleChunkPositions.contains(packed) && road.cells().contains(packed);
+                boolean adjacent = previous == null || Math.abs((point.getX() >> 4) - (previous.getX() >> 4))
+                        + Math.abs((point.getZ() >> 4) - (previous.getZ() >> 4)) <= 1;
+                if (!visible || !adjacent || roadPointCount >= MapDataPayload.MAX_ROAD_POINTS) {
+                    if (!run.isEmpty()) {
+                        roads.add(new MapDataPayload.RoadSummary(road.id(), road.ownerId(), run));
+                        run = new ArrayList<>();
+                    }
+                    previous = null;
+                }
+                if (!visible) continue;
+                if (roadPointCount >= MapDataPayload.MAX_ROAD_POINTS) { logisticsTruncated = true; continue; }
+                run.add(point); roadPointCount++; previous = point;
+            }
+            if (!run.isEmpty()) roads.add(new MapDataPayload.RoadSummary(road.id(), road.ownerId(), run));
+        }
+        List<MapDataPayload.CampSummary> camps = new ArrayList<>();
+        for (var camp : logistics.getCamps().stream().sorted(Comparator.comparing(LogisticsManager.Camp::id)).toList()) {
+            long packed = new ChunkPos(camp.position().getX() >> 4, camp.position().getZ() >> 4).pack();
+            if (!viewerStateId.equals(camp.ownerId()) && !visibleChunkPositions.contains(packed)) continue;
+            if (camps.size() >= MapDataPayload.MAX_VISIBLE_CAMPS) { logisticsTruncated = true; continue; }
+            camps.add(new MapDataPayload.CampSummary(camp.id(), camp.ownerId(), camp.position()));
+        }
+
         return new MapDataPayload(viewerStateId, viewerState.getStateName(), visibleChunks,
                 stateSummaries, settlementSummaries,
-                BreachAlertService.getVisibleRecentAlerts(level, viewerStateId, visibleChunkPositions));
+                BreachAlertService.getVisibleRecentAlerts(level, viewerStateId, visibleChunkPositions),
+                roads, camps, logisticsTruncated);
     }
 
     //chunk function for compressing horizontal runs of chunks with the same metadata into a single entry with a run length, improving network efficiency
@@ -305,9 +342,9 @@ public final class MapDataService {
     }
 
     //builds the netwoek army map payload
-    //gives 2 lists: a legion summary and an army summary, which are used to display the player's own units on the map
+    //gives legion, army and independent cohort summaries, with movement orders only for the owner
     public static ArmyMapPayload buildArmyPayload(ServerPlayer player) {
-        ServerLevel level = player.level();
+        ServerLevel level = player.level().getServer().overworld();
         ArmyManager armyManager = ArmyManager.get(level);
         StateData viewerState = StateManager.get(level).getStateByPlayer(player.getUUID());
         if (viewerState == null) return ArmyMapPayload.empty();
@@ -315,17 +352,32 @@ public final class MapDataService {
         UUID viewerStateId = viewerState.getStateId();
         Set<BlockPos> origins = scoutingOrigins(armyManager, viewerStateId);
         ClaimManager claims = ClaimManager.get(level);
+        return buildArmyPayload(viewerStateId, armyManager, pos -> militaryVisible(pos, viewerStateId, claims, origins));
+    }
+
+    /** Build from actual formation bodies; shared by live snapshots and location/visibility regressions. */
+    public static ArmyMapPayload buildArmyPayload(UUID viewerStateId, ArmyManager armyManager, java.util.function.Predicate<BlockPos> foreignVisible) {
 
         //legion cohort list for legions wiith free cohorts, including their position, available soldiers, and average morale
         List<ArmyMapPayload.LegionSummary> legionSummaries = new ArrayList<>();
+        List<ArmyMapPayload.CohortSummary> cohortSummaries = new ArrayList<>();
         for (Legion legion : armyManager.getAllLegions()) {
-            if (!legion.hasAvailableCohorts()) continue;
-            BlockPos pos = legion.getStoredPosition();
-            if (!viewerStateId.equals(legion.getOwningStateId()) && !militaryVisible(pos, viewerStateId, claims, origins)) continue;
-            ChunkPos cp = new ChunkPos(pos.getX() >> 4, pos.getZ() >> 4);
-            legionSummaries.add(new ArmyMapPayload.LegionSummary(
-                    legion.getLegionId(), legion.getOwningStateId(), cp.pack(),
-                    legion.getAvailableSoldiers(), legion.getAverageMorale()));
+            boolean owned = viewerStateId.equals(legion.getOwningStateId());
+            var body = legion.getFieldCohorts();
+            Cohort anchor = legion.getFieldCohort();
+            if (anchor != null && (owned || foreignVisible.test(anchor.getStoredPosition()))) {
+                legionSummaries.add(new ArmyMapPayload.LegionSummary(legion.getLegionId(), legion.getOwningStateId(),
+                        ChunkPos.containing(anchor.getStoredPosition()).pack(), body.stream().mapToInt(Cohort::getSoldierCount).sum(),
+                        (int)body.stream().mapToInt(Cohort::getMorale).average().orElse(0),
+                        owned ? legion.getWaypoints().stream().limit(128).toList() : List.of()));
+            }
+            for (Cohort c : legion.allCohorts()) {
+                if (!c.isAlive() || c.isDeployed() || c.isGarrisoned() || body.contains(c)
+                        || !owned && !foreignVisible.test(c.getStoredPosition())) continue;
+                cohortSummaries.add(new ArmyMapPayload.CohortSummary(c.getCohortId(), legion.getOwningStateId(),
+                        owned ? legion.getLegionId() : new UUID(0, 0), c.getStoredPosition(), c.getSoldierCount(), c.getMorale(),
+                        owned && c.isRetreating(), owned ? c.getWaypoints().stream().limit(128).toList() : List.of()));
+            }
         }
 
         // Army summaries — all active Armies for this state
@@ -334,20 +386,20 @@ public final class MapDataService {
         for (Army army : armyManager.getAllArmies()) {
             BlockPos pos = army.getStoredPosition();
             boolean owned = viewerStateId.equals(army.getOwningStateId());
-            if (!owned && (!army.isViable(armyManager) || !militaryVisible(pos, viewerStateId, claims, origins))) continue;
+            if (!owned && (!army.isViable(armyManager) || !foreignVisible.test(pos))) continue;
             ChunkPos cp = new ChunkPos(pos.getX() >> 4, pos.getZ() >> 4);
             int maintenance = army.getTotalStrength(armyManager);
             String displayName = owned ? ordinalName(armyOrdinal++) + " Army" : "Foreign army";
             armySummaries.add(new ArmyMapPayload.ArmySummary(
                     army.getArmyId(), army.getOwningStateId(), cp.pack(),
-                    owned ? new ArrayList<>(army.getWaypoints()) : List.of(),
+                    owned ? army.getWaypoints().stream().limit(128).toList() : List.of(),
                     displayName,
                     army.getTotalStrength(armyManager),
                     army.getBattleMorale(armyManager),
                     owned ? maintenance : 0, army.isEngaged(), army.getCurrentBattleId(), army.isOnCampaign()));
         }
 
-        return new ArmyMapPayload(legionSummaries, armySummaries);
+        return new ArmyMapPayload(legionSummaries, armySummaries, cohortSummaries);
     }
 
     private static Set<BlockPos> scoutingOrigins(ArmyManager armies, UUID viewer) {
@@ -383,6 +435,18 @@ public final class MapDataService {
     }
 
     public static void clearTerrainRuntime() { TERRAIN_RUNTIMES.clear(); }
+
+    /** Reuse existing state-surveyed surface flags; unknown land never forces chunk loading/generation. */
+    public static boolean isKnownWaterOrLava(ServerLevel level, UUID stateId, BlockPos position) {
+        ServerLevel overworld = level.getServer().overworld();
+        Map<Long, SurveyedChunk> knowledge = TerrainSavedData.get(overworld).states.get(stateId);
+        if (knowledge == null) return false;
+        SurveyedChunk sample = knowledge.get(new ChunkPos(position.getX() >> 4, position.getZ() >> 4).pack());
+        if (sample == null) return false;
+        int flags = sample.features[(position.getZ() & 15) * 16 + (position.getX() & 15)];
+        return (flags & MapDataPayload.TERRAIN_KNOWN) != 0
+                && (flags & (MapDataPayload.TERRAIN_WATER | MapDataPayload.TERRAIN_LAVA)) != 0;
+    }
 
     public static void tickTerrain(ServerLevel level) {
         TerrainRuntime runtime = TERRAIN_RUNTIMES.computeIfAbsent(level, ignored -> new TerrainRuntime());

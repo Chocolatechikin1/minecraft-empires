@@ -13,8 +13,9 @@ import java.util.UUID;
 
 //army and legion metadata data container network class. server sends payloads to client
 //sends the current location, stats, and waypoints
-// 2 lists: legions that have at least 1 cohort and all active armies 
-public record ArmyMapPayload(List<LegionSummary> legions, List<ArmySummary> armies) implements CustomPacketPayload {
+// 3 lists: free legion bodies, active armies, and independently located cohorts
+public record ArmyMapPayload(List<LegionSummary> legions, List<ArmySummary> armies, List<CohortSummary> cohorts) implements CustomPacketPayload {
+    public ArmyMapPayload(List<LegionSummary> legions, List<ArmySummary> armies) { this(legions, armies, List.of()); }
     public static final Type<ArmyMapPayload> TYPE = new Type<>(Identifier.fromNamespaceAndPath(MinecraftEmpires.MODID, "army_map")); //initialize each packet with a UUID, allowing packet identification
     public static final StreamCodec<RegistryFriendlyByteBuf, ArmyMapPayload> STREAM_CODEC = StreamCodec.ofMember(ArmyMapPayload::write, ArmyMapPayload::new); //define the codec for serializing and deserializing the packet data
 
@@ -22,11 +23,14 @@ public record ArmyMapPayload(List<LegionSummary> legions, List<ArmySummary> armi
             UUID legionId,
             UUID ownerStateId,
             long packedChunkPos,
-            int availableSoldiers,  // soldiers from undeployed cohorts only
-            int averageMorale       // average morale across all cohorts
+            int availableSoldiers,  // soldiers physically present in the free legion body
+            int averageMorale,       // average morale of that field body
+            List<BlockPos> waypoints
     ) {
+        public LegionSummary { waypoints = checkedWaypoints(waypoints); }
+        public LegionSummary(UUID id, UUID owner, long chunk, int soldiers, int morale) { this(id, owner, chunk, soldiers, morale, List.of()); }
         public LegionSummary(RegistryFriendlyByteBuf buffer) {
-            this(buffer.readUUID(), buffer.readUUID(), buffer.readLong(), buffer.readVarInt(), buffer.readVarInt());
+            this(buffer.readUUID(), buffer.readUUID(), buffer.readLong(), buffer.readVarInt(), buffer.readVarInt(), readPath(buffer));
         }
 
         void write(RegistryFriendlyByteBuf buffer) {
@@ -35,6 +39,7 @@ public record ArmyMapPayload(List<LegionSummary> legions, List<ArmySummary> armi
             buffer.writeLong(packedChunkPos);
             buffer.writeVarInt(availableSoldiers);
             buffer.writeVarInt(averageMorale);
+            writePath(buffer, waypoints);
         }
     }
 
@@ -51,6 +56,7 @@ public record ArmyMapPayload(List<LegionSummary> legions, List<ArmySummary> armi
             UUID battleId,          // null if not engaged
             boolean isOnCampaign
     ) {
+        public ArmySummary { waypoints = checkedWaypoints(waypoints); }
         public ArmySummary(RegistryFriendlyByteBuf buffer) {
             this(
                     buffer.readUUID(),
@@ -84,20 +90,50 @@ public record ArmyMapPayload(List<LegionSummary> legions, List<ArmySummary> armi
         }
 
         private static List<BlockPos> readWaypoints(RegistryFriendlyByteBuf buffer) { //reads the list of waypoints from the buffer, returning a list of BlockPos objects
-            int size = buffer.readVarInt();
-            List<BlockPos> list = new ArrayList<>(size);
-            for (int i = 0; i < size; i++) list.add(buffer.readBlockPos());
-            return list;
+            return readPath(buffer);
         }
+    }
+
+    /** Independent formations keep their actual coordinates; only the owner receives marching orders. */
+    public record CohortSummary(UUID cohortId, UUID ownerStateId, UUID legionId, BlockPos position,
+            int soldiers, int morale, boolean retreating, List<BlockPos> waypoints) {
+        public CohortSummary { position = position.immutable(); waypoints = checkedWaypoints(waypoints); }
+        CohortSummary(RegistryFriendlyByteBuf b) {
+            this(b.readUUID(), b.readUUID(), b.readUUID(), b.readBlockPos(), b.readVarInt(), b.readVarInt(), b.readBoolean(), readPath(b));
+        }
+        void write(RegistryFriendlyByteBuf b) {
+            b.writeUUID(cohortId); b.writeUUID(ownerStateId); b.writeUUID(legionId); b.writeBlockPos(position);
+            b.writeVarInt(soldiers); b.writeVarInt(morale); b.writeBoolean(retreating); writePath(b, waypoints);
+        }
+    }
+    private static List<BlockPos> checkedWaypoints(List<BlockPos> points) {
+        if (points.size() > 128) throw new IllegalArgumentException("Too many movement waypoints");
+        return List.copyOf(points);
+    }
+    private static List<BlockPos> readPath(RegistryFriendlyByteBuf b) {
+        int count = b.readVarInt();
+        if (count < 0 || count > 128 || count > b.readableBytes() / 8) throw new IllegalArgumentException("Invalid movement path");
+        List<BlockPos> points = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) points.add(b.readBlockPos());
+        return points;
+    }
+    private static void writePath(RegistryFriendlyByteBuf b, List<BlockPos> points) {
+        b.writeVarInt(points.size()); for (BlockPos point : points) b.writeBlockPos(point);
+    }
+    private static int readCount(RegistryFriendlyByteBuf b) {
+        int count = b.readVarInt();
+        if (count < 0 || count > b.readableBytes()) throw new IllegalArgumentException("Invalid unit list size");
+        return count;
     }
 
     public ArmyMapPayload {
         legions = List.copyOf(legions);
         armies  = List.copyOf(armies);
+        cohorts = List.copyOf(cohorts);
     }
 
     public ArmyMapPayload(RegistryFriendlyByteBuf buffer) {
-        this(readLegionList(buffer), readArmyList(buffer));
+        this(readLegionList(buffer), readArmyList(buffer), readCohortList(buffer));
     }
 
     private void write(RegistryFriendlyByteBuf buffer) {
@@ -106,6 +142,7 @@ public record ArmyMapPayload(List<LegionSummary> legions, List<ArmySummary> armi
 
         buffer.writeVarInt(armies.size());
         for (ArmySummary s : armies) s.write(buffer);
+        buffer.writeVarInt(cohorts.size()); for (CohortSummary s : cohorts) s.write(buffer);
     }
 
     @Override
@@ -116,16 +153,22 @@ public record ArmyMapPayload(List<LegionSummary> legions, List<ArmySummary> armi
     }
 
     private static List<LegionSummary> readLegionList(RegistryFriendlyByteBuf buffer) {
-        int size = buffer.readVarInt();
+        int size = readCount(buffer);
         List<LegionSummary> list = new ArrayList<>(size);
         for (int i = 0; i < size; i++) list.add(new LegionSummary(buffer));
         return list;
     }
 
     private static List<ArmySummary> readArmyList(RegistryFriendlyByteBuf buffer) {
-        int size = buffer.readVarInt();
+        int size = readCount(buffer);
         List<ArmySummary> list = new ArrayList<>(size);
         for (int i = 0; i < size; i++) list.add(new ArmySummary(buffer));
+        return list;
+    }
+    private static List<CohortSummary> readCohortList(RegistryFriendlyByteBuf buffer) {
+        int size = readCount(buffer);
+        List<CohortSummary> list = new ArrayList<>(size);
+        for (int i = 0; i < size; i++) list.add(new CohortSummary(buffer));
         return list;
     }
 }
