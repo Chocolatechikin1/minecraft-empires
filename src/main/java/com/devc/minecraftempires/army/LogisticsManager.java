@@ -336,9 +336,9 @@ public final class LogisticsManager extends SavedData {
             String previous = previousWarnings.put(stateId, warning);
             if (!warning.equals(previous) && !(previous == null && warning.isEmpty())) {
                 states.notifyState(level, stateId, switch (warning) {
-                    case "exhausted" -> "Some formations have exhausted supply reserves. Restore a route, reach stocked camps or retreat.";
-                    case "reserves" -> "Some formations lost their supply connection and are using reserves.";
-                    default -> "Your formations' supply connections have been restored.";
+                    case "exhausted" -> "Some units have exhausted supply reserves. Restore a route, reach stocked camps or retreat.";
+                    case "reserves" -> "Some units have lost their supply connection and are using reserves.";
+                    default -> "Your units supply connections have been restored.";
                 });
             }
         }

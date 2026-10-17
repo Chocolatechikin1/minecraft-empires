@@ -78,7 +78,7 @@ public final class BattleMapScreen extends Screen {
         graphics.centeredText(font, Component.literal("Attacker " + attackers + "  |  Defender " + defenders),
                 panelWidth + (width - panelWidth) / 2, 8, 0xFFF3F5F7);
         if (grid != null) grid.render(graphics, font, mouseX, mouseY, partialTick);
-        var cohort = grid == null ? null : data.cohorts().get(grid.getFirstSelectedCohortId());
+        var cohort = grid == null ? null : data.getCohort(grid.getFirstSelectedCohortId());
         if (cohort == null) {
             text(graphics, "Select a formation", 30, 0xFFAAB4BE);
             text(graphics, "on the battlefield.", 42, 0xFFAAB4BE);

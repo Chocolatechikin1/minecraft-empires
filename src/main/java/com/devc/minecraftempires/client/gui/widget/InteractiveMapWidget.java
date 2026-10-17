@@ -3,9 +3,12 @@ package com.devc.minecraftempires.client.gui.widget;
 import com.devc.minecraftempires.client.ClientNetworking;
 import com.devc.minecraftempires.client.map.ClientArmyData;
 import com.devc.minecraftempires.client.map.ClientMapData;
+import com.devc.minecraftempires.client.map.ClientManagementData;
+import com.devc.minecraftempires.state.StateBalance;
 import com.devc.minecraftempires.network.packet.ArmyMapPayload;
 import com.devc.minecraftempires.network.packet.DispatchArmyPayload;
 import com.devc.minecraftempires.network.packet.DispatchLegionPayload;
+import com.devc.minecraftempires.network.packet.ComposeArmyPayload;
 import com.devc.minecraftempires.network.packet.MapDataPayload;
 import com.devc.minecraftempires.network.packet.DisbandArmyPayload; 
 import net.neoforged.neoforge.network.PacketDistributor; 
@@ -19,6 +22,10 @@ import net.neoforged.neoforge.client.network.ClientPacketDistributor;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.Objects;
 
 //primary class for rendering the interactive map, including panning, zooming, and displaying chunk ownership, settlements, and alerts
 public final class InteractiveMapWidget {
@@ -43,9 +50,20 @@ public final class InteractiveMapWidget {
     private boolean initializedViewport;
     private UUID viewportStateId;
 
-    //currently selected unit (Legion or Army UUID), null = nothing selected
+    //currently selected unit (Legion, Army or independent Cohort UUID), null = nothing selected
     private UUID selectedArmyId = null;
     private boolean selectedIsArmy = false;
+    private List<UUID> cohortOrderSelection = List.of();
+
+    // Road plans are client previews; the server validates ownership, geometry and price atomically.
+    private boolean roadPlanning, supplyOverlay;
+    private final List<BlockPos> roadPoints = new ArrayList<>();
+    private UUID selectedCampId;
+    private Object viewportWorld;
+    private int hoverX, hoverY;
+    private final List<int[]> occupiedLabels = new ArrayList<>();
+    private final List<MapLabel> pendingLabels = new ArrayList<>();
+    private static final float LABEL_SCALE = .75f;
 
     public InteractiveMapWidget(int x, int y, int width, int height) {
         setBounds(x, y, width, height);
@@ -58,10 +76,16 @@ public final class InteractiveMapWidget {
         this.height = Math.max(1, height);
     }
 
+    // Initialize the context before a management action; its first render must not clear the new mode.
+    public void refreshViewport() { refreshViewportForNewData(ClientMapData.get()); }
+
     //sets the center of the map to the specified chunk coordinates, clamping the zoom level to the allowed range
     public void render(GuiGraphicsExtractor graphics, Font font, int mouseX, int mouseY) {
         ClientMapData.Snapshot snapshot = ClientMapData.get();
         refreshViewportForNewData(snapshot);
+        hoverX = mouseX; hoverY = mouseY;
+        occupiedLabels.clear();
+        pendingLabels.clear();
 
         graphics.fill(x, y, x + width, y + height, 0xFF111820);
         graphics.enableScissor(x, y, x + width, y + height);
@@ -73,6 +97,7 @@ public final class InteractiveMapWidget {
         drawGrid(graphics);
         if (snapshot.hasData()) {
             drawTerritory(graphics, snapshot);
+            drawLogistics(graphics, font, snapshot);
             drawBreachAlerts(graphics, snapshot);
             drawProvinceLabelsAndMarkers(graphics, font, snapshot);
         } else {
@@ -87,6 +112,8 @@ public final class InteractiveMapWidget {
 
         //places cohort and army icons in front of the map
         drawArmies(graphics, font, snapshot);
+        drawDetachedCohorts(graphics, font, snapshot);
+        drawPendingLabels(graphics, font);
 
 
         graphics.disableScissor();
@@ -96,6 +123,7 @@ public final class InteractiveMapWidget {
         graphics.fill(x + width - 1, y, x + width, y + height, 0xFF485563);
 
         drawCoordinates(graphics, font, mouseX, mouseY);
+        drawMarkerTooltip(graphics, font, snapshot, mouseX, mouseY);
 
         //shows army info sidebar if an army is selected
         // (Removed in favor of top bar in MapScreen)
@@ -112,10 +140,13 @@ public final class InteractiveMapWidget {
         int iconSize = Math.max(6, Math.min(ARMY_ICON_BASE_PX, (int) zoom));
 
         //draws legions
-        for (ArmyMapPayload.LegionSummary legion : armies.legionsById().values()) {
+        for (ArmyMapPayload.LegionSummary legion : armies.legionsById().values().stream()
+                .sorted(Comparator.comparingInt(legion -> legion.legionId().equals(selectedArmyId) ? 0 : 1)).toList()) {
             ChunkPos chunkPos = ChunkPos.unpack(legion.packedChunkPos());
             int screenX = chunkToScreenX(chunkPos.x());
             int screenY = chunkToScreenY(chunkPos.z());
+            if (legion.legionId().equals(selectedArmyId) && !selectedIsArmy)
+                drawMovementPath(graphics, screenX + iconSize / 2, screenY + iconSize / 2, legion.waypoints());
             if (!intersects(screenX, screenY, iconSize, iconSize)) continue;
 
             boolean isViewer = snapshot.viewerStateId() != null && legion.ownerStateId().equals(snapshot.viewerStateId());
@@ -128,8 +159,9 @@ public final class InteractiveMapWidget {
                 String label = "L" + legion.availableSoldiers(); //here
                 int labelX = screenX + iconSize + 2;
                 int labelY = screenY + (iconSize / 2) - 4;
-                graphics.fill(labelX - 1, labelY - 1, labelX + font.width(label) + 2, labelY + 10, 0xAA111820); //shows the number of available soldiers in the legion next to the icon, colored in light gray
-                graphics.text(font, Component.literal(label), labelX, labelY, 0xFFCCCCCC);
+                //shows the number of available soldiers in the legion next to the icon, colored in light gray
+                queueMapLabel(label, labelX, labelY, 0xFFCCCCCC, false,
+                        legion.legionId().equals(selectedArmyId) ? 0 : nearMarker(screenX, screenY) ? 1 : 5);
             }
 
             // Yellow glow if selected
@@ -139,7 +171,8 @@ public final class InteractiveMapWidget {
         }
 
         //draws armies
-        for (ArmyMapPayload.ArmySummary army : armies.armiesById().values()) {
+        for (ArmyMapPayload.ArmySummary army : armies.armiesById().values().stream()
+                .sorted(Comparator.comparingInt(army -> army.armyId().equals(selectedArmyId) ? 0 : 1)).toList()) {
             ChunkPos chunkPos = ChunkPos.unpack(army.packedChunkPos());
             int screenX = chunkToScreenX(chunkPos.x());
             int screenY = chunkToScreenY(chunkPos.z());
@@ -200,9 +233,48 @@ public final class InteractiveMapWidget {
                 String label = army.displayName() + " \u00b7 " + army.troops(); //army.troops might be unncessary, mark for now TODO: 
                 int labelX = screenX + iconSize + 2;
                 int labelY = screenY + (iconSize / 2) - 4;
-                graphics.fill(labelX - 1, labelY - 1, labelX + font.width(label) + 2, labelY + 10, 0xAA111820);
-                graphics.text(font, Component.literal(label), labelX, labelY, 0xFFFFFFFF);
+                queueMapLabel(label, labelX, labelY, 0xFFFFFFFF, false,
+                        army.armyId().equals(selectedArmyId) ? 0 : nearMarker(screenX, screenY) ? 1 : 5);
             }
+        }
+    }
+
+    private void drawDetachedCohorts(GuiGraphicsExtractor graphics, Font font, ClientMapData.Snapshot snapshot) {
+        for (var c : ClientArmyData.get().cohortsById().values()) {
+            int px = worldScreenX(c.position()), py = worldScreenY(c.position());
+            boolean selected = c.cohortId().equals(selectedArmyId) || cohortOrderSelection.contains(c.cohortId());
+            if (intersects(px - 4, py - 4, 9, 9)) {
+                int color = armyIconColor(c.ownerStateId(), c.ownerStateId().equals(snapshot.viewerStateId()));
+                graphics.fill(px - 3, py - 3, px + 4, py + 4, color);
+                graphics.fill(px - 1, py - 1, px + 2, py + 2, 0xFF17232E);
+                if (selected) drawMask(graphics, px - 6, py - 6, px + 7, py + 7, 15, 0xFFFFE84A, 1);
+                if (zoom >= 12 && font != null) queueMapLabel("C " + c.soldiers(), px + 7, py - 3, color, false, selected ? 0 : 5);
+            }
+            if (selected) drawMovementPath(graphics, px, py, c.waypoints());
+        }
+    }
+    private void drawMovementPath(GuiGraphicsExtractor graphics, int lastX, int lastY, List<BlockPos> points) {
+        for (BlockPos point : points) {
+            int px = worldScreenX(point), py = worldScreenY(point);
+            drawDottedLine(graphics, lastX, lastY, px, py, 0xAAFFE84A);
+            graphics.fill(px - 2, py - 2, px + 2, py + 2, 0xFFFFE84A);
+            lastX = px; lastY = py;
+        }
+    }
+    public List<UUID> getCohortOrderSelection() { return cohortOrderSelection; }
+    public void selectUnit(UUID id) {
+        if (id == null) { clearSelectedArmy(); return; }
+        selectedArmyId = id; selectedIsArmy = ClientArmyData.get().armiesById().containsKey(id);
+        cohortOrderSelection = ClientArmyData.get().cohortsById().containsKey(id) ? List.of(id) : List.of();
+        selectedChunk = Long.MIN_VALUE; selectedCampId = null;
+    }
+    public void selectCohorts(List<UUID> ids) {
+        cohortOrderSelection = List.copyOf(ids); selectedArmyId = ids.isEmpty() ? null : ids.getFirst(); selectedIsArmy = false;
+        selectedChunk = Long.MIN_VALUE; selectedCampId = null;
+        var first = ClientManagementData.get().cohorts().stream().filter(c -> c.id().equals(selectedArmyId)).findFirst().orElse(null);
+        if (first != null) {
+            centerChunkX = first.position().getX() / 16.0; centerChunkZ = first.position().getZ() / 16.0;
+            initializedViewport = true;
         }
     }
 
@@ -335,8 +407,6 @@ public final class InteractiveMapWidget {
             Font font,
             ClientMapData.Snapshot snapshot
     ) {
-        Set<String> occupiedLabelSlots = new HashSet<>();
-
         for (ClientMapData.ProvinceAnchor anchor : snapshot.provinceAnchors()) {
             int markerX = chunkToScreenX(anchor.chunkX());
             int markerY = chunkToScreenY(anchor.chunkZ());
@@ -348,21 +418,199 @@ public final class InteractiveMapWidget {
                 drawSettlementMarker(graphics, markerX, markerY, anchor.capital(), anchor.garrisoned());
             }
 
-            // Keep capitals labelled in the overview; other province labels need a little more zoom.
-            if (zoom < 1.0 && !anchor.capital()) {
+            // Keep capitals labelled longer in the overview; every category hides at its widest zoom.
+            if (zoom < (anchor.capital() ? .9 : anchor.settlementMarker() ? 1.7 : 3.0)) {
                 continue;
             }
-
-            String slotKey = (markerX / 50) + ":" + (markerY / 16);
-            if (!occupiedLabelSlots.add(slotKey)) {
-                continue;
-            }
-
-            String label = trimToWidth(font, anchor.displayName(), 96);
             int labelY = markerY - (anchor.settlementMarker() ? (anchor.capital() ? 15 : 12) : 5);
-            graphics.centeredText(font, Component.literal(label), markerX + 1, labelY + 1, 0xE0000000);
-            graphics.centeredText(font, Component.literal(label), markerX, labelY, 0xFFF4F4F4);
+            var chosen = getSelectedChunk();
+            int priority = chosen != null && anchor.settlementId().equals(chosen.settlementId()) ? 0
+                    : nearMarker(markerX, markerY) ? 1 : anchor.capital() ? 2 : 3;
+            queueMapLabel(anchor.displayName(), markerX, labelY, 0xFFF4F4F4, true, priority);
         }
+    }
+
+    // Screen-space glyph bounds keep labels legible without letting the map zoom enlarge them.
+    private record MapLabel(String text, int x, int y, int color, boolean centered, int priority) {}
+    private void queueMapLabel(String text, int labelX, int labelY, int color, boolean centered, int priority) {
+        pendingLabels.add(new MapLabel(text, labelX, labelY, color, centered, priority));
+    }
+    private void drawPendingLabels(GuiGraphicsExtractor graphics, Font font) {
+        pendingLabels.sort(Comparator.comparingInt(MapLabel::priority));
+        for (MapLabel candidate : pendingLabels) {
+            String label = trimToWidth(font, candidate.text(), Math.max(1, (int) (Math.min(110, width - 10) / LABEL_SCALE)));
+            int labelWidth = (int) Math.ceil(font.width(label) * LABEL_SCALE);
+            int left = candidate.centered() ? candidate.x() - labelWidth / 2 : candidate.x();
+            int top = candidate.y(), right = left + labelWidth, bottom = top + (int) Math.ceil(font.lineHeight * LABEL_SCALE);
+            if (left < x + 3 || right > x + width - 3 || top < y + 3 || bottom > y + height - 23) continue;
+            if (occupiedLabels.stream().anyMatch(rect -> left - 3 < rect[2] && right + 3 > rect[0]
+                    && top - 2 < rect[3] && bottom + 2 > rect[1])) continue;
+            occupiedLabels.add(new int[]{left, top, right, bottom});
+            graphics.fill(left - 2, top - 1, right + 2, bottom + 1, 0xAA111820);
+            graphics.pose().pushMatrix();
+            graphics.pose().translate(left, top);
+            graphics.pose().scale(LABEL_SCALE, LABEL_SCALE);
+            graphics.text(font, Component.literal(label), 0, 0, candidate.color());
+            graphics.pose().popMatrix();
+        }
+    }
+    private boolean nearMarker(int markerX, int markerY) {
+        return contains(hoverX, hoverY) && Math.abs(hoverX - markerX) <= 10 && Math.abs(hoverY - markerY) <= 10;
+    }
+
+    // The overlay never joins separated visible runs across hidden territory.
+    private void drawLogistics(GuiGraphicsExtractor graphics, Font font, ClientMapData.Snapshot snapshot) {
+        if (ClientMapData.isLayerVisible(ClientMapData.MapLayer.ROADS)) {
+            // Thin overview roads stay subordinate to terrain; planning and supply remain independently visible.
+            int thickness = zoom >= 6 ? 2 : 1;
+            for (var road : snapshot.roads()) drawConnectedPath(graphics, road.points(), 0xFFBA9B6D, thickness);
+        }
+        if (supplyOverlay) {
+            var route = ClientManagementData.get().selectedRoute();
+            UUID expected = supplyTargetId();
+            if (expected != null && expected.equals(route.targetId())) {
+                drawConnectedPath(graphics, route.points(), 0xFF65E8D4, 2);
+                // Selected routes are private authoritative geometry; a longer terminal leg is local delivery.
+                for (int i = 1; i < route.points().size(); i++) {
+                    BlockPos a = route.points().get(i - 1), b = route.points().get(i);
+                    if (Math.abs((a.getX() >> 4) - (b.getX() >> 4)) + Math.abs((a.getZ() >> 4) - (b.getZ() >> 4)) > 1)
+                        drawDottedLine(graphics, worldScreenX(a), worldScreenY(a), worldScreenX(b), worldScreenY(b), 0xFF65E8D4);
+                }
+            }
+        }
+        if (roadPlanning) {
+            drawConnectedPath(graphics, expandedRoadPreview(), roadPreviewValid() ? 0xFF88E577 : 0xFFFF7777, 2);
+            for (BlockPos point : roadPoints) {
+                int px = worldScreenX(point), py = worldScreenY(point);
+                graphics.fill(px - 3, py - 3, px + 4, py + 4, 0xFFFFE84A);
+            }
+        }
+        for (var camp : snapshot.camps()) {
+            int px = worldScreenX(camp.position()), py = worldScreenY(camp.position());
+            if (!intersects(px - 6, py - 6, 12, 12)) continue;
+            boolean own = camp.ownerId().equals(snapshot.viewerStateId());
+            int color = own ? 0xFFDAA968 : armyIconColor(camp.ownerId(), false);
+            graphics.fill(px - 5, py + 1, px + 6, py + 5, color);
+            graphics.fill(px - 3, py - 2, px + 4, py + 1, color);
+            graphics.fill(px - 1, py - 5, px + 2, py - 2, color);
+            if (camp.id().equals(selectedCampId)) drawMask(graphics, px - 8, py - 8, px + 9, py + 9, 15, 0xFFFFE84A, 1);
+            if (zoom >= 2.5) queueMapLabel("Camp", px, py - 13, color, true,
+                    camp.id().equals(selectedCampId) ? 0 : nearMarker(px, py) ? 1 : 4);
+        }
+        if (roadPlanning || snapshot.logisticsTruncated() || !cohortOrderSelection.isEmpty()) {
+            String message = roadPlanning ? "ROAD PLAN: click points | right-click undo | drag with middle button"
+                    : !cohortOrderSelection.isEmpty() ? cohortOrderSelection.size() + " cohorts: right-click destination | Shift queues | Escape clears"
+                    : "Some infrastructure omitted at this scale; refresh closer to inspect.";
+            // Leave the upper-right row clear for the map's view and layer buttons.
+            graphics.fill(x + 4, y + 32, x + width - 4, y + 47, 0xD0111820);
+            graphics.text(font, Component.literal(font.plainSubstrByWidth(message, width - 14)), x + 7, y + 35, 0xFFFFDE94);
+        }
+    }
+    private int worldScreenX(BlockPos point) { return chunkToScreenX(point.getX() / 16.0); }
+    private int worldScreenY(BlockPos point) { return chunkToScreenY(point.getZ() / 16.0); }
+    private void drawConnectedPath(GuiGraphicsExtractor graphics, List<BlockPos> points, int color, int thickness) {
+        BlockPos previous = null;
+        for (BlockPos point : points) {
+            int px = worldScreenX(point), py = worldScreenY(point);
+            if (intersects(px - thickness, py - thickness, thickness * 2, thickness * 2))
+                graphics.fill(px - thickness / 2, py - thickness / 2, px + thickness, py + thickness, color);
+            if (previous != null) {
+                int dx = Math.abs((previous.getX() >> 4) - (point.getX() >> 4));
+                int dz = Math.abs((previous.getZ() >> 4) - (point.getZ() >> 4));
+                if (dx + dz <= 1) {
+                    int beforeX = worldScreenX(previous), beforeY = worldScreenY(previous);
+                    if (previous.getX() == point.getX() || previous.getZ() == point.getZ())
+                        graphics.fill(Math.min(px, beforeX), Math.min(py, beforeY), Math.max(px, beforeX) + thickness, Math.max(py, beforeY) + thickness, color);
+                    else drawDottedLine(graphics, beforeX, beforeY, px, py, color);
+                }
+            }
+            previous = point;
+        }
+    }
+
+    private void drawMarkerTooltip(GuiGraphicsExtractor graphics, Font font, ClientMapData.Snapshot snapshot, int mx, int my) {
+        if (!contains(mx, my) || roadPlanning) return;
+        String text = null;
+        for (var anchor : snapshot.provinceAnchors())
+            if (nearMarker(chunkToScreenX(anchor.chunkX()), chunkToScreenY(anchor.chunkZ()))) text = anchor.displayName();
+        for (var camp : snapshot.camps()) if (nearMarker(worldScreenX(camp.position()), worldScreenY(camp.position()))) {
+            text = "Marching camp";
+            if (camp.ownerId().equals(snapshot.viewerStateId())) {
+                var own = ClientManagementData.get().camps().stream().filter(c -> c.id().equals(camp.id())).findFirst().orElse(null);
+                if (own != null) text += " | " + own.stock() + "/" + own.capacity() + " | " + (own.connected() ? "Connected" : "Isolated");
+            }
+        }
+        for (var army : ClientArmyData.get().armiesById().values()) {
+            ChunkPos pos = ChunkPos.unpack(army.packedChunkPos());
+            if (nearMarker(chunkToScreenX(pos.x()), chunkToScreenY(pos.z()))) text = army.displayName() + " | " + army.troops() + " soldiers";
+        }
+        for (var legion : ClientArmyData.get().legionsById().values()) {
+            ChunkPos pos = ChunkPos.unpack(legion.packedChunkPos());
+            if (nearMarker(chunkToScreenX(pos.x()), chunkToScreenY(pos.z()))) text = "Legion | " + legion.availableSoldiers() + " soldiers";
+        }
+        for (var c : ClientArmyData.get().cohortsById().values()) if (nearMarker(worldScreenX(c.position()), worldScreenY(c.position())))
+            text = "Detached cohort | " + c.soldiers() + " soldiers | " + c.position().getX() + ", " + c.position().getZ()
+                    + " | Click repeatedly to cycle; Shift-click when sharing a legion/army marker";
+        if (text == null) return;
+        // Wrap the full label/instructions instead of silently cutting off the useful end of the tooltip.
+        var lines = font.split(Component.literal(text), Math.max(1, Math.min(240, graphics.guiWidth() - 24)));
+        // Vanilla places this after the sidebar/widgets and flips it at screen edges, even on a narrow map.
+        graphics.setTooltipForNextFrame(font, lines, mx, my);
+    }
+
+    public boolean isRoadPlanning() { return roadPlanning; }
+    public void setRoadPlanning(boolean enabled) { roadPlanning = enabled; roadPoints.clear(); dragging = false; }
+    public List<BlockPos> getRoadPoints() { return List.copyOf(roadPoints); }
+    public void clearRoadPlan() { roadPoints.clear(); }
+    public boolean isSupplyOverlay() { return supplyOverlay; }
+    public void toggleSupplyOverlay() { supplyOverlay = !supplyOverlay; }
+    public UUID getSelectedCampId() { return selectedCampId; }
+    public void clearSelectedCamp() { selectedCampId = null; }
+    public UUID supplyTargetId() {
+        if (selectedArmyId == null) return null;
+        var management = ClientManagementData.get();
+        if (!Objects.equals(management.stateId(), ClientMapData.get().viewerStateId())) return null;
+        if (management.cohorts().stream().anyMatch(c -> c.id().equals(selectedArmyId))) return selectedArmyId;
+        if (selectedIsArmy) return ClientArmyData.get().armiesById().containsKey(selectedArmyId)
+                && ClientArmyData.get().armiesById().get(selectedArmyId).ownerStateId().equals(management.stateId()) ? selectedArmyId : null;
+        return management.cohorts().stream().filter(c -> c.legionId().equals(selectedArmyId)
+                && c.armyId() == null && c.settlementId() == null && c.soldiers() > 0
+                && !ClientArmyData.get().cohortsById().containsKey(c.id())).map(c -> c.id()).findFirst().orElse(null);
+    }
+    // Expand the same cardinal staircase used by the server, with an early preview bound.
+    public List<BlockPos> expandedRoadPreview() {
+        List<BlockPos> result = new ArrayList<>();
+        for (BlockPos target : roadPoints) {
+            if (result.isEmpty()) result.add(target);
+            else {
+                BlockPos from = result.getLast();
+                int cx = from.getX() >> 4, cz = from.getZ() >> 4, tx = target.getX() >> 4, tz = target.getZ() >> 4;
+                while ((cx != tx || cz != tz) && result.size() <= StateBalance.MAX_ROAD_CHUNKS) {
+                    if (cx != tx && (cz == tz || Math.abs(tx - cx) >= Math.abs(tz - cz))) cx += Integer.signum(tx - cx);
+                    else cz += Integer.signum(tz - cz);
+                    result.add(new BlockPos(cx * 16 + 8, 100, cz * 16 + 8));
+                }
+            }
+            if (result.size() > StateBalance.MAX_ROAD_CHUNKS) break;
+        }
+        return result;
+    }
+    public boolean roadPreviewValid() {
+        List<BlockPos> points = expandedRoadPreview();
+        if (roadPoints.size() < 2 || points.size() > StateBalance.MAX_ROAD_CHUNKS) return false;
+        UUID viewer = ClientMapData.get().viewerStateId();
+        for (BlockPos p : points) {
+            var claim = ClientMapData.get().getChunk(p.getX() >> 4, p.getZ() >> 4);
+            if (claim == null || !claim.ownerStateId().equals(viewer)) return false;
+        }
+        return true;
+    }
+    public int roadNewCells() {
+        Set<Long> existing = new HashSet<>(), planned = new HashSet<>();
+        for (var road : ClientMapData.get().roads()) for (BlockPos p : road.points()) existing.add(ChunkPos.containing(p).pack());
+        for (BlockPos p : expandedRoadPreview()) planned.add(ChunkPos.containing(p).pack());
+        planned.removeAll(existing);
+        return planned.size();
     }
 
     //draws a marker for a settlement on the map
@@ -419,12 +667,43 @@ public final class InteractiveMapWidget {
         int chunkX = floorChunk(screenToChunkX(mouseX));
         int chunkZ = floorChunk(screenToChunkZ(mouseY));
 
+        if (roadPlanning) {
+            if (button == 0) {
+                BlockPos point = new BlockPos(chunkX * 16 + 8, 100, chunkZ * 16 + 8);
+                if (roadPoints.size() < StateBalance.MAX_ROAD_POINTS && (roadPoints.size() <= 1 || !roadPoints.getLast().equals(point))) roadPoints.add(point);
+                return true;
+            }
+            if (button == 1) { if (!roadPoints.isEmpty()) roadPoints.removeLast(); return true; }
+            if (button == 2) { dragging = true; return true; }
+            return true;
+        }
+
         if (button == 0) {
+            var nearbyCohorts = ClientArmyData.get().cohortsById().values().stream()
+                    .filter(c -> Math.abs(mouseX - worldScreenX(c.position())) <= 6 && Math.abs(mouseY - worldScreenY(c.position())) <= 6)
+                    .map(ArmyMapPayload.CohortSummary::cohortId).sorted().toList();
+            boolean shared = ClientArmyData.get().getArmyIdAtChunk(chunkX, chunkZ) != null
+                    || ClientArmyData.get().getLegionIdAtChunk(chunkX, chunkZ) != null;
+            if (!nearbyCohorts.isEmpty() && (!shared || net.minecraft.client.Minecraft.getInstance().options.keyShift.isDown())) {
+                int next = (nearbyCohorts.indexOf(selectedArmyId) + 1) % nearbyCohorts.size();
+                selectUnit(nearbyCohorts.get(next)); return true;
+            }
+            cohortOrderSelection = List.of();
             // Priority 0: spectate eye on an engaged Army?
             ArmyMapPayload.ArmySummary engagedArmy = getEngagedArmyEyeAt(mouseX, mouseY);
             if (engagedArmy != null && engagedArmy.battleId() != null) {
                 ClientNetworking.requestSpectate(engagedArmy.battleId());
                 return true;
+            }
+
+            // A second click on a camp under the selected unit opens the camp rather than trapping selection on the unit.
+            if (selectedArmyId != null || net.minecraft.client.Minecraft.getInstance().options.keyShift.isDown()) {
+                for (var camp : ClientMapData.get().camps()) {
+                    if (Math.abs(mouseX - worldScreenX(camp.position())) <= 8 && Math.abs(mouseY - worldScreenY(camp.position())) <= 8) {
+                        selectedCampId = camp.id(); selectedChunk = ChunkPos.containing(camp.position()).pack();
+                        return true;
+                    }
+                }
             }
 
             // Priority 1: did the player click an Army icon?
@@ -433,6 +712,7 @@ public final class InteractiveMapWidget {
                 this.selectedArmyId = clickedArmyId;
                 this.selectedIsArmy = true;
                 this.selectedChunk = Long.MIN_VALUE;
+                this.selectedCampId = null;
                 dragging = true;
                 return true;
             }
@@ -443,10 +723,20 @@ public final class InteractiveMapWidget {
                 this.selectedArmyId = clickedLegionId;
                 this.selectedIsArmy = false;
                 this.selectedChunk = Long.MIN_VALUE;
+                this.selectedCampId = null;
                 dragging = true;
                 return true;
             }
 
+            // Camp markers are independent saved staging points; retain an army selection for nearby dismantling.
+            for (var camp : ClientMapData.get().camps()) {
+                if (Math.abs(mouseX - worldScreenX(camp.position())) <= 8 && Math.abs(mouseY - worldScreenY(camp.position())) <= 8) {
+                    this.selectedCampId = camp.id();
+                    this.selectedChunk = ChunkPos.containing(camp.position()).pack();
+                    return true;
+                }
+            }
+            selectedCampId = null;
             // Priority 3: clear selection or fall through to chunk
             if (this.selectedArmyId != null) {
                 this.selectedArmyId = null;
@@ -469,12 +759,16 @@ public final class InteractiveMapWidget {
                 var snapshot = ClientArmyData.get();
                 UUID owner = selectedIsArmy
                         ? snapshot.armiesById().containsKey(selectedArmyId) ? snapshot.armiesById().get(selectedArmyId).ownerStateId() : null
+                        : snapshot.cohortsById().containsKey(selectedArmyId) ? snapshot.cohortsById().get(selectedArmyId).ownerStateId()
+                        : !cohortOrderSelection.isEmpty() ? ClientManagementData.get().stateId()
                         : snapshot.legionsById().containsKey(selectedArmyId) ? snapshot.legionsById().get(selectedArmyId).ownerStateId() : null;
                 if (viewer == null || !viewer.equals(owner)) return true;
                 boolean isQueueing = net.minecraft.client.Minecraft.getInstance().options.keyShift.isDown();
                 BlockPos targetPos = new BlockPos(chunkX * 16 + 8, 100, chunkZ * 16 + 8);
 
-                if (selectedIsArmy) {
+                if (!cohortOrderSelection.isEmpty()) {
+                    ClientPacketDistributor.sendToServer(new ComposeArmyPayload(cohortOrderSelection, targetPos, "MOVE", isQueueing));
+                } else if (selectedIsArmy) {
                     ClientPacketDistributor.sendToServer(
                             new DispatchArmyPayload(this.selectedArmyId, targetPos, isQueueing));
                 } else {
@@ -492,7 +786,7 @@ public final class InteractiveMapWidget {
 
     //stops dragging the map when the left mouse button is released
     public boolean mouseReleased(int button) {
-        if (button == 0 && dragging) {
+        if ((button == 0 || button == 2) && dragging) {
             dragging = false;
             return true;
         }
@@ -524,7 +818,7 @@ public final class InteractiveMapWidget {
 
     //allows the user to drag the map by updating the center chunk coordinates based on mouse movement
     public boolean mouseDragged(double deltaX, double deltaY, int button) {
-        if (button != 0 || !dragging) {
+        if ((button != 0 && button != 2) || !dragging) {
             return false;
         }
 
@@ -558,6 +852,8 @@ public final class InteractiveMapWidget {
         zoom = calculateFitZoom(snapshot);
         selectedChunk = Long.MIN_VALUE;
         selectedArmyId = null;
+        cohortOrderSelection = List.of();
+        selectedCampId = null;
     }
 
     //gets the currently selected chunk, returning null if no chunk is selected
@@ -581,10 +877,20 @@ public final class InteractiveMapWidget {
     //clears the currently selected legion
     public void clearSelectedArmy() {
         this.selectedArmyId = null;
+        cohortOrderSelection = List.of();
     }
 
     //gets the currently selected chunk position, returning null if no chunk is selected
     private void refreshViewportForNewData(ClientMapData.Snapshot snapshot) {
+        Object world = net.minecraft.client.Minecraft.getInstance().level;
+        if (world != viewportWorld || !Objects.equals(viewportStateId, snapshot.viewerStateId())) {
+            viewportWorld = world;
+            viewportStateId = snapshot.viewerStateId();
+            initializedViewport = false;
+            selectedArmyId = null; selectedCampId = null; selectedChunk = Long.MIN_VALUE;
+            cohortOrderSelection = List.of();
+            roadPlanning = false; roadPoints.clear(); supplyOverlay = false;
+        }
         if (snapshot.version() == loadedSnapshotVersion) {
             return;
         }
@@ -703,8 +1009,21 @@ public final class InteractiveMapWidget {
         int dotSpacing = 8; //number of pixels between dots
         int dots = (int) (distance / dotSpacing); //number of dots to draw
 
+        // Clip the iteration interval as well as the graphics, so a distant waypoint never creates millions of dots.
+        double first = 0, last = 1;
+        double[] origin = {x1, y1}, delta = {(double) x2 - x1, (double) y2 - y1};
+        int[] minimum = {x - 2, y - 2}, maximum = {x + width + 2, y + height + 2};
+        for (int axis = 0; axis < 2; axis++) {
+            if (delta[axis] == 0) { if (origin[axis] < minimum[axis] || origin[axis] > maximum[axis]) return; }
+            else {
+                double a = (minimum[axis] - origin[axis]) / delta[axis], b = (maximum[axis] - origin[axis]) / delta[axis];
+                first = Math.max(first, Math.min(a, b)); last = Math.min(last, Math.max(a, b));
+            }
+        }
+        if (first > last || dots == 0) return;
+
         //draw each dot along the line using linear interpolation
-        for (int i = 1; i <= dots; i++) {
+        for (int i = Math.max(1, (int) Math.floor(first * dots)); i <= Math.min(dots, (int) Math.ceil(last * dots)); i++) {
             double t = (double) i / dots;
             int dotX = (int) (x1 + t * (x2 - x1));
             int dotY = (int) (y1 + t * (y2 - y1));

@@ -29,17 +29,19 @@ public final class ClientBattleData {
         public boolean hasData() { return battleId != null; }
         public boolean isDeploymentPhase() { return "DEPLOYMENT".equals(battlePhase) && !hasEnded(); }
         public boolean hasEnded() { return !"ONGOING".equals(result); }
+        // No selection is normal on the first frame; Map.of() rejects null lookup keys.
+        public CohortRenderState getCohort(UUID id) { return id == null ? null : cohorts.get(id); }
         public boolean canControl(CohortRenderState cohort) {
             return cohort != null && !hasEnded() && (cohort.isAttacker ? controlsAttacker : controlsDefender);
         }
         public double getRenderX(UUID id, float partialTick) {
-            CohortRenderState cohort = cohorts.get(id);
+            CohortRenderState cohort = getCohort(id);
             if (cohort == null) return 0;
             double t = Math.clamp((ticksSinceLastPacket + partialTick) / 5.0, 0, 1);
             return cohort.prevX + (cohort.currentX - cohort.prevX) * t;
         }
         public double getRenderZ(UUID id, float partialTick) {
-            CohortRenderState cohort = cohorts.get(id);
+            CohortRenderState cohort = getCohort(id);
             if (cohort == null) return 0;
             double t = Math.clamp((ticksSinceLastPacket + partialTick) / 5.0, 0, 1);
             return cohort.prevZ + (cohort.currentZ - cohort.prevZ) * t;

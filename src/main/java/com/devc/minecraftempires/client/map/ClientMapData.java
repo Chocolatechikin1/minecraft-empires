@@ -64,6 +64,14 @@ public final class ClientMapData {
         if (battle) battleView = battleView.next(); else empireView = empireView.next();
     }
 
+    // Local overlay preferences affect drawing only. Ownership can join this set when its control is added.
+    public enum MapLayer { ROADS }
+    private static final java.util.EnumSet<MapLayer> visibleLayers = java.util.EnumSet.allOf(MapLayer.class);
+    public static boolean isLayerVisible(MapLayer layer) { return visibleLayers.contains(layer); }
+    public static void toggleLayer(MapLayer layer) {
+        if (!visibleLayers.remove(layer)) visibleLayers.add(layer);
+    }
+
     //terrain cache for backend/server side: CPU samples and GPU textures have separate bounds, including a smaller fine-detail budget.
     private static final int MAX_TERRAIN_TILES = 768, MAX_FINE_TILES = 64;
     private static final Map<MapDataPayload.TerrainKey, MapDataPayload.TerrainTile> terrainTiles = new LinkedHashMap<>(128, .75f, true);
@@ -320,6 +328,9 @@ public final class ClientMapData {
             Map<String, MapDataPayload.SettlementSummary> settlementsById,
             List<ProvinceAnchor> provinceAnchors,
             List<MapDataPayload.BreachAlert> breachAlerts,
+            List<MapDataPayload.RoadSummary> roads,
+            List<MapDataPayload.CampSummary> camps,
+            boolean logisticsTruncated,
             int minChunkX,
             int maxChunkX,
             int minChunkZ,
@@ -337,6 +348,7 @@ public final class ClientMapData {
                     Map.of(),
                     List.of(),
                     List.of(),
+                    List.of(), List.of(), false,
                     0,
                     0,
                     0,
@@ -358,6 +370,9 @@ public final class ClientMapData {
                         indexSettlements(payload == null ? List.of() : payload.settlements()),
                         List.of(),
                         payload == null ? List.of() : List.copyOf(payload.breachAlerts()),
+                        payload == null ? List.of() : List.copyOf(payload.roads()),
+                        payload == null ? List.of() : List.copyOf(payload.camps()),
+                        payload != null && payload.logisticsTruncated(),
                         0,
                         0,
                         0,
@@ -410,6 +425,9 @@ public final class ClientMapData {
                     settlements,
                     List.copyOf(anchors),
                     List.copyOf(payload.breachAlerts()),
+                    List.copyOf(payload.roads()),
+                    List.copyOf(payload.camps()),
+                    payload.logisticsTruncated(),
                     minX,
                     maxX,
                     minZ,

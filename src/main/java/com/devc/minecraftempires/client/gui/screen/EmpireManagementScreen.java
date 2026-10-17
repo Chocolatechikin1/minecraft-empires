@@ -5,6 +5,7 @@ import com.devc.minecraftempires.client.map.ClientManagementData;
 import com.devc.minecraftempires.network.packet.*;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.gui.components.Button;
+import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
@@ -16,12 +17,17 @@ public final class EmpireManagementScreen extends Screen {
     private static final UUID NONE = new UUID(0, 0);
     private int tab, page, settlementIndex, ticks, dataVersion = -1;
     private UUID selected;
-    public EmpireManagementScreen() { super(Component.literal("Empire Management")); }
+    private final MapScreen mapScreen;
+    public EmpireManagementScreen() { this(new MapScreen()); }
+    public EmpireManagementScreen(MapScreen mapScreen) {
+        super(Component.literal("Empire Management"));
+        this.mapScreen = mapScreen;
+    }
     private ManagementDataPayload data() { return ClientManagementData.get(); }
     private int rows() { return Math.max(1, (height - 184) / 24); }
     private void rebuild() { clearWidgets(); init(); }
-    private void button(String label, int x, int y, int w, Runnable action) {
-        addRenderableWidget(Button.builder(Component.literal(label), b -> action.run()).bounds(x, y, w, 20).build());
+    private Button button(String label, int x, int y, int w, Runnable action) {
+        return addRenderableWidget(Button.builder(Component.literal(label), b -> action.run()).bounds(x, y, w, 20).build());
     }
     private void stateAction(String action, UUID target, String text) {
         ClientPacketDistributor.sendToServer(new StateActionPayload(action, target == null ? NONE : target, BlockPos.ZERO, text));
@@ -36,7 +42,7 @@ public final class EmpireManagementScreen extends Screen {
             button((tab == i ? "[" : "") + tabs[i] + (tab == i ? "]" : ""), 20 + i * (tabWidth + 2), 72, tabWidth,
                     () -> { tab = next; page = 0; selected = null; rebuild(); });
         }
-        button("Map", 20, height - 25, 70, () -> minecraft.gui.setScreen(new MapScreen()));
+        button("Map", 20, height - 25, 70, () -> minecraft.gui.setScreen(mapScreen));
         button("Close", width - 90, height - 25, 70, this::onClose);
         if (data().stateId() == null) return;
         switch (tab) {
@@ -44,8 +50,17 @@ public final class EmpireManagementScreen extends Screen {
                 int w = (width - 46) / 2;
                 button("Deposit 64 emeralds", 20, 105, w, () -> stateAction("DEPOSIT", null, "64"));
                 button("Deposit all emeralds", 26 + w, 105, w, () -> stateAction("DEPOSIT", null, "all"));
+                // Logistics entry points live with state infrastructure; their work still takes place on the map.
+                button("View Roads", 20, 133, w, () -> {
+                    minecraft.gui.setScreen(mapScreen);
+                    mapScreen.startRoadPlanning();
+                }).setTooltip(Tooltip.create(Component.literal("Return to the map to draw, purchase or remove roads.")));
+                button(mapScreen.isSupplyRouteVisible() ? "Hide Supply Lines" : "Show Supply Lines", 26 + w, 133, w, () -> {
+                    minecraft.gui.setScreen(mapScreen);
+                    mapScreen.toggleSupplyRoute();
+                }).setTooltip(Tooltip.create(Component.literal("Return to the map and select an army to inspect its supply route.")));
                 if (data().endgameChoice()) {
-                    button("Choose government", 20, 157, width - 40, () -> minecraft.gui.setScreen(new GovernmentChoiceScreen()));
+                    button("Choose government", 20, 185, width - 40, () -> minecraft.gui.setScreen(new GovernmentChoiceScreen()));
                 }
             }
             case 1 -> settlements();
@@ -69,7 +84,10 @@ public final class EmpireManagementScreen extends Screen {
         clampPage(entries.size());
         for (int i = page * rows(); i < Math.min(entries.size(), (page + 1) * rows()); i++) {
             var l = entries.get(i);
-            button("Legion " + (i + 1) + " | " + l.soldiers() + " soldiers | " + l.position().getX() + ", " + l.position().getZ(),
+            var body = com.devc.minecraftempires.client.map.ClientArmyData.get().legionsById().get(l.id());
+            String location = body == null ? "Assigned / detached" : "Field body: " + net.minecraft.world.level.ChunkPos.unpack(body.packedChunkPos()).x() * 16
+                    + ", " + net.minecraft.world.level.ChunkPos.unpack(body.packedChunkPos()).z() * 16;
+            button("Legion " + (i + 1) + " | " + l.soldiers() + " soldiers | " + location,
                     20, 101 + (i % rows()) * 24, width - 40, () -> minecraft.gui.setScreen(new ComposeArmyScreen(l.id())));
         }
         var settlements = data().settlements();
@@ -121,7 +139,7 @@ public final class EmpireManagementScreen extends Screen {
             g.centeredText(font, Component.literal(shorten(d.stateName(), 35) + " | " + d.tier().replace('_', ' ')), width / 2, 27, 0xFFFFFFFF);
             g.centeredText(font, Component.literal("Treasury " + d.treasury() + " | Tax/day " + d.dailyIncome() + " | Upkeep/day " + d.dailyUpkeep()), width / 2, 41, 0xFFCCD5DE);
             g.centeredText(font, Component.literal(d.graceDays() > 0 ? "Upkeep waived: " + d.graceDays() + " days remaining" : "Upkeep is charged daily"), width / 2, 55, 0xFFAACAA0);
-            if (tab == 0) g.centeredText(font, Component.literal(d.endgameChoice() ? "Choose your permanent government path." : "Develop settlements to unlock further expansion."), width / 2, 139, 0xFFCCD5DE);
+            if (tab == 0) g.centeredText(font, Component.literal(d.endgameChoice() ? "Choose your permanent government path." : "Develop settlements to unlock further expansion."), width / 2, 165, 0xFFCCD5DE);
         }
         super.extractRenderState(g, x, y, tick);
     }

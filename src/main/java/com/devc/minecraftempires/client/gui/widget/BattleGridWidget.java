@@ -309,11 +309,14 @@ public final class BattleGridWidget {
                 double wx = screenToWorldX((int) mouseX);
                 double wz = screenToWorldZ((int) mouseY);
                 ClientBattleData.Snapshot data = ClientBattleData.get();
-                for (UUID id : selectedCohortIds) {
-                    var cohort = data.cohorts().get(id);
-                    if (data.canControl(cohort) && !cohort.isRouting && !cohort.isEngaged && !cohort.isWithdrawing && !cohort.escaped)
-                        ClientPacketDistributor.sendToServer(new BattleCommandPayload(battleId, id, wx, wz, !shiftHeld));
-                }
+                var moving = selectedCohortIds.stream().map(data::getCohort)
+                        .filter(c -> data.canControl(c) && !c.isRouting && !c.isEngaged && !c.isWithdrawing && !c.escaped).toList();
+                double centerX = moving.stream().mapToDouble(c -> c.currentX).average().orElse(0);
+                double centerZ = moving.stream().mapToDouble(c -> c.currentZ).average().orElse(0);
+                // Multi-unit orders preserve relative spacing rather than sending every unit to one point.
+                for (var cohort : moving) ClientPacketDistributor.sendToServer(new BattleCommandPayload(battleId, cohort.cohortId,
+                        Math.clamp(wx + cohort.currentX - centerX, -BattleSession.FIELD_BOUND, BattleSession.FIELD_BOUND),
+                        Math.clamp(wz + cohort.currentZ - centerZ, -BattleSession.FIELD_BOUND, BattleSession.FIELD_BOUND), !shiftHeld));
                 return true;
             }
         }
