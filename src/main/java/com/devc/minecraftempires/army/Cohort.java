@@ -79,6 +79,7 @@ public class Cohort {
     private double preciseZ;
     private BlockPos retreatTarget;
     private UUID retreatOpponent;
+    private boolean detached, regrouping;
 
     //waypoint tracking
     private final Queue<BlockPos> waypoints = new LinkedList<>();
@@ -220,6 +221,12 @@ public class Cohort {
     public boolean isRouting()         { return isRouting; }
     public void setRouting(boolean v)  { this.isRouting = v; }
 
+    // Administrative legion membership does not make a detached cohort follow its parent physically.
+    public boolean isDetached() { return detached; }
+    public void setDetached(boolean value) { detached = value; if (!value) regrouping = false; }
+    public boolean isRegrouping() { return regrouping; }
+    public void setRegrouping(boolean value) { regrouping = value; if (value) detached = true; }
+
     //below is all retreat logic, which is separate from routing logic. Routing is a tactical panic response, while retreating is a strategic decision to disengage from an opponent.
     // Strategic retreat is separate from tactical zero-morale routing: intercepted survivors can defend themselves.
     public boolean isRetreating() { return retreatTarget != null; }
@@ -227,6 +234,7 @@ public class Cohort {
     public UUID getRetreatOpponent() { return retreatOpponent; }
     public boolean isDisengagingFrom(UUID opponent) { return isRetreating() && retreatOpponent != null && retreatOpponent.equals(opponent); }
     public void beginRetreat(BlockPos target, UUID opponent) {
+        detached = true; regrouping = false;
         retreatTarget = target; retreatOpponent = opponent;
         clearWaypoints(); addWaypoint(target);
     }
@@ -349,6 +357,8 @@ public class Cohort {
         tag.putInt("Battles",       battlesParticipated);
         tag.putInt("StatLevelIdx",  statLevelIndex);
         tag.putBoolean("IsRouting", isRouting);
+        tag.putBoolean("Detached", detached);
+        tag.putBoolean("Regrouping", regrouping);
         tag.putInt("LogisticsVersion", 1);
         tag.putLong("CarriedSupplySoldierTicks", carriedSupplySoldierTicks);
         tag.putLong("UnsupportedSoldierTicks", unsupportedSoldierTicks);
@@ -429,6 +439,8 @@ public class Cohort {
         });
         tag.getLong("RetreatTarget").ifPresent(value -> c.retreatTarget = BlockPos.of(value));
         tag.getString("RetreatOpponent").ifPresent(value -> c.retreatOpponent = UUID.fromString(value));
+        c.detached = tag.getBoolean("Detached").orElse(false);
+        c.regrouping = tag.getBoolean("Regrouping").orElse(false);
         return c;
     }
 

@@ -110,6 +110,7 @@ public class ArmyManager extends SavedData {
         Cohort first = resolveCohort(cohortIds.getFirst());
         if (first == null) return Optional.empty();
         Army army = new Army(UUID.randomUUID(), stateId, first.getStoredPosition());
+        army.setPrecisePos(first.getPreciseX(), first.getPreciseZ());
         for (UUID id : cohortIds) {
             Cohort cohort = resolveCohort(id);
             Legion parent = getParentLegion(id);
@@ -122,10 +123,11 @@ public class ArmyManager extends SavedData {
         for (UUID id : cohortIds) {
             Cohort cohort = resolveCohort(id);
             cohort.setAssignedArmyId(army.getArmyId());
+            cohort.setDetached(true); cohort.setRegrouping(false);
             cohort.clearWaypoints();
         }
         registerArmy(army);
-        syncCohortPositions(army);
+        activeLegions.values().forEach(Legion::syncMainPosition);
         return Optional.of(army);
     }
 
@@ -149,10 +151,11 @@ public class ArmyManager extends SavedData {
     public boolean disbandArmy(UUID armyId, boolean forceDisband) {
         Army army = getArmy(armyId);
         if (army == null || (!forceDisband && (army.isEngaged() || army.isOnCampaign() || army.isRetreating()))) return false;
-        syncCohortPositions(army);
         for (UUID id : army.getDeployedCohortIds()) {
             Cohort cohort = resolveCohort(id);
-            if (cohort != null && armyId.equals(cohort.getAssignedArmyId())) cohort.setAssignedArmyId(null);
+            if (cohort != null && armyId.equals(cohort.getAssignedArmyId())) {
+                cohort.setAssignedArmyId(null); cohort.setDetached(true); cohort.setRegrouping(false);
+            }
         }
         activeArmies.remove(armyId);
         removeIndex(stateToArmyIndex, army.getOwningStateId(), armyId);
@@ -161,16 +164,94 @@ public class ArmyManager extends SavedData {
             campaign.removeArmy(armyId);
             if (campaign.isEmpty()) activeCampaigns.remove(campaign.getCampaignId());
         }
+        activeLegions.values().forEach(Legion::syncMainPosition);
         setDirty();
         return true;
     }
 
+    //cohort detachment function: detaches the given cohorts from their parent legions and releases them in place, if they are not deployed or garrisoned
+    public boolean detachCohorts(UUID owner, List<UUID> ids) {
+        if (ids.isEmpty() || ids.size() > 150 || new HashSet<>(ids).size() != ids.size()) return false;
+        for (UUID id : ids) {
+            Cohort c = resolveCohort(id); Legion parent = getParentLegion(id);
+            if (c == null || parent == null || !owner.equals(parent.getOwningStateId()) || !c.isAlive() || c.isRetreating() || c.isGarrisoned()) return false;
+            Army a = getArmy(c.getAssignedArmyId());
+            if (a != null && (a.isEngaged() || a.isRetreating() || a.isOnCampaign())) return false;
+        }
+        Set<UUID> releasedArmies = new HashSet<>();
+        for (UUID id : ids) {
+            Cohort c = resolveCohort(id); Army a = getArmy(c.getAssignedArmyId());
+            if (a != null) { a.removeCohortId(id); releasedArmies.add(a.getArmyId()); }
+            c.setAssignedArmyId(null); c.setDetached(true); c.setRegrouping(false); c.clearWaypoints();
+        }
+        // A fully detached peacetime wrapper has no remaining formation to display.
+        for (UUID id : releasedArmies) {
+            Army a = getArmy(id);
+            if (a != null && a.getDeployedCohortIds().isEmpty()) disbandArmy(id, false);
+        }
+        activeLegions.values().forEach(Legion::syncMainPosition);
+        setDirty(); return true;
+    }
+
+    //cohort waypoint order function: orders the given cohorts to move to the given position, if they are not deployed or garrisoned
+    public boolean orderCohorts(UUID owner, List<UUID> ids, BlockPos target, boolean queue) {
+        if (ids.isEmpty() || ids.size() > 150 || new HashSet<>(ids).size() != ids.size()) return false;
+        // Check queue bounds before detaching; append preserves each cohort's existing orders.
+        for (UUID id : ids) {
+            Cohort c = resolveCohort(id); Legion parent = getParentLegion(id);
+            if (c == null || parent == null || !owner.equals(parent.getOwningStateId()) || !c.isAlive()
+                    || c.isDeployed() || c.isGarrisoned() || c.isRetreating() || queue && c.getWaypoints().size() >= MAX_WAYPOINTS) return false;
+        }
+        for (UUID id : ids) {
+            Cohort c = resolveCohort(id);
+            c.setDetached(true); c.setRegrouping(false);
+            if (!queue) c.clearWaypoints();
+            c.addWaypoint(target);
+        }
+        setDirty(); return true;
+    }
+
+    //cohort regroup function: orders the given cohorts to regroup with their parent legions, if they are not deployed or garrisoned
+    //parent legion is currently set to the "main" cohort, which is the 1st cohort
+    public boolean regroupLegion(UUID owner, UUID legionId) {
+        Legion legion = getLegion(legionId);
+        if (legion == null || !owner.equals(legion.getOwningStateId())) return false;
+        Cohort anchor = legion.getFieldCohort();
+        if (anchor == null) anchor = legion.allCohorts().stream().filter(c -> c.isAlive() && !c.isDeployed()
+                && !c.isGarrisoned() && !c.isRetreating()).findFirst().orElse(null);
+        if (anchor == null) return false;
+        anchor.setDetached(false); anchor.setRegrouping(false); anchor.clearWaypoints(); legion.clearWaypoints();
+        for (Cohort c : legion.allCohorts()) if (c != anchor && c.isAlive() && !c.isDeployed() && !c.isGarrisoned() && !c.isRetreating()) {
+            c.clearWaypoints(); c.addWaypoint(anchor.getStoredPosition()); c.setRegrouping(true);
+        }
+        legion.syncMainPosition(); setDirty(); return true;
+    }
+
+    /** Shorten old saved retreats without moving a unit, extending a shorter order or resetting exclusion. */
+    public void shortenRetreats(int maximum) {
+        for (Army a : activeArmies.values()) if (a.isRetreating()) {
+            BlockPos target = shortenedRetreat(a.getPreciseX(), a.getPreciseZ(), a.getRetreatTarget(), maximum);
+            if (!target.equals(a.getRetreatTarget())) a.beginRetreat(target, a.getRetreatOpponent());
+        }
+        for (Cohort c : cohortRegistry.values()) if (c.isRetreating()) {
+            BlockPos target = shortenedRetreat(c.getPreciseX(), c.getPreciseZ(), c.getRetreatTarget(), maximum);
+            if (!target.equals(c.getRetreatTarget())) c.beginRetreat(target, c.getRetreatOpponent());
+        }
+    }
+    private static BlockPos shortenedRetreat(double x, double z, BlockPos target, int maximum) {
+        double dx = target.getX() + .5 - x, dz = target.getZ() + .5 - z, distance = Math.hypot(dx, dz);
+        if (distance <= maximum) return target;
+        double span = Math.max(0, maximum - 1); // Leave room for block-center rounding.
+        return new BlockPos((int)Math.floor(x + dx / distance * span), target.getY(), (int)Math.floor(z + dz / distance * span));
+    }
+
     //if a legion gets in an engagement "unprovoked," wrap it in an army to participate in the battle and campaign
     public Optional<Army> autoWrapLegionInArmy(Legion legion) {
-        Cohort main = legion.getMainCohort();
+        Cohort main = legion.getFieldCohort();
         if (main == null || main.isDeployed() || main.isGarrisoned()) return Optional.empty();
-        List<UUID> ids = legion.allCohorts().stream().filter(c -> c.isAlive() && !c.isDeployed() && !c.isGarrisoned()
-                && near(main.getStoredPosition(), c.getStoredPosition(), ASSEMBLY_RANGE)).map(Cohort::getCohortId).toList();
+        List<UUID> ids = new ArrayList<>();
+        ids.add(main.getCohortId()); // Use the same physical anchor for the assembly-range check.
+        legion.getFieldCohorts().stream().filter(c -> c != main).map(Cohort::getCohortId).forEach(ids::add);
         Optional<Army> army = raiseArmy(legion.getOwningStateId(), main.getStoredPosition(), ids);
         army.ifPresent(a -> {
             legion.getWaypoints().forEach(a::addWaypoint);
@@ -267,11 +348,12 @@ public class ArmyManager extends SavedData {
             }
         }
         for (Legion legion : new ArrayList<>(activeLegions.values())) {
-            Cohort main = legion.getMainCohort();
+            Cohort main = legion.getFieldCohort();
             if (main == null || main.isDeployed() || main.isGarrisoned() || main.isRetreating() || legion.getWaypoints().isEmpty()) continue;
+            legion.syncMainPosition(); // Detaching the previous anchor must not move the remaining field body.
             BlockPos oldPosition = main.getStoredPosition();
             List<Cohort> travelling = legion.allCohorts().stream().filter(c -> c.isAlive() && !c.isDeployed()
-                    && !c.isGarrisoned() && c.getWaypoints().isEmpty() && near(oldPosition, c.getStoredPosition(), ASSEMBLY_RANGE)).toList();
+                    && !c.isGarrisoned() && !c.isDetached() && c.getWaypoints().isEmpty() && near(oldPosition, c.getStoredPosition(), ASSEMBLY_RANGE)).toList();
             move(level, legion.getOwningStateId(), legion.getPreciseX(), legion.getPreciseZ(), legion.getWaypoints(), false, legion::setPrecisePos);
             for (Cohort cohort : travelling) {
                 cohort.setStoredPosition(legion.getStoredPosition());
@@ -294,6 +376,11 @@ public class ArmyManager extends SavedData {
                 Army opponent = getArmy(cohort.getRetreatOpponent());
                 if (opponent == null || !near(cohort.getStoredPosition(), opponent.getStoredPosition(), ENGAGEMENT_RANGE)) cohort.clearRetreatOpponent();
                 if (cohort.getWaypoints().isEmpty()) cohort.finishRetreat();
+            }
+            if (cohort.isRegrouping() && cohort.getWaypoints().isEmpty()) {
+                Cohort anchor = parent.getFieldCohort();
+                cohort.setRegrouping(false);
+                if (anchor != null && near(anchor.getStoredPosition(), cohort.getStoredPosition(), ASSEMBLY_RANGE)) cohort.setDetached(false);
             }
             if (!retreating && needsCampaign(parent.getOwningStateId(), cohort.getStoredPosition(), level)) {
                 List<BlockPos> remaining = new ArrayList<>(cohort.getWaypoints());
@@ -489,7 +576,7 @@ public class ArmyManager extends SavedData {
             Army army = manager.getArmy(payload.armyId());
             if (army == null || !controls(player, army.getOwningStateId()) || army.isEngaged()
                     || !army.isViable(manager) || !validTarget(player.level(), payload.targetPos())) return;
-            if (army.isRetreating()) { tell(player, "This army must finish retreating to its rally point before accepting new orders."); return; }
+            if (army.isRetreating()) { tell(player, "This army must finish retreating before accepting new orders."); return; }
             if (!payload.isQueueing()) army.clearWaypoints();
             if (army.getWaypoints().size() < MAX_WAYPOINTS) army.addWaypoint(payload.targetPos());
             manager.setDirty();
@@ -503,9 +590,9 @@ public class ArmyManager extends SavedData {
             ArmyManager manager = get(player.level());
             Legion legion = manager.getLegion(payload.legionId());
             if (legion == null || !controls(player, legion.getOwningStateId()) || !validTarget(player.level(), payload.targetPos())) return;
-            Cohort main = legion.getMainCohort();
+            Cohort main = legion.getFieldCohort();
             if (main == null || main.isDeployed() || main.isGarrisoned() || main.isRetreating()) {
-                tell(player, "Move the army containing the main cohort, or release its assignment first.");
+                tell(player, "No free legion body is available. Move its army or detached cohorts, or regroup the legion first.");
                 return;
             }
             if (!payload.isQueueing()) legion.clearWaypoints();
@@ -522,14 +609,14 @@ public class ArmyManager extends SavedData {
             Army army = manager.getArmy(payload.armyId());
             if (army != null) {
                 if (!controls(player, army.getOwningStateId())) return;
-                tell(player, manager.disbandArmy(army.getArmyId(), false) ? "Army wrapper released. Cohorts remain at their locations."
+                tell(player, manager.disbandArmy(army.getArmyId(), false) ? "Army disbanded."
                         : "End the campaign and finish any battle before releasing this army.");
                 return;
             }
             Legion legion = manager.getLegion(payload.armyId());
             if (legion == null || !controls(player, legion.getOwningStateId())) return;
             if (!manager.canDissolveLegion(legion)) {
-                tell(player, "End its campaign and release every army wrapper before dissolving this legion.");
+                tell(player, "Error. End the campaign and disolve the army before dissolving this legion.");
                 return;
             }
             manager.disbandLegion(legion.getLegionId());
@@ -543,14 +630,22 @@ public class ArmyManager extends SavedData {
             if (!(context.player() instanceof ServerPlayer player)) return;
             StateData state = StateManager.get(player.level()).getStateByPlayer(player.getUUID());
             if (state == null || !controls(player, state.getStateId())) return;
-            Optional<Army> army = get(player.level()).raiseArmy(state.getStateId(), payload.initialPosition(), payload.selectedCohortIds());
-            if (army.isPresent()) {
-                ArmyManager manager = get(player.level());
-                for (UUID id : army.get().getDeployedCohortIds()) {
-                    Legion parent = manager.getParentLegion(id);
-                    if (parent != null && parent.getMainCohort() != null && id.equals(parent.getMainCohort().getCohortId())) parent.clearWaypoints();
-                }
+            ArmyManager manager = get(player.level());
+            if (payload.action().equals("DETACH")) {
+                tell(player, manager.detachCohorts(state.getStateId(), payload.selectedCohortIds())
+                        ? "Selected cohorts detached in place. Move them on the map or garrison them at a nearby settlement."
+                        : "No cohorts changed. Finish their battle, retreat or campaign and release any garrison assignment first.");
+                return;
             }
+            if (payload.action().equals("MOVE")) {
+                if (!validTarget(player.level(), payload.initialPosition())) return;
+                tell(player, manager.orderCohorts(state.getStateId(), payload.selectedCohortIds(), payload.initialPosition(), payload.queue())
+                        ? "Detachment movement ordered." : "No orders changed. Select available cohorts that are not retreating.");
+                return;
+            }
+            if (!payload.action().equals("COMPOSE")) return;
+            Optional<Army> army = get(player.level()).raiseArmy(state.getStateId(), payload.initialPosition(), payload.selectedCohortIds());
+            // The remaining field body retains its own orders; composing a nearby subset does not move it.
             tell(player, army.isPresent() ? "Army formed." : "Select living, available cohorts within 16 blocks of each other. Army capacity also applies.");
         });
     }
@@ -600,6 +695,7 @@ public class ArmyManager extends SavedData {
             Army army = getArmy(cohort.getAssignedArmyId());
             if (army != null) army.removeCohortId(cohort.getCohortId());
             cohort.setAssignedArmyId(null);
+            cohort.setDetached(true); cohort.setRegrouping(false);
             cohort.clearWaypoints();
             cohort.setIsGarrisoned(!ungarrison);
             cohort.setGarrisonedSettlementId(ungarrison ? null : settlement.getSettlementId());
@@ -647,25 +743,16 @@ public class ArmyManager extends SavedData {
                         return;
                     }
                     Cohort auxiliary = Cohort.createAuxiliary("light_infantry");
-                    if (!legion.addAuxiliary(auxiliary)) { tell(player, "This legion already has ten living auxiliary formations."); return; }
+                    if (!legion.addAuxiliary(auxiliary)) { tell(player, "This legion already has ten auxiliary units."); return; }
                     manager.registerCohort(auxiliary);
                     state.deductFunds(LIGHT_INFANTRY_COST);
                     states.setDirty();
-                    tell(player, "50 light infantry recruited. Their losses are permanent.");
+                    tell(player, "50 light infantry recruited. Note: their losses are permanent.");
                 }
                 case "REGROUP" -> {
-                    Legion legion = manager.getLegion(payload.targetId());
-                    if (legion == null || !state.getStateId().equals(legion.getOwningStateId())) return;
-                    Cohort main = legion.getMainCohort();
-                    if (main == null) return;
-                    for (Cohort cohort : legion.allCohorts()) {
-                        if (cohort != main && cohort.isAlive() && !cohort.isDeployed() && !cohort.isGarrisoned() && !cohort.isRetreating()) {
-                            cohort.clearWaypoints();
-                            cohort.addWaypoint(main.getStoredPosition());
-                        }
-                    }
-                    manager.setDirty();
-                    tell(player, "Available detachments ordered to the main cohort's current location.");
+                    tell(player, manager.regroupLegion(state.getStateId(), payload.targetId())
+                            ? "Legion paused at its rendezvous. Available detachments will march there."
+                            : "No available field cohorts can form a rendezvous yet.");
                 }
                 case "END_CAMPAIGN" -> {
                     Army army = manager.getArmy(payload.targetId());
@@ -721,7 +808,8 @@ public class ArmyManager extends SavedData {
                 if (settlement != null) cohort.setStoredPosition(settlement.getCenterAltarPos());
             }
         }
-        activeArmies.values().forEach(this::syncCohortPositions);
+        // Persisted cohort coordinates are authoritative; membership alone never pulls them back to a parent.
+        shortenRetreats(StateBalance.POST_BATTLE_RETREAT_DISTANCE);
         activeLegions.values().forEach(Legion::syncMainPosition);
         locationsReconciled = true;
         setDirty();
@@ -789,8 +877,9 @@ public class ArmyManager extends SavedData {
         }
         for (Army army : manager.activeArmies.values()) {
             if (manager.getCampaign(army.getCampaignId()) == null) army.setCampaignId(null);
-            manager.syncCohortPositions(army);
         }
+        manager.shortenRetreats(StateBalance.POST_BATTLE_RETREAT_DISTANCE);
+        manager.activeLegions.values().forEach(Legion::syncMainPosition);
         return manager;
     }
 

@@ -160,8 +160,29 @@ public class Legion {
         return allCohorts().stream().filter(Cohort::isAlive).findFirst().orElse(null);
     }
 
+    //function for deployed and detached cohorts
+    public Cohort getFieldCohort() {
+        var candidates = allCohorts().stream().filter(c -> c.isAlive() && !c.isDeployed() && !c.isGarrisoned()
+                && !c.isDetached() && !c.isRetreating() && c.getWaypoints().isEmpty()).toList();
+        Cohort best = null; int largest = 0;
+        // The largest co-located group also gives old saves a sensible anchor without relocating outliers.
+        for (Cohort candidate : candidates) {
+            int count = (int) candidates.stream().filter(c -> ArmyManager.near(candidate.getStoredPosition(), c.getStoredPosition(), ArmyManager.ASSEMBLY_RANGE)).count();
+            if (count > largest) { best = candidate; largest = count; }
+        }
+        return best;
+    }
+    public List<Cohort> getFieldCohorts() {
+        Cohort anchor = getFieldCohort();
+        if (anchor == null) return List.of();
+        return allCohorts().stream().filter(c -> c.isAlive() && !c.isDeployed() && !c.isGarrisoned()
+                && !c.isDetached() && !c.isRetreating() && c.getWaypoints().isEmpty()
+                && ArmyManager.near(anchor.getStoredPosition(), c.getStoredPosition(), ArmyManager.ASSEMBLY_RANGE)).toList();
+    }
+
     public void syncMainPosition() {
-        Cohort main = getMainCohort();
+        Cohort main = getFieldCohort();
+        if (main == null) main = getMainCohort();
         if (main == null || !main.hasStoredPosition()) return;
         storedPosition = main.getStoredPosition();
         preciseX = main.getPreciseX();
