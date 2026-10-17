@@ -23,7 +23,7 @@ import net.neoforged.neoforge.network.PacketDistributor;
 
 import java.util.*;
 
-/** Persistent state, founding entitlements, settlement ownership, and basic diplomacy. */
+//state manager class: handles all the state data, settlements, and diplomacy between states. It also handles founding settlements and upgrading them to cities.
 public class StateManager extends SavedData {
     //all active states, settlements, and related data are stored in these collections
     private final Map<UUID, StateData> activeStates = new HashMap<>();
@@ -38,6 +38,8 @@ public class StateManager extends SavedData {
     private final Set<String> peaceOffers = new HashSet<>();
     private long lastEconomyGameTime = -1;
     private long lastTimerGameTime = -1;
+    // Runtime-only invalidation token; cached networks are rebuilt after loading anyway.
+    private long logisticsRevision;
 
     //codec and type for saving and loading the state manager data
     private static final Codec<StateManager> CODEC = CompoundTag.CODEC.xmap(StateManager::fromTag, StateManager::toTag);
@@ -56,10 +58,13 @@ public class StateManager extends SavedData {
     public SettlementData getSettlement(UUID id) { return activeSettlements.get(id); }
     public long getLastEconomyGameTime() { return lastEconomyGameTime; }
     public void setLastEconomyGameTime(long time) { lastEconomyGameTime = time; setDirty(); }
+    public long getLogisticsRevision() { return logisticsRevision; }
+    public void markLogisticsChanged() { logisticsRevision++; }
 
     //constructors
     public void createState(StateData state) {
         activeStates.put(state.getStateId(), state);
+        markLogisticsChanged();
         if (state.getLeaderId() != null) {
             playerToStateMap.put(state.getLeaderId(), state.getStateId());
             if (!assistedFounders.add(state.getLeaderId())) state.setGraceTicksRemaining(0);
@@ -83,7 +88,7 @@ public class StateManager extends SavedData {
         if (state != null) { state.addFunds(amount); setDirty(); }
     }
 
-    //check if a player can claim a free legion, based on their state and whether they have already claimed it
+    //yea this works. check if a player can claim a free legion, based on their state and whether they have already claimed it
     public boolean canClaimFreeLegion(UUID player) {
         StateData state = getStateByPlayer(player);
         return state != null && player.equals(state.getLeaderId()) && !firstLegionGranted.contains(player);
@@ -105,6 +110,7 @@ public class StateManager extends SavedData {
             if (stateId.equals(settlement.getOwningStateId())) disbandSettlement(settlement.getSettlementId(), level);
         }
         activeStates.remove(stateId);
+        markLogisticsChanged();
         playerToStateMap.values().removeIf(stateId::equals);
         ClaimManager.get(level).clearAllClaimsForState(stateId);
         String id = stateId.toString();
@@ -127,6 +133,7 @@ public class StateManager extends SavedData {
     //register a new settlement, adding it to the active settlements and updating the owning state
     public void registerSettlement(UUID id, SettlementData settlement) {
         activeSettlements.put(id, settlement);
+        markLogisticsChanged();
         StateData state = getState(settlement.getOwningStateId());
         if (state != null) {
             state.addSettlement(id);
@@ -156,6 +163,7 @@ public class StateManager extends SavedData {
     public void disbandSettlement(UUID id, ServerLevel level) {
         SettlementData settlement = activeSettlements.remove(id);
         if (settlement == null) return;
+        markLogisticsChanged();
         ArmyManager.get(level).releaseGarrison(id);
         StateData state = getState(settlement.getOwningStateId());
         if (state != null) {
@@ -187,7 +195,7 @@ public class StateManager extends SavedData {
         if (!level.getWorldBorder().isWithinBounds(pos)) return "This altar is outside the world border.";
         if (getSettlementByAltarPos(pos) != null) return "This altar already belongs to a settlement.";
         for (SettlementData other : activeSettlements.values()) {
-            if (settlementFootprintsOverlap(other.getCenterAltarPos(), pos)) //check this, settlements shouldnt overlap, but they can be near each other (though not in the first settlements existing claim)
+            if (settlementFootprintsOverlap(other.getCenterAltarPos(), other.getProtectiveRadius(), pos, StateBalance.SETTLEMENT_RADIUS)) //check this, settlements shouldnt overlap, but they can be near each other (though not in the first settlements existing claim)
                 return "The settlement's territory would overlap an existing settlement.";
         }
         int newClaims = 0;
@@ -258,16 +266,27 @@ public class StateManager extends SavedData {
 
     /** Chunk rounding is shared by ownership, overlap validation, and settlement protection. */
     public static boolean settlementFootprintsOverlap(BlockPos first, BlockPos second) {
-        int radius = StateBalance.SETTLEMENT_RADIUS;
-        return Math.floorDiv(first.getX() - radius, 16) <= Math.floorDiv(second.getX() + radius, 16)
-                && Math.floorDiv(second.getX() - radius, 16) <= Math.floorDiv(first.getX() + radius, 16)
-                && Math.floorDiv(first.getZ() - radius, 16) <= Math.floorDiv(second.getZ() + radius, 16)
-                && Math.floorDiv(second.getZ() - radius, 16) <= Math.floorDiv(first.getZ() + radius, 16);
+        // Preserve the historical helper for external callers with legacy footprints.
+        return settlementFootprintsOverlap(first, StateBalance.LEGACY_SETTLEMENT_RADIUS, second, StateBalance.LEGACY_SETTLEMENT_RADIUS);
+    }
+    public static boolean settlementFootprintsOverlap(BlockPos first, int firstRadius, BlockPos second, int secondRadius) {
+        return Math.floorDiv(first.getX() - firstRadius, 16) <= Math.floorDiv(second.getX() + secondRadius, 16)
+                && Math.floorDiv(second.getX() - secondRadius, 16) <= Math.floorDiv(first.getX() + firstRadius, 16)
+                && Math.floorDiv(first.getZ() - firstRadius, 16) <= Math.floorDiv(second.getZ() + secondRadius, 16)
+                && Math.floorDiv(second.getZ() - secondRadius, 16) <= Math.floorDiv(first.getZ() + firstRadius, 16);
+    }
+    public static boolean settlementFootprintsOverlap(SettlementData first, SettlementData second) {
+        return settlementFootprintsOverlap(first.getCenterAltarPos(), first.getProtectiveRadius(), second.getCenterAltarPos(), second.getProtectiveRadius());
     }
 
     //check if a chunk is within the footprint of a settlement, based on the settlement's altar position and radius
     public static boolean isInSettlementFootprint(BlockPos altar, ChunkPos chunk) {
-        int radius = StateBalance.SETTLEMENT_RADIUS;
+        return isInSettlementFootprint(altar, chunk, StateBalance.LEGACY_SETTLEMENT_RADIUS);
+    }
+    public static boolean isInSettlementFootprint(SettlementData settlement, ChunkPos chunk) {
+        return isInSettlementFootprint(settlement.getCenterAltarPos(), chunk, settlement.getProtectiveRadius());
+    }
+    public static boolean isInSettlementFootprint(BlockPos altar, ChunkPos chunk, int radius) {
         return chunk.x() >= Math.floorDiv(altar.getX() - radius, 16)
             && chunk.x() <= Math.floorDiv(altar.getX() + radius, 16)
             && chunk.z() >= Math.floorDiv(altar.getZ() - radius, 16)
@@ -288,7 +307,7 @@ public class StateManager extends SavedData {
         ClaimManager claims = ClaimManager.get(level);
         ChunkPos centerChunk = ChunkPos.containing(settlement.getCenterAltarPos());
         claims.registerSettlementCenter(settlement.getSettlementId().toString(), centerChunk);
-        for (ChunkPos chunk : squareChunks(settlement.getCenterAltarPos(), StateBalance.SETTLEMENT_RADIUS)) {
+        for (ChunkPos chunk : squareChunks(settlement.getCenterAltarPos(), settlement.getProtectiveRadius())) {
             ChunkData old = claims.getClaim(chunk);
             if ((old == null && (chunk.equals(centerChunk) || ClaimManager.isClaimableLand(level, chunk))) || (old != null && stateId.equals(old.getOwnerUUID())))
                 claims.setClaim(chunk, stateId, settlement.getSettlementId().toString(), false, settlement.getSettlementTier());
@@ -320,24 +339,29 @@ public class StateManager extends SavedData {
     public boolean hasPassage(UUID guest, UUID owner) {
         return guest != null && owner != null && (guest.equals(owner) || (!areAtWar(guest, owner) && passage.contains(directed(guest, owner))));
     }
+
+    //diplomacy functions below
+
+    //war status functions: declare war, grant passage, revoke passage, offer peace, accept peace, and notify states of war status changes
     public boolean declareWar(UUID a, UUID b) {
         if (a == null || b == null || a.equals(b) || getState(a) == null || getState(b) == null) return false;
         passage.remove(directed(a, b)); passage.remove(directed(b, a));
         peaceOffers.remove(directed(a, b)); peaceOffers.remove(directed(b, a));
         boolean changed = wars.add(symmetric(a, b));
+        markLogisticsChanged();
         setDirty();
         return changed;
     }
     public void grantPassage(UUID owner, UUID guest) {
-        if (!owner.equals(guest) && !areAtWar(owner, guest) && getState(guest) != null) passage.add(directed(guest, owner));
+        if (!owner.equals(guest) && !areAtWar(owner, guest) && getState(guest) != null && passage.add(directed(guest, owner))) markLogisticsChanged();
         setDirty();
     }
-    public void revokePassage(UUID owner, UUID guest) { passage.remove(directed(guest, owner)); setDirty(); }
+    public void revokePassage(UUID owner, UUID guest) { if (passage.remove(directed(guest, owner))) markLogisticsChanged(); setDirty(); }
     public void offerPeace(UUID from, UUID to) { if (areAtWar(from, to)) peaceOffers.add(directed(from, to)); setDirty(); }
     public boolean hasPeaceOffer(UUID from, UUID to) { return peaceOffers.contains(directed(from, to)); }
     public boolean acceptPeace(UUID accepter, UUID proposer) {
         if (!peaceOffers.remove(directed(proposer, accepter))) return false;
-        peaceOffers.remove(directed(accepter, proposer)); wars.remove(symmetric(accepter, proposer)); setDirty(); return true;
+        peaceOffers.remove(directed(accepter, proposer)); wars.remove(symmetric(accepter, proposer)); markLogisticsChanged(); setDirty(); return true;
     }
     public void notifyState(ServerLevel level, UUID state, String message) {
         for (ServerPlayer player : level.getServer().getPlayerList().getPlayers())
@@ -375,6 +399,8 @@ public class StateManager extends SavedData {
         // The milestone itself can be reached; further growth requires promotion/choice.
         return (long) currentlyOwned + additional <= next.getMinChunks();
     }
+
+    //state progession updater function, called every 10 seconds to update state progression and handle old saves
     public void refreshProgression(ServerLevel level) {
         ClaimManager claims = ClaimManager.get(level);
         for (StateData state : activeStates.values()) {
@@ -399,11 +425,15 @@ public class StateManager extends SavedData {
         }
         setDirty();
     }
+
+    //for endgame states only, allows users to choose between Republic or Empire, if they meet the requirements and have not already made a choice
     public boolean chooseGovernment(ServerLevel level, StateData state, StateTier chosen) {
         refreshProgression(level);
         if (!state.hasEndgameChoice() || (chosen != StateTier.REPUBLIC && chosen != StateTier.EMPIRE)) return false;
         state.setCurrentTier(chosen); state.setEndgameChoice(false); setDirty(); return true;
     }
+
+    //settlement capture function: called when an army successfully captures a settlement or it checks if the capture is valid, transferring ownership and updating claims and state data
     /** The army must have physically reached the altar; callers additionally check nearby defenders. */
     public boolean captureSettlement(ServerLevel level, UUID settlementId, UUID attacker) {
         SettlementData settlement = getSettlement(settlementId);
@@ -416,11 +446,13 @@ public class StateManager extends SavedData {
         ArmyManager.get(level).releaseGarrison(settlementId);
         settlement.setOwningStateId(attacker);
         settlement.setLocalSiegeImmunityTicks(StateBalance.CAPTURE_IMMUNITY_TICKS);
+        settlement.setSupplyPreparationTicks(StateBalance.CAPTURED_SUPPLY_PREPARATION_TICKS);
         settlement.setMartialLaw(false);
         for (ChunkData claim : claims.getClaimsView().values()) {
             if (settlementId.toString().equals(claim.getSettlementID())) { claim.setOwnerUUID(attacker); claim.setIsGarrisoned(false); }
         }
-        claims.rebuildClaimCounts(); claims.setDirty();
+        claims.rebuildClaimCounts(); claims.markTopologyChanged();
+        markLogisticsChanged();
         state.incrementSettlementsCaptured();
         refreshProgression(level);
         notifyState(level, oldOwner, settlement.getSettlementName() + " has been captured.");

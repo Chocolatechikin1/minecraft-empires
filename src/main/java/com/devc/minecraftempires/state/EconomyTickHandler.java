@@ -4,6 +4,7 @@ import com.devc.minecraftempires.army.Army;
 import com.devc.minecraftempires.army.ArmyManager;
 import com.devc.minecraftempires.army.Cohort;
 import com.devc.minecraftempires.army.Legion;
+import com.devc.minecraftempires.army.LogisticsManager;
 import com.devc.minecraftempires.territory.SettlementData;
 import net.minecraft.server.level.ServerLevel;
 import net.neoforged.bus.api.SubscribeEvent;
@@ -16,6 +17,8 @@ public class EconomyTickHandler {
         if (event.getServer().getTickCount() % 20 != 0) return;
         ServerLevel level = event.getServer().overworld();
         StateManager manager = StateManager.get(level);
+        // Supply uses its own saved active-state clock; ordinary financial days continue while members are offline.
+        LogisticsManager.get(level).tick(level);
         long now = level.getGameTime();
         long last = manager.getLastEconomyGameTime();
         if (last < 0 || last > now) manager.setLastEconomyGameTime(now);
@@ -51,7 +54,7 @@ public class EconomyTickHandler {
                         if (state.getUnpaidDays() >= 7) cohort.applyAttrition(cohort.getSoldierCount());
                         else if (state.getUnpaidDays() >= 3)
                             cohort.applyAttrition(Math.max(1, (cohort.getSoldierCount() + 9) / 10));
-                    } else {
+                    } else if (LogisticsManager.get(level).canRecoverMorale(state.getStateId(), cohort, level)) {
                         cohort.tickMorale(2);
                         if (cohort.getMorale() >= 20) cohort.setRouting(false);
                     }
