@@ -79,15 +79,15 @@ public final class BattleGridWidget {
 
         drawGrid(graphics);
         drawField(graphics, data.isDeploymentPhase());
+        drawMovementArrows(graphics, font, data, partialTick);
         drawCohorts(graphics, font, data, partialTick, mouseX, mouseY);
-        drawMovementArrows(graphics, data, partialTick);
 
 
         //check if we are in the deployment phase, if we are draw a timer
-        if (data.hasData() && (data.isDeploymentPhase() || data.hasEnded())) {
+        if (data.hasData() && (data.isPreparing() || data.isDeploymentPhase() || data.hasEnded())) {
             // The payload sends game ticks, although simulation runs four times per second.
             int seconds = (data.deploymentTicksRemaining() + 19) / 20;
-            String banner = data.hasEnded() ? data.result().replace('_', ' ') : "Deployment: " + seconds + "s";
+            String banner = data.hasEnded() ? data.result().replace('_', ' ') : data.isPreparing() ? "Preparing formations on verified ground..." : "Deployment: " + seconds + "s";
 
             //render banner
             int textWidth = font.width(banner);
@@ -162,6 +162,11 @@ public final class BattleGridWidget {
             int sx = worldToScreenX(wx);
             int sz = worldToScreenZ(wz);
 
+            if (cohort.width < 10) {
+                drawColumn(graphics, cohort, wx, wz);
+                continue;
+            }
+
             int hw = (int) Math.max(9, NATO_W * zoom / DEFAULT_ZOOM);
             int hh = (int) Math.max(5, NATO_H * zoom / DEFAULT_ZOOM);
 
@@ -217,29 +222,65 @@ public final class BattleGridWidget {
         }
     }
 
-    //movement arrow function, draws arrows for moving cohorts based on their previous and current positions, with a line and arrowhead to indicate direction
-    private void drawMovementArrows(GuiGraphicsExtractor graphics, ClientBattleData.Snapshot data, float partialTick) {
-        // Movement arrows use queue peek — we only have current position and lerp data on client.
-        // For now we draw an arrow from prev → current position to visualize recent movement.
+    private void drawColumn(GuiGraphicsExtractor graphics, ClientBattleData.CohortRenderState cohort, double wx, double wz) {
+        int color = cohort.isRouting ? COLOR_ROUTING : cohort.isAttacker ? COLOR_ATTACKER : COLOR_DEFENDER;
+        int edge = selectedCohortIds.contains(cohort.cohortId) ? COLOR_SELECTED_RING : 0xFF000000;
+        for (int i = 1; i < cohort.body.size(); i++) {
+            var a = cohort.body.get(i - 1); var b = cohort.body.get(i);
+            double dx = b.x() - a.x(), dz = b.z() - a.z(), length = Math.hypot(dx, dz);
+            if (length < .000001) continue;
+            double sideX = -dz / length, sideZ = dx / length;
+            for (double side = -cohort.width / 2; side <= cohort.width / 2; side += .2)
+                drawLine(graphics, worldToScreenX(a.x() + wx - cohort.currentX + sideX * side), worldToScreenZ(a.z() + wz - cohort.currentZ + sideZ * side),
+                        worldToScreenX(b.x() + wx - cohort.currentX + sideX * side), worldToScreenZ(b.z() + wz - cohort.currentZ + sideZ * side), Math.abs(side) >= cohort.width / 2 - .2 ? edge : color);
+        }
+    }
+
+    // Movement paths show the selected formation's server-accepted route and queued objectives, even while it waits.
+    private void drawMovementArrows(GuiGraphicsExtractor graphics, Font font, ClientBattleData.Snapshot data, float partialTick) {
+        // Private orders are sent only for the controlled side; unknown routes remain visibly pending.
         if (!data.hasData()) return;
-
-        for (ClientBattleData.CohortRenderState cohort : data.cohorts().values()) {
-            double prevX = cohort.prevX;
-            double prevZ = cohort.prevZ;
-            double currX = cohort.currentX;
-            double currZ = cohort.currentZ;
-
-            double dx = currX - prevX;
-            double dz = currZ - prevZ;
-            double dist = Math.sqrt(dx * dx + dz * dz);
-            if (dist < 0.5) continue; // not moving enough to draw arrow
-
-            int fromX = worldToScreenX(prevX);
-            int fromZ = worldToScreenZ(prevZ);
-            int toX   = worldToScreenX(currX);
-            int toZ   = worldToScreenZ(currZ);
-
-            drawArrow(graphics, fromX, fromZ, toX, toZ, COLOR_ARROW);
+        for (UUID id : selectedCohortIds) {
+            var cohort = data.getCohort(id); if (cohort == null || !data.canControl(cohort) || cohort.escaped || cohort.currentHealth == 0) continue;
+            int px = worldToScreenX(data.getRenderX(id, partialTick)), py = worldToScreenZ(data.getRenderZ(id, partialTick));
+            for (var point : cohort.route) {
+                int nx = worldToScreenX(point.x()), ny = worldToScreenZ(point.z());
+                drawDashedLine(graphics, px, py, nx, ny, COLOR_ARROW); px = nx; py = ny;
+            }
+            int number = 1;
+            for (var point : cohort.objectives) {
+                int nx = worldToScreenX(point.x()), ny = worldToScreenZ(point.z());
+                graphics.fill(nx - 3, ny - 3, nx + 4, ny + 4, 0xFFFFD45A);
+                if (font != null) graphics.text(font, Component.literal(Integer.toString(number++)), nx + 5, ny - 4, 0xFFFFE89A);
+            }
+            for (var point : cohort.pending) {
+                int nx = worldToScreenX(point.x()), ny = worldToScreenZ(point.z());
+                drawDashedLine(graphics, px, py, nx, ny, 0xFF91BACB);
+                graphics.fill(nx - 2, ny - 2, nx + 3, ny + 3, 0xFF91BACB); px = nx; py = ny;
+            }
+            if (!cohort.route.isEmpty()) {
+                var goal = cohort.route.getLast(); int nx = worldToScreenX(goal.x()), ny = worldToScreenZ(goal.z());
+                drawArrow(graphics, nx - 3, ny - 3, nx, ny, COLOR_ARROW);
+            }
+        }
+    }
+    private void drawDashedLine(GuiGraphicsExtractor graphics, int x1, int y1, int x2, int y2, int color) {
+        int steps = Math.max(Math.abs(x2 - x1), Math.abs(y2 - y1));
+        double first = 0, last = 1;
+        double[] origin = {x1, y1}, delta = {(double) x2 - x1, (double) y2 - y1};
+        int[] low = {x - 2, y - 2}, high = {x + width + 2, y + height + 2};
+        for (int axis = 0; axis < 2; axis++) {
+            if (delta[axis] == 0) { if (origin[axis] < low[axis] || origin[axis] > high[axis]) return; }
+            else {
+                double a = (low[axis] - origin[axis]) / delta[axis], b = (high[axis] - origin[axis]) / delta[axis];
+                first = Math.max(first, Math.min(a, b)); last = Math.min(last, Math.max(a, b));
+            }
+        }
+        if (first > last) return;
+        for (int i = Math.max(0, (int) (first * steps) / 2 * 2); i <= Math.min(steps, (int) Math.ceil(last * steps)); i += 2) {
+            if ((i / 6 & 1) != 0) continue;
+            int px = x1 + (x2 - x1) * i / Math.max(1, steps), py = y1 + (y2 - y1) * i / Math.max(1, steps);
+            if (px >= x && px < x + width && py >= y && py < y + height) graphics.fill(px, py, px + 2, py + 2, color);
         }
     }
 
@@ -376,6 +417,15 @@ public final class BattleGridWidget {
             if (cohort.currentHealth <= 0 || cohort.escaped) continue;
             double wx = data.getRenderX(cohort.cohortId, 1.0f);
             double wz = data.getRenderZ(cohort.cohortId, 1.0f);
+            if (cohort.width < 10) {
+                double px = screenToWorldX(mx) - wx + cohort.currentX, pz = screenToWorldZ(mz) - wz + cohort.currentZ;
+                for (int i = 1; i < cohort.body.size(); i++) {
+                    var a = cohort.body.get(i - 1); var b = cohort.body.get(i); double dx = b.x() - a.x(), dz = b.z() - a.z();
+                    double t = Math.clamp(((px - a.x()) * dx + (pz - a.z()) * dz) / Math.max(.000001, dx * dx + dz * dz), 0, 1);
+                    if (Math.hypot(px - a.x() - t * dx, pz - a.z() - t * dz) <= cohort.width / 2) return cohort.cohortId;
+                }
+                continue;
+            }
             int sx = worldToScreenX(wx);
             int sz = worldToScreenZ(wz);
             int left = sx - hw / 2;

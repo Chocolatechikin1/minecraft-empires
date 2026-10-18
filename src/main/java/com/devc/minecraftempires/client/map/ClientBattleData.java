@@ -14,20 +14,21 @@ public final class ClientBattleData {
 
     public record Snapshot(UUID battleId, Map<UUID, CohortRenderState> cohorts, String battlePhase,
                            int deploymentTicksRemaining, int ticksSinceLastPacket, String result,
-                           boolean controlsAttacker, boolean controlsDefender, double mapOriginX, double mapOriginZ) {
-        static Snapshot empty() { return new Snapshot(null, Map.of(), "DEPLOYMENT", 0, 0, "ONGOING", false, false, 0, 0); }
+                           boolean controlsAttacker, boolean controlsDefender, double mapOriginX, double mapOriginZ, String attackerFormation, String defenderFormation, String deploymentMessage) {
+        static Snapshot empty() { return new Snapshot(null, Map.of(), "DEPLOYMENT", 0, 0, "ONGOING", false, false, 0, 0, "LINE", "LINE", ""); }
         static Snapshot from(BattleSyncPayload payload, Snapshot previous) {
             Map<UUID, CohortRenderState> map = new LinkedHashMap<>();
             for (var cohort : payload.attackerCohorts()) map.put(cohort.cohortId(), CohortRenderState.from(cohort, previous.cohorts.get(cohort.cohortId()), true));
             for (var cohort : payload.defenderCohorts()) map.put(cohort.cohortId(), CohortRenderState.from(cohort, previous.cohorts.get(cohort.cohortId()), false));
             return new Snapshot(payload.battleId(), Collections.unmodifiableMap(map), payload.battlePhase(),
-                    payload.deploymentTicksRemaining(), 0, payload.result(), payload.controlsAttacker(), payload.controlsDefender(), payload.mapOriginX(), payload.mapOriginZ());
+                    payload.deploymentTicksRemaining(), 0, payload.result(), payload.controlsAttacker(), payload.controlsDefender(), payload.mapOriginX(), payload.mapOriginZ(), payload.attackerFormation(), payload.defenderFormation(), payload.deploymentMessage());
         }
         public Snapshot advanceTick() {
-            return new Snapshot(battleId, cohorts, battlePhase, deploymentTicksRemaining, Math.min(5, ticksSinceLastPacket + 1), result, controlsAttacker, controlsDefender, mapOriginX, mapOriginZ);
+            return new Snapshot(battleId, cohorts, battlePhase, deploymentTicksRemaining, Math.min(5, ticksSinceLastPacket + 1), result, controlsAttacker, controlsDefender, mapOriginX, mapOriginZ, attackerFormation, defenderFormation, deploymentMessage);
         }
         public boolean hasData() { return battleId != null; }
         public boolean isDeploymentPhase() { return "DEPLOYMENT".equals(battlePhase) && !hasEnded(); }
+        public boolean isPreparing() { return "PREPARATION".equals(battlePhase) && !hasEnded(); }
         public boolean hasEnded() { return !"ONGOING".equals(result); }
         // No selection is normal on the first frame; Map.of() rejects null lookup keys.
         public CohortRenderState getCohort(UUID id) { return id == null ? null : cohorts.get(id); }
@@ -53,6 +54,10 @@ public final class ClientBattleData {
         public final boolean isAttacker, isRouting, isEngaged, isWithdrawing, escaped;
         public final double currentX, currentZ, prevX, prevZ, speed;
         public final int currentHealth, maxHealth, morale, strength, endurance;
+        public final double width, length, headingX, headingZ;
+        public final List<BattleSyncPayload.FormationPoint> body;
+        public final List<BattleSyncPayload.FormationPoint> route, objectives, pending;
+        public final String orderStatus;
         private CohortRenderState(BattleSyncPayload.CohortSnapshot cohort, CohortRenderState previous, boolean attacker) {
             cohortId = cohort.cohortId(); type = cohort.type(); isAttacker = attacker; isRouting = cohort.isRouting();
             isEngaged = cohort.isEngaged(); isWithdrawing = cohort.isWithdrawing(); escaped = cohort.escaped();
@@ -60,6 +65,9 @@ public final class ClientBattleData {
             prevZ = previous == null ? currentZ : previous.currentZ; currentHealth = cohort.currentHealth();
             maxHealth = cohort.maxHealth(); morale = cohort.morale(); strength = cohort.strength();
             endurance = cohort.endurance(); speed = cohort.speed();
+            width = cohort.width(); length = cohort.length(); headingX = cohort.headingX(); headingZ = cohort.headingZ();
+            body = cohort.body();
+            route = cohort.route(); objectives = cohort.objectives(); pending = cohort.pending(); orderStatus = cohort.orderStatus();
         }
         static CohortRenderState from(BattleSyncPayload.CohortSnapshot cohort, CohortRenderState previous, boolean attacker) {
             return new CohortRenderState(cohort, previous, attacker);

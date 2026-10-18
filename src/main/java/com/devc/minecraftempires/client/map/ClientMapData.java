@@ -1,6 +1,8 @@
 package com.devc.minecraftempires.client.map;
 
 import com.devc.minecraftempires.network.packet.MapDataPayload;
+import com.devc.minecraftempires.network.packet.StateActionPayload;
+import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.ChunkPos;
 import com.devc.minecraftempires.client.ClientNetworking;
 import com.devc.minecraftempires.network.packet.RequestMapDataPayload;
@@ -34,6 +36,25 @@ public final class ClientMapData {
 
     private static final AtomicInteger VERSION_COUNTER = new AtomicInteger();
     private static volatile Snapshot snapshot = Snapshot.empty(0);
+    public record BridgeDraft(UUID id, UUID owner, List<BlockPos> points, String phase, String message) {}
+    private static BridgeDraft bridgeDraft;
+    public static BridgeDraft bridgeDraft() { return bridgeDraft; }
+    public static void saveBridgeDraft(List<BlockPos> points) {
+        UUID owner = snapshot.viewerStateId();
+        if (owner == null || points.isEmpty()) { bridgeDraft = null; return; }
+        if (bridgeDraft != null && bridgeDraft.owner.equals(owner) && bridgeDraft.points.equals(points)) return;
+        bridgeDraft = new BridgeDraft(UUID.randomUUID(), owner, List.copyOf(points), "DRAFT", "Check the crossing before purchasing. Your bank positions are retained when you close the map.");
+    }
+    public static void clearBridgeDraft() { bridgeDraft = null; }
+    public static void acceptBridgeStatus(StateActionPayload.BridgeStatus status) {
+        if (bridgeDraft == null || !bridgeDraft.id.equals(status.planId()) || !bridgeDraft.owner.equals(status.ownerId())
+                || !bridgeDraft.points.equals(status.points()) || !Objects.equals(snapshot.viewerStateId(), status.ownerId())) return;
+        bridgeDraft = new BridgeDraft(status.planId(), status.ownerId(), status.points(), status.phase(), status.message());
+    }
+    public static void bridgeCheckRequested() {
+        if (bridgeDraft != null) bridgeDraft = new BridgeDraft(bridgeDraft.id, bridgeDraft.owner, bridgeDraft.points,
+                "CHECKING", "Checking the full three-block crossing. These points are saved; you can leave the map and return.");
+    }
 
     private ClientMapData() {}
 
@@ -86,6 +107,7 @@ public final class ClientMapData {
         }
     }
     public static void clearTerrain() {
+        bridgeDraft = null;
         var manager = Minecraft.getInstance().getTextureManager();
         for (Identifier texture : terrainTextures.values()) manager.release(texture);
         terrainTextures.clear(); terrainTiles.clear(); terrainRequests.clear();

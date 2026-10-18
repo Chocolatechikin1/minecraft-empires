@@ -59,8 +59,12 @@ public final class EmpireManagementScreen extends Screen {
                     minecraft.gui.setScreen(mapScreen);
                     mapScreen.toggleSupplyRoute();
                 }).setTooltip(Tooltip.create(Component.literal("Return to the map and select an army to inspect its supply route.")));
+                button("View Bridges", 20, 161, w, () -> {
+                    minecraft.gui.setScreen(mapScreen);
+                    mapScreen.startBridgePlanning();
+                }).setTooltip(Tooltip.create(Component.literal("Return to the map and choose two banks for a three-block-wide bridge.")));
                 if (data().endgameChoice()) {
-                    button("Choose government", 20, 185, width - 40, () -> minecraft.gui.setScreen(new GovernmentChoiceScreen()));
+                    button("Choose government", 26 + w, 161, w, () -> minecraft.gui.setScreen(new GovernmentChoiceScreen()));
                 }
             }
             case 1 -> settlements();
@@ -139,7 +143,7 @@ public final class EmpireManagementScreen extends Screen {
             g.centeredText(font, Component.literal(shorten(d.stateName(), 35) + " | " + d.tier().replace('_', ' ')), width / 2, 27, 0xFFFFFFFF);
             g.centeredText(font, Component.literal("Treasury " + d.treasury() + " | Tax/day " + d.dailyIncome() + " | Upkeep/day " + d.dailyUpkeep()), width / 2, 41, 0xFFCCD5DE);
             g.centeredText(font, Component.literal(d.graceDays() > 0 ? "Upkeep waived: " + d.graceDays() + " days remaining" : "Upkeep is charged daily"), width / 2, 55, 0xFFAACAA0);
-            if (tab == 0) g.centeredText(font, Component.literal(d.endgameChoice() ? "Choose your permanent government path." : "Develop settlements to unlock further expansion."), width / 2, 165, 0xFFCCD5DE);
+            if (tab == 0) g.centeredText(font, Component.literal(d.endgameChoice() ? "Choose your permanent government path." : "Develop settlements to unlock further expansion."), width / 2, 193, 0xFFCCD5DE);
         }
         super.extractRenderState(g, x, y, tick);
     }
