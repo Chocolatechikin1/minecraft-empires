@@ -36,11 +36,17 @@ public record BattleCommandPayload(UUID battleId, UUID cohortId, double targetX,
             boolean attacker = session.isAttackerCohort(payload.cohortId());
             if (!manager.canControlSide(player, session, attacker)) return;
             switch (payload.action()) {
-                case "MOVE" -> session.issueOrder(payload.cohortId(), payload.targetX(), payload.targetZ(), payload.clearExisting());
+                case "MOVE" -> {
+                    if (!session.issueOrder(payload.cohortId(), payload.targetX(), payload.targetZ(), payload.clearExisting()))
+                        session.getCohortById(payload.cohortId()).ifPresent(cohort -> cohort.setOrderStatus(session.getPhase() == BattleSession.BattlePhase.DEPLOYMENT
+                                ? "Deployment order rejected: ground, range or occupied space" : session.getPhase() == BattleSession.BattlePhase.PREPARATION
+                                ? "Wait for deployment preparation" : "Order rejected: unit cannot move now"));
+                }
                 case "WITHDRAW" -> session.withdrawCohort(payload.cohortId());
                 case "LINE" -> session.applyFormation(attacker, BattleSession.Formation.LINE);
                 case "TRIPLEX" -> session.applyFormation(attacker, BattleSession.Formation.TRIPLEX);
                 case "WEDGE" -> session.applyFormation(attacker, BattleSession.Formation.WEDGE);
+                case "AUTO_RESOLVE" -> session.requestAutoResolve();
                 default -> { return; }
             }
             manager.setDirty();

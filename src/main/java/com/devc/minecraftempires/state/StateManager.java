@@ -2,6 +2,7 @@ package com.devc.minecraftempires.state;
 
 import com.devc.minecraftempires.MinecraftEmpires;
 import com.devc.minecraftempires.army.ArmyManager;
+import com.devc.minecraftempires.network.MapDataService;
 import com.devc.minecraftempires.network.packet.OpenFoundingPayload;
 import com.devc.minecraftempires.territory.ChunkData;
 import com.devc.minecraftempires.territory.ClaimManager;
@@ -40,6 +41,8 @@ public class StateManager extends SavedData {
     private long lastTimerGameTime = -1;
     // Runtime-only invalidation token; cached networks are rebuilt after loading anyway.
     private long logisticsRevision;
+    private final Map<UUID, Long> foundingPolls = new HashMap<>();
+    private final Map<BlockPos, Long> foundingDiagnostics = new HashMap<>();
 
     //codec and type for saving and loading the state manager data
     private static final Codec<StateManager> CODEC = CompoundTag.CODEC.xmap(StateManager::fromTag, StateManager::toTag);
@@ -199,11 +202,20 @@ public class StateManager extends SavedData {
         }
         int newClaims = 0;
         ClaimManager claims = ClaimManager.get(level);
-        ChunkPos centerChunk = ChunkPos.containing(pos);
+        var dryArea = MapDataService.reachableArea(level, pos, StateBalance.SETTLEMENT_RADIUS, true);
+        var area = MapDataService.reachableArea(level, pos, StateBalance.SETTLEMENT_RADIUS, false);
+        if (dryArea.status() == MapDataService.Verification.PENDING || area.status() == MapDataService.Verification.PENDING)
+            return "Checking the ground around this altar. Use the altar again shortly.";
+        if (!dryArea.dryOrigin()) return "The altar must stand on connected, usable dry ground.";
+        if (dryArea.originDryColumns() < 128) return "The altar chunk needs at least 128 connected, usable dry columns.";
+        if (dryArea.qualifyingDryChunks() < 9) return dryArea.status() == MapDataService.Verification.UNKNOWN
+                ? "Explore the surrounding terrain before founding. Nine connected dry chunks must be verified."
+                : "Founding needs nine connected chunks, each with at least 128 connected dry columns.";
+        if (area.status() == MapDataService.Verification.LIMITED) return "The terrain check reached its limit. Choose another altar site.";
         for (ChunkPos chunk : squareChunks(pos, StateBalance.SETTLEMENT_RADIUS)) {
             ChunkData data = claims.getClaim(chunk);
             if (data != null && !Objects.equals(stateId, data.getOwnerUUID())) return "The settlement's territory overlaps another state.";
-            if (data == null && (chunk.equals(centerChunk) || ClaimManager.isClaimableLand(level, chunk))) newClaims++;
+            if (data == null && area.chunks().contains(chunk)) newClaims++;
         }
         StateData state = getState(stateId);
         if (state != null && !canAcquireChunks(state, claims.getClaimCountForState(stateId), newClaims))
@@ -224,12 +236,45 @@ public class StateManager extends SavedData {
             player.sendSystemMessage(Component.literal("Only the state leader can found settlements."));
             return;
         }
-        String error = validateAltar(player.level(), pos, state == null ? null : state.getStateId());
-        if (error != null) { player.sendSystemMessage(Component.literal(error)); return; }
+        if (player.blockPosition().distSqr(pos) > 64 || !player.level().getBlockState(pos).is(MinecraftEmpires.CITY_ALTAR.get())) return;
         pendingAltars.put(pos.immutable(), player.getUUID());
+        MapDataService.requestFoundingSurvey(player.level(), pos);
         setDirty();
         com.devc.minecraftempires.network.ModNetworking.sendSnapshots(player);
-        PacketDistributor.sendToPlayer(player, new OpenFoundingPayload(pos));
+        OpenFoundingPayload status = foundingStatus(player, pos);
+        PacketDistributor.sendToPlayer(player, new OpenFoundingPayload(pos, status.ready(), status.status(), true));
+    }
+
+    /** Opening the form grants no founding rights; every confirmation still validates the current server terrain. */
+    public OpenFoundingPayload foundingStatus(ServerPlayer player, BlockPos pos) {
+        if (player.level() != player.level().getServer().overworld() || player.blockPosition().distSqr(pos) > 64
+                || !player.level().getBlockState(pos).is(MinecraftEmpires.CITY_ALTAR.get()) || !player.getUUID().equals(pendingAltars.get(pos)))
+            return new OpenFoundingPayload(pos, false, "Stand near your City Altar and use it again.");
+        StateData state = getStateByPlayer(player.getUUID());
+        if (state != null && !player.getUUID().equals(state.getLeaderId())) return new OpenFoundingPayload(pos, false, "Only the state leader can found settlements.");
+        String error = validateAltar(player.level(), pos, state == null ? null : state.getStateId());
+        if (error == null) return new OpenFoundingPayload(pos, true, "Ground verified. Nine connected chunks meet the dry-area requirement.");
+        if (error.startsWith("Checking the ground")) {
+            var dry = MapDataService.reachableArea(player.level(), pos, StateBalance.SETTLEMENT_RADIUS, true);
+            var claims = MapDataService.reachableArea(player.level(), pos, StateBalance.SETTLEMENT_RADIUS, false);
+            String status = "Surveying: " + Math.min(9, dry.qualifyingDryChunks()) + "/9 qualifying dry chunks; " + claims.chunks().size() + " reachable claim chunks checked.";
+            long time = player.level().getGameTime();
+            if (time >= foundingDiagnostics.getOrDefault(pos, Long.MIN_VALUE / 2) + 100) {
+                foundingDiagnostics.put(pos.immutable(), time);
+                MinecraftEmpires.LOGGER.info("Altar survey {}: dry [{}], claims [{}]", pos,
+                        MapDataService.areaProgress(player.level(), pos, StateBalance.SETTLEMENT_RADIUS, true),
+                        MapDataService.areaProgress(player.level(), pos, StateBalance.SETTLEMENT_RADIUS, false));
+            }
+            return new OpenFoundingPayload(pos, false, status);
+        }
+        return new OpenFoundingPayload(pos, false, error);
+    }
+
+    public void pollFounding(ServerPlayer player, BlockPos pos) {
+        long time = player.level().getGameTime();
+        if (time - foundingPolls.getOrDefault(player.getUUID(), Long.MIN_VALUE / 2) < 10) return;
+        foundingPolls.put(player.getUUID(), time);
+        if (player.getUUID().equals(pendingAltars.get(pos))) PacketDistributor.sendToPlayer(player, foundingStatus(player, pos));
     }
 
     //confirm the founding of a settlement, creating the state and settlement data as needed, and establishing claims
@@ -255,6 +300,7 @@ public class StateManager extends SavedData {
         SettlementData settlement = new SettlementData(UUID.randomUUID(), state.getStateId(), newState ? name + " Capital" : name, pos.immutable());
         registerSettlement(settlement.getSettlementId(), settlement);
         establishSettlementClaims(level, settlement, state.getStateId());
+        pendingAltars.remove(pos); foundingDiagnostics.remove(pos);
         refreshProgression(level);
 
         if (!newState) return "Founded " + name + ".";
@@ -305,10 +351,12 @@ public class StateManager extends SavedData {
     public void establishSettlementClaims(ServerLevel level, SettlementData settlement, UUID stateId) {
         ClaimManager claims = ClaimManager.get(level);
         ChunkPos centerChunk = ChunkPos.containing(settlement.getCenterAltarPos());
+        var reachable = MapDataService.reachableArea(level, settlement.getCenterAltarPos(), settlement.getProtectiveRadius(), false);
+        if (reachable.status() == MapDataService.Verification.PENDING || reachable.status() == MapDataService.Verification.LIMITED) return;
         claims.registerSettlementCenter(settlement.getSettlementId().toString(), centerChunk);
-        for (ChunkPos chunk : squareChunks(settlement.getCenterAltarPos(), settlement.getProtectiveRadius())) {
+        for (ChunkPos chunk : reachable.chunks()) {
             ChunkData old = claims.getClaim(chunk);
-            if ((old == null && (chunk.equals(centerChunk) || ClaimManager.isClaimableLand(level, chunk))) || (old != null && stateId.equals(old.getOwnerUUID())))
+            if (old == null || stateId.equals(old.getOwnerUUID()))
                 claims.setClaim(chunk, stateId, settlement.getSettlementId().toString(), false, settlement.getSettlementTier());
         }
         setDirty();

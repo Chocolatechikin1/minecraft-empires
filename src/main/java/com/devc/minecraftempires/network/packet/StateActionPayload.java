@@ -48,6 +48,22 @@ public record StateActionPayload(String action, UUID targetId, BlockPos position
     }
     @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
 
+    /** Private bridge survey result tied to the player's exact draft, never a client-supplied purchase approval. */
+    public record BridgeStatus(UUID planId, UUID ownerId, List<BlockPos> points, String phase, String message) implements CustomPacketPayload {
+        public static final Type<BridgeStatus> TYPE = new Type<>(Identifier.fromNamespaceAndPath(MinecraftEmpires.MODID, "bridge_status"));
+        public static final StreamCodec<RegistryFriendlyByteBuf, BridgeStatus> STREAM_CODEC = StreamCodec.ofMember(BridgeStatus::write, BridgeStatus::new);
+        public BridgeStatus {
+            points = points.stream().map(BlockPos::immutable).toList();
+            if (points.size() > 2) throw new IllegalArgumentException("Invalid bridge endpoints");
+        }
+        public BridgeStatus(RegistryFriendlyByteBuf buf) { this(buf.readUUID(), buf.readUUID(), readRoute(buf), buf.readUtf(16), buf.readUtf(256)); }
+        private void write(RegistryFriendlyByteBuf buf) {
+            buf.writeUUID(planId); buf.writeUUID(ownerId); buf.writeVarInt(points.size()); points.forEach(buf::writeBlockPos);
+            buf.writeUtf(phase, 16); buf.writeUtf(message, 256);
+        }
+        @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+    }
+
     public static void handle(StateActionPayload payload, IPayloadContext context) {
         context.enqueueWork(() -> {
             if (!(context.player() instanceof ServerPlayer player)) return;
@@ -62,6 +78,7 @@ public record StateActionPayload(String action, UUID targetId, BlockPos position
             }
             StateManager manager = StateManager.get(player.level());
             StateData state = manager.getStateByPlayer(player.getUUID());
+            if (payload.action.equals("CHECK_FOUNDING")) { manager.pollFounding(player, payload.position); return; }
             if (payload.action.equals("FOUND")) {
                 player.sendSystemMessage(Component.literal(manager.confirmFounding(player, payload.position, payload.text)));
                 ModNetworking.sendSnapshots(player);
@@ -87,12 +104,12 @@ public record StateActionPayload(String action, UUID targetId, BlockPos position
                         payload.action.equals("CHOOSE_REPUBLIC") ? StateTier.REPUBLIC : StateTier.EMPIRE)
                         ? "Government chosen permanently." : "Your state has not met the requirements for this choice.";
                 case "DECLARE_WAR", "GRANT_PASSAGE", "REVOKE_PASSAGE", "OFFER_PEACE", "ACCEPT_PEACE" -> diplomacy(player, manager, state, payload);
-                case "BUILD_ROAD", "REMOVE_ROAD", "CREATE_CAMP", "DISMANTLE_CAMP" ->
+                case "BUILD_ROAD", "REMOVE_ROAD", "CREATE_CAMP", "DISMANTLE_CAMP", "CHECK_BRIDGE", "BUILD_BRIDGE", "CANCEL_BRIDGE", "REMOVE_BRIDGE" ->
                         LogisticsManager.get(player.level()).handleAction(payload.action, player, state, payload.targetId, payload.routePoints);
                 default -> "Unknown state action.";
             };
             manager.setDirty();
-            player.sendSystemMessage(Component.literal(result));
+            if (!result.isBlank()) player.sendSystemMessage(Component.literal(result));
             ModNetworking.sendSnapshots(player);
         });
     }

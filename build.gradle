@@ -190,10 +190,13 @@ sourceSets.test.compileClasspath += sourceSets.main.compileClasspath
 sourceSets.test.runtimeClasspath += sourceSets.main.runtimeClasspath
 
 // Domain regressions run without a client or an existing save; no extra libraries required.
+def regressionSource = file('src/test/java/com/devc/minecraftempires/PreSprint7Regression.java')
 var preSprint7Regression = tasks.register('preSprint7Regression', JavaExec) {
     group = 'verification'
     description = 'Checks army, state, diplomacy, battle and save compatibility rules.'
     dependsOn tasks.named('testClasses')
+    // The owner excludes local test sources from Git; a production-only checkout still builds.
+    onlyIf { regressionSource.isFile() }
     classpath = sourceSets.test.runtimeClasspath
     mainClass = 'com.devc.minecraftempires.PreSprint7Regression'
     workingDir = layout.buildDirectory.dir('regression').get().asFile
@@ -202,4 +205,100 @@ var preSprint7Regression = tasks.register('preSprint7Regression', JavaExec) {
 }
 tasks.named('check') { dependsOn preSprint7Regression }
 // The domain suite is executed by JavaExec, not a JUnit engine.
-tasks.named('test') { exclude '**/PreSprint7Regression.class' }
+tasks.named('test') { exclude '**/PreSprint7Regression*.class' }
+
+// Opt-in real-block fixtures run in an isolated build directory, never a player's world.
+// ./gradlew -PterrainWorldFixtures runGameTestServer --no-configuration-cache
+if (providers.gradleProperty('terrainWorldFixtures').isPresent()) {
+    if (!file('src/test/java/com/devc/minecraftempires/PreSprint7Regression.java').isFile())
+        throw new GradleException('Terrain fixtures require the local PreSprint7Regression.java test source (src/test is excluded from Git).')
+    def fixtureRoot = layout.buildDirectory.dir('terrain-harness/generated').get().asFile
+    def replayPath = providers.gradleProperty('terrainReplayWorld').orNull
+    def replayMode = replayPath != null
+    def uiSmokeMode = providers.gradleProperty('terrainUiSmoke').isPresent()
+    def replayDirectory = replayMode ? file(replayPath) : null
+    if (replayMode && !replayDirectory.toPath().toAbsolutePath().normalize().startsWith(layout.buildDirectory.get().asFile.toPath().toAbsolutePath().normalize()))
+        throw new GradleException('Replay fixtures must use an isolated directory inside build/.')
+    def generateTerrainHarness = tasks.register('generateTerrainHarness') {
+        outputs.dir fixtureRoot
+        inputs.property('replayMode', replayMode)
+        inputs.property('uiSmokeMode', uiSmokeMode)
+        doLast {
+            def javaFile = new File(fixtureRoot, 'java/terrainharness/Harness.java')
+            javaFile.parentFile.mkdirs()
+            javaFile.text = '''package terrainharness;
+@net.neoforged.fml.common.Mod("terrain_harness")
+public final class Harness {
+    private static final boolean REPLAY = REPLAY_MODE;
+    private static final boolean UI = UI_MODE;
+    public Harness(net.neoforged.bus.api.IEventBus bus) {
+        if (UI) { ClientOnly.register(); return; }
+        net.neoforged.neoforge.common.NeoForge.EVENT_BUS.addListener((net.neoforged.neoforge.event.server.ServerStartedEvent event) -> {
+            try {
+                if (REPLAY) { com.devc.minecraftempires.PreSprint7Regression.startTerrainReplay(event.getServer()); return; }
+                com.devc.minecraftempires.PreSprint7Regression.terrainSurfaceFixtures();
+                com.devc.minecraftempires.PreSprint7Regression.terrainWorldFixtures(event.getServer().overworld());
+                System.out.println("TERRAIN_BLOCK_FIXTURES_PASSED");
+                System.exit(0);
+            } catch (Throwable failure) { failure.printStackTrace(); if (REPLAY) Runtime.getRuntime().halt(1); else System.exit(1); }
+        });
+        net.neoforged.neoforge.common.NeoForge.EVENT_BUS.addListener((net.neoforged.neoforge.event.tick.ServerTickEvent.Post event) -> {
+            if (!REPLAY) return;
+            try {
+                if (com.devc.minecraftempires.PreSprint7Regression.tickTerrainReplay(event.getServer())) { System.out.println("TERRAIN_REPLAY_FIXTURES_PASSED"); event.getServer().halt(false); }
+            } catch (Throwable failure) { failure.printStackTrace(); Runtime.getRuntime().halt(1); }
+        });
+    }
+    private static final class ClientOnly {
+        static void register() {
+            net.neoforged.neoforge.common.NeoForge.EVENT_BUS.addListener((net.neoforged.neoforge.client.event.ClientTickEvent.Post event) -> {
+                try { com.devc.minecraftempires.PreSprint7Regression.ClientUiSmoke.tick(); }
+                catch (Throwable failure) { failure.printStackTrace(); Runtime.getRuntime().halt(1); }
+            });
+        }
+    }
+}
+'''.replace('REPLAY_MODE', replayMode.toString()).replace('UI_MODE', uiSmokeMode.toString())
+            def metadata = new File(fixtureRoot, 'resources/META-INF/neoforge.mods.toml')
+            metadata.parentFile.mkdirs()
+            metadata.text = '''modLoader="javafml"
+loaderVersion="[1,)"
+license="All Rights Reserved"
+[[mods]]
+modId="terrain_harness"
+version="1.0"
+displayName="Isolated terrain verification"
+'''
+        }
+    }
+    sourceSets.create('terrainHarness') {
+        java.srcDir new File(fixtureRoot, 'java')
+        resources.srcDir new File(fixtureRoot, 'resources')
+        compileClasspath += sourceSets.main.output + sourceSets.test.output + sourceSets.main.compileClasspath
+        runtimeClasspath += sourceSets.main.runtimeClasspath + sourceSets.test.output
+    }
+    tasks.named('compileTerrainHarnessJava') { dependsOn generateTerrainHarness, tasks.named('testClasses') }
+    tasks.named('processTerrainHarnessResources') { dependsOn generateTerrainHarness }
+    neoForge.mods {
+        "${mod_id}" { sourceSet sourceSets.test }
+        terrain_harness { sourceSet sourceSets.terrainHarness }
+    }
+    def fixtureDirectory = providers.gradleProperty('terrainFixtureDirectory').map { file(it) }.getOrElse(layout.buildDirectory.dir('terrain-harness/world').get().asFile)
+    if (!fixtureDirectory.toPath().toAbsolutePath().normalize().startsWith(layout.buildDirectory.get().asFile.toPath().toAbsolutePath().normalize()))
+        throw new GradleException('Terrain fixtures must use an isolated directory inside build/.')
+    neoForge.runs.gameTestServer { gameDirectory = fixtureDirectory }
+    if (providers.gradleProperty('terrainNaturalOnly').isPresent()) neoForge.runs.gameTestServer {
+        systemProperty 'minecraftempires.naturalOnly', 'true'
+    }
+    if (providers.gradleProperty('terrainOrdersOnly').isPresent()) neoForge.runs.gameTestServer {
+        systemProperty 'minecraftempires.ordersOnly', 'true'
+    }
+    if (replayMode) neoForge.runs.server {
+        gameDirectory = replayDirectory
+        if (providers.gradleProperty('terrainStrategicReplay').isPresent()) systemProperty 'minecraftempires.strategicReplay', 'true'
+    }
+    if (uiSmokeMode) neoForge.runs.client {
+        gameDirectory = layout.buildDirectory.dir('terrain-harness/client').get().asFile
+        programArguments.addAll '--width', '1280', '--height', '900'
+    }
+}

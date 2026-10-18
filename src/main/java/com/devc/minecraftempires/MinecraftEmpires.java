@@ -204,12 +204,29 @@ public class MinecraftEmpires {
             level.getServer().execute(() -> MapDataService.unwatchTerrainChunk(level, event.getChunk().getPos()));
     }
 
+    @SubscribeEvent
+    public void onTerrainPlace(net.neoforged.neoforge.event.level.BlockEvent.EntityPlaceEvent event) {
+        if (event.getLevel() instanceof net.minecraft.server.level.ServerLevel level)
+            level.getServer().execute(() -> MapDataService.invalidateTerrain(level, event.getPos()));
+    }
+    @SubscribeEvent
+    public void onTerrainNeighbors(net.neoforged.neoforge.event.level.BlockEvent.NeighborNotifyEvent event) {
+        if (event.getLevel() instanceof net.minecraft.server.level.ServerLevel level)
+            level.getServer().execute(() -> MapDataService.refreshTerrain(level, event.getPos()));
+    }
+    @SubscribeEvent
+    public void onTerrainFluid(net.neoforged.neoforge.event.level.BlockEvent.FluidPlaceBlockEvent event) {
+        if (event.getLevel() instanceof net.minecraft.server.level.ServerLevel level)
+            level.getServer().execute(() -> MapDataService.invalidateTerrain(level, event.getPos()));
+    }
+
     //settlement altar protection logic
     @SubscribeEvent
     public void onBlockBreak(BreakBlockEvent event) {
         if (!(event.getLevel() instanceof net.minecraft.server.level.ServerLevel serverLevel)) return;
         if (serverLevel != serverLevel.getServer().overworld()) return;
         net.minecraft.core.BlockPos pos = event.getPos();
+        serverLevel.getServer().execute(() -> MapDataService.invalidateTerrain(serverLevel, pos));
         if (!serverLevel.getBlockState(pos).is(MinecraftEmpires.CITY_ALTAR.get())) return;
 
         StateManager stateManager = StateManager.get(serverLevel);

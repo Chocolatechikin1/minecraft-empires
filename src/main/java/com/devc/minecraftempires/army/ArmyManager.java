@@ -2,6 +2,8 @@ package com.devc.minecraftempires.army;
 
 import com.devc.minecraftempires.MinecraftEmpires;
 import com.devc.minecraftempires.combat.BattleManager;
+import com.devc.minecraftempires.combat.CohortData;
+import com.devc.minecraftempires.network.MapDataService;
 import com.devc.minecraftempires.network.packet.*;
 import com.devc.minecraftempires.network.ModNetworking;
 import com.devc.minecraftempires.state.StateData;
@@ -47,6 +49,12 @@ public class ArmyManager extends SavedData {
     private final Map<UUID, Cohort> cohortRegistry = new LinkedHashMap<>();
     private final Map<UUID, UUID> cohortParents = new HashMap<>();
     private boolean locationsReconciled;
+    private long lastEngagementCheck = Long.MIN_VALUE / 2;
+    private final Map<UUID, MoveProposal> moveProposals = new LinkedHashMap<>();
+    private final Map<UUID, MapDataService.TerrainInspection> moveConfirmations = new HashMap<>();
+    private record MoveProposal(UUID id, UUID player, UUID owner, String kind, List<UUID> units, BlockPos target,
+                                boolean queue, Map<UUID, BlockPos> starts, Map<UUID, List<BlockPos>> oldOrders,
+                                Map<UUID, List<BlockPos>> routes, long expires, boolean shown, Set<UUID> provisional, long rightsRevision) {}
 
     public static ArmyManager get(ServerLevel level) {
         return level.getServer().overworld().getDataStorage().computeIfAbsent(TYPE);
@@ -320,19 +328,26 @@ public class ArmyManager extends SavedData {
         }
     }
 
-    //tick armies function: called every tick to update the positions of all armies and legions, and check for engagements
+    //tick armies function: called every five ticks to update the positions of all armies and legions, and check for engagements
     //ngl this function got so complicated idek whats going on anymore
     public void tickArmies(ServerLevel level) {
         if (level.dimension() != Level.OVERWORLD) return;
         reconcileLocations(level);
+        tickMoveProposals(level);
+        for (Cohort cohort : new ArrayList<>(cohortRegistry.values())) {
+            Army army = getArmy(cohort.getAssignedArmyId());
+            if (cohort.isAlive() && (army == null || !army.isEngaged())) recoverCohortCrossing(level, cohort);
+        }
         boolean changed = false;
         for (Army army : new ArrayList<>(activeArmies.values())) {
             if (army.isEngaged() || !army.isViable(this)) continue;
             boolean retreating = army.isRetreating();
             if (retreating && army.getWaypoints().isEmpty()) army.addWaypoint(army.getRetreatTarget());
-            if (!army.getWaypoints().isEmpty()) {
-                move(level, army.getOwningStateId(), army.getPreciseX(), army.getPreciseZ(), army.getWaypoints(), retreating, army::setPrecisePos);
-                syncCohortPositions(army);
+            List<Cohort> body = army.getDeployedCohortIds().stream().map(this::resolveCohort).filter(Objects::nonNull).filter(c -> c.isAlive() && !c.isGarrisoned()).toList();
+            if (!army.getWaypoints().isEmpty() || body.stream().anyMatch(c -> !c.getWaypoints().isEmpty())) {
+                moveBody(level, army.getOwningStateId(), body, army.getWaypoints(), retreating);
+                if (!body.isEmpty()) army.setPrecisePos(body.getFirst().getPreciseX(), body.getFirst().getPreciseZ());
+                if (retreating && body.stream().anyMatch(c -> c.getMarchState().getBoolean("BlockedRetreat").orElse(false))) army.clearRetreatOpponent();
                 if (retreating) {
                     boolean separated = updateRetreatDisengagement(army);
                     boolean arrived = army.getWaypoints().isEmpty();
@@ -351,27 +366,22 @@ public class ArmyManager extends SavedData {
             Cohort main = legion.getFieldCohort();
             if (main == null || main.isDeployed() || main.isGarrisoned() || main.isRetreating() || legion.getWaypoints().isEmpty()) continue;
             legion.syncMainPosition(); // Detaching the previous anchor must not move the remaining field body.
-            BlockPos oldPosition = main.getStoredPosition();
-            List<Cohort> travelling = legion.allCohorts().stream().filter(c -> c.isAlive() && !c.isDeployed()
-                    && !c.isGarrisoned() && !c.isDetached() && c.getWaypoints().isEmpty() && near(oldPosition, c.getStoredPosition(), ASSEMBLY_RANGE)).toList();
-            move(level, legion.getOwningStateId(), legion.getPreciseX(), legion.getPreciseZ(), legion.getWaypoints(), false, legion::setPrecisePos);
-            for (Cohort cohort : travelling) {
-                cohort.setStoredPosition(legion.getStoredPosition());
-                cohort.setPrecisePos(legion.getPreciseX(), legion.getPreciseZ());
-            }
+            List<Cohort> body = legion.allCohorts().stream().filter(c -> c.isAlive() && !c.isDeployed() && !c.isGarrisoned() && !c.isDetached()).toList();
+            moveBody(level, legion.getOwningStateId(), body, legion.getWaypoints(), false);
+            legion.syncMainPosition();
             if (needsCampaign(legion.getOwningStateId(), legion.getStoredPosition(), level))
                 autoWrapLegionInArmy(legion).ifPresent(a -> enterTerritory(a, level));
             changed = true;
         }
         // Regrouping physically moves each detached cohort; it never teleports to its parent.
         for (Cohort cohort : new ArrayList<>(cohortRegistry.values())) {
-            if (!cohort.isAlive() || cohort.isDeployed() || cohort.isGarrisoned()) continue;
+            if (!cohort.isAlive() || cohort.isDeployed() || cohort.isGarrisoned() || !cohort.isDetached()) continue;
             boolean retreating = cohort.isRetreating();
             if (retreating && cohort.getWaypoints().isEmpty()) cohort.addWaypoint(cohort.getRetreatTarget());
             if (cohort.getWaypoints().isEmpty()) continue;
             Legion parent = getParentLegion(cohort.getCohortId());
             if (parent == null) continue;
-            move(level, parent.getOwningStateId(), cohort.getPreciseX(), cohort.getPreciseZ(), cohort.getWaypoints(), retreating, cohort::setPrecisePos);
+            moveCohort(level, parent.getOwningStateId(), cohort, retreating || cohort.isRegrouping());
             if (retreating) {
                 Army opponent = getArmy(cohort.getRetreatOpponent());
                 if (opponent == null || !near(cohort.getStoredPosition(), opponent.getStoredPosition(), ENGAGEMENT_RANGE)) cohort.clearRetreatOpponent();
@@ -392,7 +402,9 @@ public class ArmyManager extends SavedData {
             if (parent != null) parent.syncMainPosition();
             changed = true;
         }
-        if (level.getGameTime() % 20 == 0) {
+        // Saved world time need not align with the server's five-tick callback after a reload.
+        if (level.getGameTime() - lastEngagementCheck >= 20 || level.getGameTime() < lastEngagementCheck) {
+            lastEngagementCheck = level.getGameTime();
             for (Army army : new ArrayList<>(activeArmies.values())) {
                 if (army.isEngaged() || !army.isViable(this)) continue;
                 if (army.isOnCampaign() && !army.isRetreating()) {
@@ -422,6 +434,89 @@ public class ArmyManager extends SavedData {
         if (changed) setDirty();
     }
 
+    /** Keep each cohort's saved route progress, allowing a long formation to queue across a crossing. */
+    //cohort body movement tracking function: moves the given list of cohorts along their waypoints, if they are not deployed or garrisoned
+    private void moveBody(ServerLevel level, UUID owner, List<Cohort> body, Queue<BlockPos> orders, boolean retreating) {
+        if (body.isEmpty()) return;
+        if (body.stream().allMatch(c -> c.getWaypoints().isEmpty()) && !orders.isEmpty()) for (Cohort cohort : body) cohort.getWaypoints().addAll(orders);
+        for (Cohort cohort : body) moveCohort(level, owner, cohort, retreating);
+        orders.clear();
+        body.stream().filter(c -> !c.getWaypoints().isEmpty()).findFirst().ifPresent(c -> orders.addAll(c.getWaypoints()));
+    }
+
+    //cohort movement function: moves the given cohort along its waypoints, if it is not deployed or garrisoned
+    private void moveCohort(ServerLevel level, UUID owner, Cohort cohort, boolean autonomous) {
+        if (cohort.getWaypoints().isEmpty()) return;
+        if (autonomous) rerouteAutonomous(level, cohort);
+        CohortData shape = CohortData.fromCohort(cohort, cohort.getPreciseX(), cohort.getPreciseZ());
+        CompoundTag originalShape = shape.marchState();
+        boolean[] moved = {false};
+        int previousWaypoints = cohort.getWaypoints().size();
+        move(level, owner, cohort.getPreciseX(), cohort.getPreciseZ(), cohort.getWaypoints(), cohort.isRetreating(), (x, z) -> {
+            if (!MapDataService.prepareStrategicFormation(level, shape, x, z)) return false;
+            for (Cohort other : cohortRegistry.values()) {
+                if (other == cohort || !other.isAlive() || !near(cohort.getStoredPosition(), other.getStoredPosition(), 40)) continue;
+                CohortData obstacle = CohortData.fromCohort(other, other.getPreciseX(), other.getPreciseZ());
+                if (!shape.isColumn() && !obstacle.isColumn()) continue;
+                boolean overlap = CohortData.overlaps(shape, cohort.getPreciseX(), cohort.getPreciseZ(), obstacle, other.getPreciseX(), other.getPreciseZ(), .25);
+                if (overlap && Math.hypot(x - other.getPreciseX(), z - other.getPreciseZ()) > Math.hypot(cohort.getPreciseX() - other.getPreciseX(), cohort.getPreciseZ() - other.getPreciseZ()) + 1.0e-8) continue;
+                if (CohortData.overlaps(shape, x, z, obstacle, other.getPreciseX(), other.getPreciseZ(), .25)) return false;
+            }
+            shape.recordMovement(cohort.getPreciseX(), cohort.getPreciseZ()); cohort.setPrecisePos(x, z);
+            moved[0] = true;
+            return true;
+        });
+        if (!moved[0]) shape.readMarch(originalShape);
+        CompoundTag march = shape.marchState();
+        march.putBoolean("BlockedRetreat", cohort.getMarchState().getBoolean("BlockedRetreat").orElse(false)); cohort.setMarchState(march);
+        if (!moved[0] && cohort.getWaypoints().size() == previousWaypoints) march.putString("TerrainStatus", cohort.isRetreatBlocked() ? "Retreat blocked" : shape.isColumn() ? "Waiting at crossing" : "Route blocked or unverified");
+        cohort.setMarchState(march);
+    }
+
+    //cohort crossing recovery function: checks if the given cohort is in a crossing and recovers it if possible
+    private void recoverCohortCrossing(ServerLevel level, Cohort cohort) {
+        if (!cohort.getMarchState().contains("CrossingStart")) return;
+        CohortData shape = CohortData.fromCohort(cohort, cohort.getPreciseX(), cohort.getPreciseZ());
+        if (MapDataService.recoverCrossing(level, shape, 0, 0)) {
+            cohort.applyTerrainLoss(cohort.getSoldierCount() - shape.getCurrentHealth());
+            cohort.setPrecisePos(shape.getPosition().x, shape.getPosition().y); cohort.finishRetreat(); cohort.clearWaypoints();
+            Army army = getArmy(cohort.getAssignedArmyId()); if (army != null) army.removeCohortId(cohort.getCohortId());
+            cohort.setAssignedArmyId(null); cohort.setDetached(true); cohort.setRegrouping(false);
+            CompoundTag march = shape.marchState(); march.putBoolean("Recovered", false); cohort.setMarchState(march); setDirty(); return;
+        }
+        if (shape.getCrossingStart() == null) { cohort.setMarchState(shape.marchState()); cohort.clearWaypoints(); setDirty(); }
+    }
+
+    //cohort autonomous rerouting function: checks if the given cohort is blocked and reroutes it if possible
+    private void rerouteAutonomous(ServerLevel level, Cohort cohort) {
+        BlockPos destination = cohort.getWaypoints().peek(); if (destination == null) return;
+        var direct = MapDataService.verifySegment(level, cohort.getPreciseX(), cohort.getPreciseZ(), destination.getX() + .5, destination.getZ() + .5);
+        if (direct == MapDataService.Verification.VERIFIED) {
+            CompoundTag march = cohort.getMarchState(); march.putBoolean("BlockedRetreat", false); cohort.setMarchState(march); return;
+        }
+        var route = MapDataService.route(level, cohort.getStoredPosition(), destination, 128);
+        if (route.status() == MapDataService.Verification.VERIFIED) {
+            List<BlockPos> remaining = new ArrayList<>(cohort.getWaypoints()); remaining.removeFirst();
+            CompoundTag march = cohort.getMarchState(); march.putBoolean("BlockedRetreat", false); cohort.setMarchState(march);
+            cohort.clearWaypoints(); cohort.getWaypoints().addAll(routeTurns(route.points())); cohort.getWaypoints().addAll(remaining); return;
+        }
+        if (route.status() != MapDataService.Verification.BLOCKED || !cohort.isRetreating()) return;
+        double dx = destination.getX() - cohort.getPreciseX(), dz = destination.getZ() - cohort.getPreciseZ(), length = Math.hypot(dx, dz);
+        for (int distance = (int) Math.min(200, length) - 8; distance >= 8; distance -= 8) for (double angle : new double[]{0, Math.PI / 4, -Math.PI / 4, Math.PI / 2, -Math.PI / 2}) {
+            double rx = (dx * Math.cos(angle) - dz * Math.sin(angle)) / Math.max(1, length), rz = (dx * Math.sin(angle) + dz * Math.cos(angle)) / Math.max(1, length);
+            BlockPos closer = BlockPos.containing(cohort.getPreciseX() + rx * distance, 64, cohort.getPreciseZ() + rz * distance);
+            Army enemy = getArmy(cohort.getRetreatOpponent());
+            if (enemy != null && Math.hypot(closer.getX() - enemy.getPreciseX(), closer.getZ() - enemy.getPreciseZ()) <= Math.hypot(cohort.getPreciseX() - enemy.getPreciseX(), cohort.getPreciseZ() - enemy.getPreciseZ())) continue;
+            if (MapDataService.verifySegment(level, cohort.getPreciseX(), cohort.getPreciseZ(), closer.getX() + .5, closer.getZ() + .5) == MapDataService.Verification.VERIFIED) {
+                CompoundTag march = cohort.getMarchState(); march.putBoolean("BlockedRetreat", false); cohort.setMarchState(march);
+                cohort.clearWaypoints(); cohort.addWaypoint(closer); return;
+            }
+        }
+        CompoundTag march = cohort.getMarchState(); march.putBoolean("BlockedRetreat", true); cohort.setMarchState(march);
+        cohort.clearRetreatOpponent();
+    }
+
+    //campaign needs check: determines if a campaign is needed for the given state and position
     private boolean needsCampaign(UUID stateId, BlockPos position, ServerLevel level) {
         ChunkData claim = ClaimManager.get(level).getClaim(new ChunkPos(position.getX() >> 4, position.getZ() >> 4));
         return claim == null || (!stateId.equals(claim.getOwnerUUID()) && !StateManager.get(level).hasPassage(stateId, claim.getOwnerUUID()));
@@ -484,7 +579,8 @@ public class ArmyManager extends SavedData {
         for (Army other : new ArrayList<>(activeArmies.values())) {
             if (other.isEngaged() || !other.isViable(this) || !states.areAtWar(army.getOwningStateId(), other.getOwningStateId())) continue;
             if (!canEngage(army, other)) continue;
-            if (near(army.getStoredPosition(), other.getStoredPosition(), ENGAGEMENT_RANGE)) {
+            if (near(army.getStoredPosition(), other.getStoredPosition(), ENGAGEMENT_RANGE)
+                    && canReachEnemy(level, army.getStoredPosition(), other.getStoredPosition())) {
                 createCampaign(army.getOwningStateId(), army.getArmyId());
                 createCampaign(other.getOwningStateId(), other.getArmyId());
                 BattleManager.get(level).startBattle(army, other, level);
@@ -495,7 +591,8 @@ public class ArmyManager extends SavedData {
             if (!states.areAtWar(army.getOwningStateId(), legion.getOwningStateId())) continue;
             for (Cohort cohort : legion.allCohorts()) {
                 if (cohort.isAlive() && !cohort.isDeployed() && !cohort.isDisengagingFrom(army.getArmyId())
-                        && near(army.getStoredPosition(), cohort.getStoredPosition(), ENGAGEMENT_RANGE)) {
+                        && near(army.getStoredPosition(), cohort.getStoredPosition(), ENGAGEMENT_RANGE)
+                        && canReachEnemy(level, army.getStoredPosition(), cohort.getStoredPosition())) {
                     Army defender = wrapNearbyDefenders(legion.getOwningStateId(), cohort.getStoredPosition(), army.getArmyId());
                     if (defender != null) {
                         createCampaign(army.getOwningStateId(), army.getArmyId());
@@ -510,17 +607,239 @@ public class ArmyManager extends SavedData {
     }
 
     //army movement function: moves the army towards its next waypoint, and removes the waypoint if it has been reached
-    private static void move(ServerLevel level, UUID owner, double x, double z, Queue<BlockPos> waypoints, boolean retreating, BiConsumer<Double, Double> setter) {
+    private static void move(ServerLevel level, UUID owner, double x, double z, Queue<BlockPos> waypoints, boolean retreating, java.util.function.BiPredicate<Double, Double> setter) {
         BlockPos target = waypoints.peek();
         if (target == null) return;
         double dx = target.getX() + 0.5 - x, dz = target.getZ() + 0.5 - z;
         double distance = Math.hypot(dx, dz);
-        double speed = 0.2; // 0.8 blocks/second at five-tick intervals; terrain modifiers are deferred. and also check if this is too fast or slow
+        // Floating-point leftovers at an already reached turn must not require a fresh formation deployment.
+        if (distance <= 1.0e-7) { waypoints.poll(); return; }
+        double speed = 0.2; // 0.8 blocks/second at five-tick intervals before terrain/road modifiers; tune after playtesting.
         if (retreating) speed *= StateBalance.ROUT_SPEED_MULTIPLIER;
         // Roads spend this movement interval at the appropriate speed on each side of a chunk boundary.
         if (distance > 0) speed = LogisticsManager.get(level).movementDistance(owner, x, z, dx / distance, dz / distance, speed, level);
-        advanceMovement(x, z, waypoints, speed, setter);
+        if (distance > 0) {
+            var surface = com.devc.minecraftempires.network.MapDataService.surface(level, (int) Math.floor(x), (int) Math.floor(z));
+            double nextX = x + dx / distance * Math.min(distance, speed), nextZ = z + dz / distance * Math.min(distance, speed);
+            var nextSurface = com.devc.minecraftempires.network.MapDataService.surface(level, (int) Math.floor(nextX), (int) Math.floor(nextZ));
+            speed /= Math.max(surface.travelCost(), nextSurface.travelCost());
+            double slope = nextSurface.height() - surface.height();
+            speed /= Math.hypot(1, slope) * (slope > 0 ? 1.25 : 1);
+            nextX = x + dx / distance * Math.min(distance, speed); nextZ = z + dz / distance * Math.min(distance, speed);
+            if (com.devc.minecraftempires.network.MapDataService.verifySegment(level, x, z, nextX, nextZ)
+                    != com.devc.minecraftempires.network.MapDataService.Verification.VERIFIED) return;
+        }
+        double amount = Math.min(distance, speed);
+        if (setter.test(distance == 0 ? x : x + dx / distance * amount, distance == 0 ? z : z + dz / distance * amount) && distance <= speed) waypoints.poll();
     }
+
+    private static boolean canReachEnemy(ServerLevel level, BlockPos from, BlockPos to) {
+        return com.devc.minecraftempires.network.MapDataService.route(level, from, to, 64).status()
+                == com.devc.minecraftempires.network.MapDataService.Verification.VERIFIED;
+    }
+
+    //army and legion order queue function: returns the current order queue for the given army or legion, if it is viable and not engaged or retreating
+    private Queue<BlockPos> orderQueue(String kind, UUID id, UUID owner) {
+        if (kind.equals("ARMY")) {
+            Army army = getArmy(id);
+            return army != null && owner.equals(army.getOwningStateId()) && army.isViable(this)
+                    && !army.isEngaged() && !army.isRetreating() ? army.getWaypoints() : null;
+        }
+        if (kind.equals("LEGION")) {
+            Legion legion = getLegion(id);
+            Cohort main = legion == null ? null : legion.getFieldCohort();
+            return main != null && owner.equals(legion.getOwningStateId()) && !main.isDeployed()
+                    && !main.isGarrisoned() && !main.isRetreating() ? legion.getWaypoints() : null;
+        }
+        Cohort cohort = resolveCohort(id);
+        Legion parent = getParentLegion(id);
+        return cohort != null && parent != null && owner.equals(parent.getOwningStateId()) && cohort.isAlive()
+                && !cohort.isDeployed() && !cohort.isGarrisoned() && !cohort.isRetreating() ? cohort.getWaypoints() : null;
+    }
+
+    //order position function: returns the current position of the given army, legion, or cohort
+    private BlockPos orderPosition(String kind, UUID id) {
+        if (kind.equals("ARMY")) return getArmy(id).getStoredPosition();
+        if (kind.equals("LEGION")) return getLegion(id).getFieldCohort().getStoredPosition();
+        return resolveCohort(id).getStoredPosition();
+    }
+
+    /** Prepare against immutable orders. Cancellation, stale previews and failed searches change nothing. */
+    private void proposeMove(ServerPlayer player, String kind, List<UUID> units, BlockPos target, boolean queue) {
+        StateData state = StateManager.get(player.level()).getStateByPlayer(player.getUUID());
+        if (state == null || !controls(player, state.getStateId()) || !validTarget(player.level(), target) || units.isEmpty()) return;
+        Map<UUID, BlockPos> starts = new LinkedHashMap<>();
+        Map<UUID, List<BlockPos>> orders = new LinkedHashMap<>();
+        for (UUID id : new LinkedHashSet<>(units)) {
+            Queue<BlockPos> current = orderQueue(kind, id, state.getStateId());
+            if (current == null) { tell(player, "No orders changed. Select available units that are not retreating."); return; }
+            List<BlockPos> saved = List.copyOf(current);
+            orders.put(id, saved);
+            starts.put(id, queue && !saved.isEmpty() ? saved.getLast() : orderPosition(kind, id));
+        }
+        moveProposals.remove(player.getUUID());
+        moveConfirmations.remove(player.getUUID());
+        MoveProposal proposal = new MoveProposal(UUID.randomUUID(), player.getUUID(), state.getStateId(), kind,
+                List.copyOf(starts.keySet()), target, queue, Map.copyOf(starts), Map.copyOf(orders), Map.of(),
+                player.level().getGameTime() + 2400, false, Set.of(), ClaimManager.get(player.level()).getTopologyRevision());
+        moveProposals.put(player.getUUID(), proposal);
+        tell(player, "Checking the route. Your current orders remain active until the new route is ready.");
+    }
+
+    private void tickMoveProposals(ServerLevel level) {
+        moveConfirmations.keySet().retainAll(moveProposals.keySet());
+        for (MoveProposal proposal : new ArrayList<>(moveProposals.values())) {
+            ServerPlayer player = level.getServer().getPlayerList().getPlayer(proposal.player);
+            if (player == null || !controls(player, proposal.owner) || level.getGameTime() > proposal.expires) {
+                moveProposals.remove(proposal.player); moveConfirmations.remove(proposal.player);
+                if (player != null && level.getGameTime() > proposal.expires) tell(player, "The route check expired. Existing orders were kept; request the move again.");
+                continue;
+            }
+            if (proposal.shown) {
+                if (moveConfirmations.containsKey(proposal.player)) acceptMove(player, proposal.id);
+                continue;
+            }
+            Map<UUID, List<BlockPos>> routes = new LinkedHashMap<>();
+            Set<UUID> provisional = new HashSet<>();
+            boolean waiting = false, detour = false, unknown = false;
+            for (UUID id : proposal.units) {
+                BlockPos start = proposal.starts.get(id);
+                var direct = com.devc.minecraftempires.network.MapDataService.verifySegment(level,
+                        start.getX() + .5, start.getZ() + .5, proposal.target.getX() + .5, proposal.target.getZ() + .5);
+                if (direct == com.devc.minecraftempires.network.MapDataService.Verification.VERIFIED) {
+                    routes.put(id, List.of(proposal.target)); continue;
+                }
+                var route = com.devc.minecraftempires.network.MapDataService.route(level, start, proposal.target, 128);
+                if (route.status() == com.devc.minecraftempires.network.MapDataService.Verification.PENDING) { waiting = true; continue; }
+                if (route.status() == com.devc.minecraftempires.network.MapDataService.Verification.UNKNOWN) {
+                    unknown = true; provisional.add(id); routes.put(id, List.of(proposal.target)); continue;
+                }
+                if (route.status() != com.devc.minecraftempires.network.MapDataService.Verification.VERIFIED) {
+                    tell(player, "No verified route found within the search area. Existing orders were kept.");
+                    moveProposals.remove(proposal.player); routes.clear(); break;
+                }
+                routes.put(id, routeTurns(route.points())); detour = true;
+            }
+            if (waiting || routes.size() != proposal.units.size()) continue;
+            MoveProposal ready = new MoveProposal(proposal.id, proposal.player, proposal.owner, proposal.kind, proposal.units,
+                    proposal.target, proposal.queue, proposal.starts, proposal.oldOrders, Map.copyOf(routes), proposal.expires, true, Set.copyOf(provisional), ClaimManager.get(level).getTopologyRevision());
+            moveProposals.put(proposal.player, ready);
+            if (detour || unknown) net.neoforged.neoforge.network.PacketDistributor.sendToPlayer(player,
+                    routePreview(level, ready, detour, unknown));
+            else acceptMove(player, ready.id);
+        }
+    }
+
+    //route preview screen function: generates a route preview for the given move proposal, including any detours or unknown sections
+    private ArmyActionPayload.RoutePreview routePreview(ServerLevel level, MoveProposal proposal, boolean detour, boolean unknown) {
+        List<List<BlockPos>> runs = new ArrayList<>(); Set<String> borders = new LinkedHashSet<>(); double extra = 0; int total = 0;
+        for (UUID id : proposal.units) {
+            BlockPos from = proposal.starts.get(id); double length = 0; List<BlockPos> run = new ArrayList<>();
+            for (BlockPos end : proposal.routes.get(id)) {
+                double span = Math.hypot(end.getX() - from.getX(), end.getZ() - from.getZ()); length += span;
+                int steps = Math.max(1, (int) Math.ceil(span));
+                for (int i = 0; i <= steps && total < 4096 && runs.size() < 255; i++) {
+                    BlockPos point = BlockPos.containing(from.getX() + .5 + (end.getX() - from.getX()) * (double) i / steps, 0, from.getZ() + .5 + (end.getZ() - from.getZ()) * (double) i / steps);
+                    if (MapDataService.canPreviewTerrain(level, proposal.owner, point)) {
+                        run.add(point); total++;
+                        ChunkData claim = ClaimManager.get(level).getClaim(ChunkPos.containing(point));
+                        if (claim != null && !proposal.owner.equals(claim.getOwnerUUID())) {
+                            StateData state = StateManager.get(level).getState(claim.getOwnerUUID());
+                            if (state != null) borders.add(state.getStateName() + (StateManager.get(level).hasPassage(proposal.owner, state.getStateId()) ? " (passage)" : " (entry may start hostilities)"));
+                        }
+                    } else if (!run.isEmpty()) { runs.add(List.copyOf(run)); run.clear(); }
+                }
+                from = end;
+            }
+            if (!run.isEmpty() && runs.size() < 256) runs.add(List.copyOf(run));
+            extra = Math.max(extra, length - Math.hypot(proposal.target.getX() - proposal.starts.get(id).getX(), proposal.target.getZ() - proposal.starts.get(id).getZ()));
+        }
+        String description = unknown ? "Unverified sections: troops stop before unknown or blocked ground." : "Detour adds up to " + Math.round(extra) + " blocks per formation.";
+        description += " Only observed route sections are shown.";
+        if (!borders.isEmpty()) description += " Crosses " + String.join(", ", borders) + ".";
+        if (description.length() > 1000) description = description.substring(0, 997) + "...";
+        return new ArmyActionPayload.RoutePreview(proposal.id, description, detour, runs);
+    }
+
+    /**
+     * Returns the turns in the given route.
+     *
+     * @param path The route to analyze.
+     * @return A list of the turns in the route.
+     */
+    public static List<BlockPos> routeTurns(List<BlockPos> path) {
+        List<BlockPos> result = new ArrayList<>();
+        for (int i = 1; i < path.size(); i++) {
+            BlockPos before = path.get(i - 1), point = path.get(i);
+            if (i == path.size() - 1 || point.getX() - before.getX() != path.get(i + 1).getX() - point.getX()
+                    || point.getZ() - before.getZ() != path.get(i + 1).getZ() - point.getZ()) result.add(point);
+        }
+        return List.copyOf(result);
+    }
+
+    ///move acceptance function: accepts the move proposal for the given player and applies the new orders to the units
+    private void acceptMove(ServerPlayer player, UUID token) {
+        MoveProposal proposal = moveProposals.get(player.getUUID());
+        if (proposal == null || !proposal.id.equals(token) || !proposal.shown || player.level().getGameTime() > proposal.expires) return;
+        if (!controls(player, proposal.owner)) { discardMove(proposal); return; }
+        if (proposal.rightsRevision != ClaimManager.get(player.level()).getTopologyRevision()) { discardMove(proposal); tell(player, "Territorial borders changed. Request a fresh route; existing orders were kept."); return; }
+        for (UUID id : proposal.units) {
+            Queue<BlockPos> orders = orderQueue(proposal.kind, id, proposal.owner);
+            if (orders == null || !List.copyOf(orders).equals(proposal.oldOrders.get(id))
+                    || !proposal.queue && !orderPosition(proposal.kind, id).equals(proposal.starts.get(id))
+                    || proposal.routes.get(id).size() + (proposal.queue ? orders.size() : 0) > MAX_WAYPOINTS) {
+                discardMove(proposal); tell(player, "The units or their orders changed while the route was checked. Issue the order again; existing orders were kept."); return;
+            }
+        }
+        var inspection = moveConfirmations.get(proposal.player);
+        if (inspection == null) {
+            List<List<BlockPos>> paths = new ArrayList<>();
+            for (UUID id : proposal.units) {
+                List<BlockPos> path = new ArrayList<>(); path.add(proposal.starts.get(id)); path.addAll(proposal.routes.get(id)); paths.add(path);
+            }
+            inspection = new MapDataService.TerrainInspection(player.level(), paths);
+            moveConfirmations.put(proposal.player, inspection);
+            tell(player, "Confirming the selected route. Existing orders remain active until verification finishes.");
+        }
+        var readiness = inspection.status(player.level());
+        if (readiness == MapDataService.Verification.PENDING) return;
+        if (readiness == MapDataService.Verification.LIMITED) {
+            discardMove(proposal); tell(player, "This route is too large to confirm at once. Try a closer waypoint; existing orders were kept."); return;
+        }
+        for (UUID id : proposal.units) {
+            BlockPos from = proposal.starts.get(id);
+            for (BlockPos to : proposal.routes.get(id)) {
+                var status = inspection.verifySegment(player.level(), from, to);
+                if (status == com.devc.minecraftempires.network.MapDataService.Verification.BLOCKED
+                        || !proposal.provisional.contains(id) && status != com.devc.minecraftempires.network.MapDataService.Verification.VERIFIED) {
+                    discardMove(proposal); tell(player, status == MapDataService.Verification.BLOCKED
+                            ? "The selected route is now obstructed. Request a fresh route; existing orders were kept."
+                            : "Part of the selected route could not be verified. Request a fresh route; existing orders were kept."); return;
+                }
+                from = to;
+            }
+        }
+        discardMove(proposal);
+        for (UUID id : proposal.units) {
+            Queue<BlockPos> orders = orderQueue(proposal.kind, id, proposal.owner);
+            if (!proposal.queue) orders.clear();
+            orders.addAll(proposal.routes.get(id));
+            if (proposal.kind.equals("ARMY")) for (UUID cohortId : getArmy(id).getDeployedCohortIds()) {
+                Cohort cohort = resolveCohort(cohortId); if (cohort == null || cohort.isGarrisoned()) continue;
+                if (!proposal.queue) cohort.clearWaypoints(); cohort.getWaypoints().addAll(proposal.routes.get(id));
+            }
+            if (proposal.kind.equals("LEGION")) for (Cohort cohort : getLegion(id).allCohorts()) {
+                if (cohort.isDeployed() || cohort.isGarrisoned() || cohort.isDetached()) continue;
+                if (!proposal.queue) cohort.clearWaypoints(); cohort.getWaypoints().addAll(proposal.routes.get(id));
+            }
+            if (proposal.kind.equals("COHORT")) { resolveCohort(id).setDetached(true); resolveCohort(id).setRegrouping(false); }
+        }
+        setDirty(); tell(player, "Movement orders accepted."); ModNetworking.sendSnapshots(player);
+    }
+
+    //cancel move function: discards the move proposal for the given player and removes it from the move proposals and confirmations
+    private void discardMove(MoveProposal proposal) { moveProposals.remove(proposal.player); moveConfirmations.remove(proposal.player); }
+    
     //army movement function: moves the army towards its next waypoint, and removes the waypoint if it has been reached
     /** Shared strategic step, including forced retreat, without changing position at order time. */
     public static void advanceMovement(double x, double z, Queue<BlockPos> waypoints, double speed, BiConsumer<Double, Double> setter) {
@@ -577,10 +896,7 @@ public class ArmyManager extends SavedData {
             if (army == null || !controls(player, army.getOwningStateId()) || army.isEngaged()
                     || !army.isViable(manager) || !validTarget(player.level(), payload.targetPos())) return;
             if (army.isRetreating()) { tell(player, "This army must finish retreating before accepting new orders."); return; }
-            if (!payload.isQueueing()) army.clearWaypoints();
-            if (army.getWaypoints().size() < MAX_WAYPOINTS) army.addWaypoint(payload.targetPos());
-            manager.setDirty();
-            ModNetworking.sendSnapshots(player);
+            manager.proposeMove(player, "ARMY", List.of(army.getArmyId()), payload.targetPos(), payload.isQueueing());
         });
     }
 
@@ -595,10 +911,7 @@ public class ArmyManager extends SavedData {
                 tell(player, "No free legion body is available. Move its army or detached cohorts, or regroup the legion first.");
                 return;
             }
-            if (!payload.isQueueing()) legion.clearWaypoints();
-            if (legion.getWaypoints().size() < MAX_WAYPOINTS) legion.addWaypoint(payload.targetPos());
-            manager.setDirty();
-            ModNetworking.sendSnapshots(player);
+            manager.proposeMove(player, "LEGION", List.of(legion.getLegionId()), payload.targetPos(), payload.isQueueing());
         });
     }
 
@@ -639,8 +952,7 @@ public class ArmyManager extends SavedData {
             }
             if (payload.action().equals("MOVE")) {
                 if (!validTarget(player.level(), payload.initialPosition())) return;
-                tell(player, manager.orderCohorts(state.getStateId(), payload.selectedCohortIds(), payload.initialPosition(), payload.queue())
-                        ? "Detachment movement ordered." : "No orders changed. Select available cohorts that are not retreating.");
+                manager.proposeMove(player, "COHORT", payload.selectedCohortIds(), payload.initialPosition(), payload.queue());
                 return;
             }
             if (!payload.action().equals("COMPOSE")) return;
@@ -715,6 +1027,11 @@ public class ArmyManager extends SavedData {
             if (state == null || !controls(player, state.getStateId())) return;
             ArmyManager manager = get(player.level());
             switch (payload.action()) {
+                case "ACCEPT_ROUTE" -> manager.acceptMove(player, payload.targetId());
+                case "CANCEL_ROUTE" -> {
+                    MoveProposal proposal = manager.moveProposals.get(player.getUUID());
+                    if (proposal != null && proposal.id.equals(payload.targetId())) manager.discardMove(proposal);
+                }
                 case "RECRUIT_LEGION" -> {
                     SettlementData settlement = states.getSettlement(payload.targetId());
                     if (settlement == null || !state.getStateId().equals(settlement.getOwningStateId())) return;

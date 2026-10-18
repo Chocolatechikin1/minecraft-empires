@@ -16,9 +16,9 @@ import java.util.UUID;
  * CLIENT → SERVER.
  * Sent when a player closes BattleMapScreen (via Close button, Auto-Resolve, or Escape).
  *
- * The server removes the player from the session's spectating set. Once the set is empty,
- * isSpectated() returns false and BattleManager.tick() switches to tickIdle(), allowing
- * auto-resolve to trigger after the ABANDONMENT_GRACE_TICKS threshold (200 ticks / 10 s).
+ * The server removes the player from the session's spectating set. Close continues the battle
+ * under AI control. An explicit, authorized AUTO_RESOLVE command instead permits resolution
+ * after all viewers leave for 200 game ticks (10 seconds).
  */
 public record LeaveSpectatePayload(UUID battleId) implements CustomPacketPayload {
     public static final Type<LeaveSpectatePayload> TYPE = new Type<>(

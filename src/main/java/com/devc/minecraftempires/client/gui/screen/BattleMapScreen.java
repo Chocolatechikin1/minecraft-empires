@@ -21,9 +21,12 @@ import java.util.UUID;
 public final class BattleMapScreen extends Screen {
     private final UUID battleId, attackerArmyId, defenderArmyId;
     private BattleGridWidget grid;
-    private int panelWidth, formationIndex;
+    private int panelWidth;
     private boolean registered;
-    private Button formation, withdraw;
+    private Button formation, withdraw, autoResolve;
+    private Button helpButton;
+    private final MapScreen.HelpOverlay help = new MapScreen.HelpOverlay();
+    private static final String HELP = "Battle controls\n\nLeft-click: select a formation\nShift + left-click: add/remove selection\nRight-click: replace movement order\nShift + right-click: queue a waypoint\nDrag empty ground or middle-drag: pan\nMouse wheel: zoom\nR: reset view\nEscape: clear selection, then close\n\nYellow dashed line: accepted route\nBlue dashed line: route being checked\nNumbered squares: queued destinations\n\nDeployment orders reposition units; combat orders move them.\nClose leaves AI in command; use the normal map's Battles list to return.\nScroll this help panel if needed.";
     private static final String[] FORMATIONS = {"LINE", "TRIPLEX", "WEDGE"};
     public BattleMapScreen(UUID battleId, UUID attackerArmyId, UUID defenderArmyId) {
         super(Component.literal("Tactical Battle"));
@@ -41,8 +44,8 @@ public final class BattleMapScreen extends Screen {
             var data = ClientBattleData.get();
             var owned = data.cohorts().values().stream().filter(data::canControl).findFirst().orElse(null);
             if (owned == null) return;
-            String name = FORMATIONS[formationIndex++ % FORMATIONS.length];
-            b.setMessage(Component.literal(name));
+            String current = data.controlsAttacker() ? data.attackerFormation() : data.defenderFormation();
+            String name = FORMATIONS[(java.util.Arrays.asList(FORMATIONS).indexOf(current) + 1) % FORMATIONS.length];
             send(owned.cohortId, name);
         }).bounds(6, height - 112, panelWidth - 12, 20).build());
         withdraw = addRenderableWidget(Button.builder(Component.literal("Withdraw selected"), b -> {
@@ -53,19 +56,27 @@ public final class BattleMapScreen extends Screen {
             ClientMapData.cycleTerrainView(true);
             b.setMessage(ClientMapData.terrainViewButton(true));
         }).bounds(6, height - 136, panelWidth - 12, 20).build());
-        addRenderableWidget(Button.builder(Component.literal("Auto-resolve"), b -> onClose())
-                .tooltip(Tooltip.create(Component.literal("Leave this battle. It resolves from the current troops once all viewers leave for 10 seconds.")))
+        autoResolve = addRenderableWidget(Button.builder(Component.literal("Auto-resolve"), b -> {
+            var data = ClientBattleData.get();
+            data.cohorts().values().stream().filter(data::canControl).findFirst().ifPresent(cohort -> send(cohort.cohortId, "AUTO_RESOLVE"));
+            onClose();
+        }).tooltip(Tooltip.create(Component.literal("Choose automatic resolution once all viewers leave for 10 seconds. Reopening cancels this request.")))
                 .bounds(6, height - 68, panelWidth - 12, 20).build());
         addRenderableWidget(Button.builder(Component.literal("Close"), b -> onClose())
+                .tooltip(Tooltip.create(Component.literal("The battle continues under AI control. Return through the map's Battles list or eye button.")))
                 .bounds(6, height - 46, panelWidth - 12, 20).build());
+        helpButton = addRenderableWidget(Button.builder(Component.literal("?"), b -> { help.toggle(); grid.mouseReleased(0); }).bounds(panelWidth - 25, 5, 18, 18)
+                .tooltip(Tooltip.create(Component.literal("Battle controls and shortcuts"))).build());
     }
     private void send(UUID cohort, String action) {
         ClientPacketDistributor.sendToServer(new BattleCommandPayload(battleId, cohort, 0, 0, true, action));
     }
     @Override public void tick() {
         var data = ClientBattleData.get();
+        formation.setMessage(Component.literal("Formation: " + (data.controlsAttacker() ? data.attackerFormation() : data.defenderFormation()).toLowerCase(java.util.Locale.ROOT)));
+        autoResolve.active = battleId.equals(data.battleId()) && !data.hasEnded() && (data.controlsAttacker() || data.controlsDefender());
         formation.active = battleId.equals(data.battleId()) && data.isDeploymentPhase() && (data.controlsAttacker() || data.controlsDefender());
-        withdraw.active = battleId.equals(data.battleId()) && !data.hasEnded() && !data.isDeploymentPhase()
+        withdraw.active = battleId.equals(data.battleId()) && !data.hasEnded() && !data.isPreparing() && !data.isDeploymentPhase()
                 && grid.getSelectedCohortIds().stream().map(data.cohorts()::get).anyMatch(c -> data.canControl(c) && !c.isRouting && !c.isWithdrawing && c.currentHealth > 0 && !c.escaped);
     }
     @Override public void extractRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {
@@ -93,31 +104,34 @@ public final class BattleMapScreen extends Screen {
                 text(graphics, "Endurance: " + cohort.endurance, y, 0xFFAAB4BE); y += 12;
                 text(graphics, "Speed: " + Math.round(cohort.speed * 50), y, 0xFFAAB4BE); y += 12;
             }
-            String status = cohort.currentHealth == 0 ? "Destroyed" : cohort.escaped ? "Retreated" : cohort.isRouting ? "Routing" : cohort.isWithdrawing ? "Withdrawing" : cohort.isEngaged ? "Engaged" : "Ready";
-            text(graphics, status, y, cohort.isRouting ? 0xFFFF6666 : 0xFFFFD45A);
+            String status = cohort.currentHealth == 0 ? "Destroyed" : cohort.escaped ? "Retreated" : cohort.isRouting ? "Routing" : cohort.isWithdrawing ? "Withdrawing" : cohort.isEngaged ? "Engaged" : cohort.orderStatus.isEmpty() ? "Ready" : cohort.orderStatus;
+            for (var line : font.split(Component.literal(status), panelWidth - 14)) { if (y < height - 139) graphics.text(font, line, 7, y, cohort.isRouting ? 0xFFFF6666 : 0xFFFFD45A); y += 10; }
         }
-        String hint = width >= 590 ? "Left: select | Shift: multi-select/queue | Right: order | Drag: pan | Wheel: zoom | R: reset"
-                : "Right-click: order | Shift: queue | R: reset";
-        graphics.text(font, Component.literal(hint), 6, height - 14, 0xFFAAB4BE);
+        if (!data.deploymentMessage().isEmpty()) graphics.text(font, Component.literal(data.deploymentMessage()), panelWidth + 6, height - 14, 0xFFFFD45A);
         super.extractRenderState(graphics, mouseX, mouseY, partialTick);
+        help.render(graphics, font, width, height, helpButton, HELP);
     }
     private void text(GuiGraphicsExtractor graphics, String value, int y, int color) {
         if (y < height - 139) graphics.text(font, Component.literal(value), 7, y, color);
     }
     @Override public boolean mouseClicked(MouseButtonEvent event, boolean doubleClick) {
+        if (help.click(event, helpButton)) return true;
         if (super.mouseClicked(event, doubleClick)) return true;
-        return grid != null && grid.mouseClicked(event.x(), event.y(), event.button(), minecraft.options.keyShift.isDown());
+        return grid != null && grid.mouseClicked(event.x(), event.y(), event.button(), event.hasShiftDown());
     }
     @Override public boolean mouseReleased(MouseButtonEvent event) {
         return grid != null && grid.mouseReleased(event.button()) || super.mouseReleased(event);
     }
     @Override public boolean mouseDragged(MouseButtonEvent event, double dx, double dy) {
+        if (help.isOpen()) return true;
         return grid != null && grid.mouseDragged(dx, dy, event.button()) || super.mouseDragged(event, dx, dy);
     }
     @Override public boolean mouseScrolled(double x, double y, double sx, double sy) {
+        if (help.scroll(sy)) return true;
         return grid != null && grid.mouseScrolled(x, y, sy) || super.mouseScrolled(x, y, sx, sy);
     }
     @Override public boolean keyPressed(KeyEvent event) {
+        if (help.isOpen()) { if (event.key() == GLFW.GLFW_KEY_ESCAPE) help.close(); else helpButton.keyPressed(event); return true; }
         if (event.key() == GLFW.GLFW_KEY_ESCAPE && grid != null && !grid.getSelectedCohortIds().isEmpty()) {
             grid.clearSelection(); return true;
         }

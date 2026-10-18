@@ -5,6 +5,7 @@ import com.devc.minecraftempires.army.Army;
 import com.devc.minecraftempires.army.ArmyManager;
 import com.devc.minecraftempires.army.Cohort;
 import com.devc.minecraftempires.army.Legion;
+import com.devc.minecraftempires.network.MapDataService;
 import com.devc.minecraftempires.state.StateBalance;
 import com.devc.minecraftempires.state.StateData;
 import com.devc.minecraftempires.state.StateManager;
@@ -14,7 +15,6 @@ import net.minecraft.nbt.CompoundTag;
 import net.minecraft.nbt.ListTag;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.tags.BiomeTags;
 import net.minecraft.util.datafix.DataFixTypes;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.saveddata.SavedData;
@@ -28,6 +28,17 @@ public class ClaimManager extends SavedData {
     private final Map<String, ChunkPos> settlementCenters = new HashMap<>();
     private final Map<UUID, Integer> claimCounts = new HashMap<>();
     private long topologyRevision;
+    private final Map<Long, UUID> pendingInfill = new LinkedHashMap<>();
+    private final Set<Long> rejectedInfill = new HashSet<>();
+    private boolean infillMigrationComplete;
+    private Iterator<ChunkPos> migrationClaims;
+    private PocketJob pocketJob;
+    private long infillRetryAt;
+    private final Map<Long, Long> infillDeferred = new HashMap<>();
+    private final Map<UUID, int[]> ownerBounds = new HashMap<>();
+    private final Map<Long, PocketJob> pausedPockets = new LinkedHashMap<>();
+    private boolean terrainInfillPending;
+    private long terrainInfillAt;
 
     //codec and type for saving/loading
     private static final Codec<ClaimManager> CODEC = CompoundTag.CODEC.xmap(ClaimManager::fromTag, ClaimManager::toTag);
@@ -41,18 +52,30 @@ public class ClaimManager extends SavedData {
         ChunkData old = claims.put(pos, new ChunkData(owner, settlement, garrisoned, tier));
         if (old != null && old.getOwnerUUID() != null) claimCounts.merge(old.getOwnerUUID(), -1, Integer::sum);
         claimCounts.merge(owner, 1, Integer::sum);
+        includeBounds(owner, pos);
+        queueInfillAround(pos, owner);
         markTopologyChanged();
     }
     public void removeClaim(ChunkPos pos) {
         ChunkData old = claims.remove(pos);
         if (old != null) {
             if (old.getOwnerUUID() != null) claimCounts.merge(old.getOwnerUUID(), -1, Integer::sum);
+            queueInfillAround(pos, old.getOwnerUUID());
             markTopologyChanged();
         }
     }
     public void rebuildClaimCounts() {
         claimCounts.clear();
+        ownerBounds.clear();
         for (ChunkData data : claims.values()) if (data.getOwnerUUID() != null) claimCounts.merge(data.getOwnerUUID(), 1, Integer::sum);
+        claims.forEach((pos, data) -> includeBounds(data.getOwnerUUID(), pos));
+    }
+
+    private void includeBounds(UUID owner, ChunkPos pos) {
+        if (owner == null) return;
+        int[] bounds = ownerBounds.computeIfAbsent(owner, ignored -> new int[]{pos.x(), pos.z(), pos.x(), pos.z()});
+        bounds[0] = Math.min(bounds[0], pos.x()); bounds[1] = Math.min(bounds[1], pos.z());
+        bounds[2] = Math.max(bounds[2], pos.x()); bounds[3] = Math.max(bounds[3], pos.z());
     }
 
     //getters and setters
@@ -64,6 +87,149 @@ public class ClaimManager extends SavedData {
     public long getTopologyRevision() { return topologyRevision; }
     /** Also called after direct claim-owner updates such as settlement capture. */
     public void markTopologyChanged() { topologyRevision++; setDirty(); }
+
+    private void queueInfillAround(ChunkPos position, UUID owner) {
+        if (owner == null) return;
+        rejectedInfill.clear();
+        for (int dx = -1; dx <= 1; dx++) for (int dz = -1; dz <= 1; dz++) {
+            ChunkPos next = new ChunkPos(position.x() + dx, position.z() + dz);
+            if (!claims.containsKey(next)) pendingInfill.put(next.pack(), owner);
+        }
+    }
+    public void reconsiderInfill() { rejectedInfill.clear(); infillDeferred.clear(); pausedPockets.clear(); pocketJob = null; infillMigrationComplete = false; migrationClaims = null; setDirty(); }
+    public void terrainChanged() { terrainInfillPending = true; }
+
+    /** Ownership enclosure includes water and diagonal escape gaps; traversability is checked separately. */
+    //technically a class, but struct for resumable pocket infill jobs, which track the state of a claim expansion process
+    private static final class PocketJob {
+        final UUID owner;
+        final long seed;
+        final long revision;
+        final ArrayDeque<ChunkPos> frontier = new ArrayDeque<>();
+        final Set<ChunkPos> cells = new LinkedHashSet<>();
+        final Set<ChunkPos> boundary = new LinkedHashSet<>();
+        final Set<ChunkPos> land = new HashSet<>();
+        Iterator<ChunkPos> inspect;
+        ChunkPos inspecting;
+        int column;
+        BlockPos origin;
+        int radius;
+        boolean rejected;
+        PocketJob(ChunkPos start, UUID owner, long revision) { this.owner = owner; this.seed = start.pack(); this.revision = revision; cells.add(start); frontier.add(start); }
+    }
+
+    /** One resumable pocket at a time; persisted seeds also resume the initial existing-save reconciliation. */
+    //claim infill tick function: processes pending infill claims, checking for valid pockets of land to claim and updating the claim manager state accordingly
+    public void tickInfill(ServerLevel level, long deadline) {
+        if (level.getGameTime() < infillRetryAt || System.nanoTime() >= deadline) return;
+        // Coalesce construction/fluid events; a new physical crossing can make a previously isolated pocket eligible.
+        if (terrainInfillPending && level.getGameTime() >= terrainInfillAt && infillMigrationComplete) {
+            reconsiderInfill(); terrainInfillPending = false; terrainInfillAt = level.getGameTime() + 200;
+        }
+        if (!infillMigrationComplete) {
+            // The snapshot protects the gradual scan from ordinary ownership changes between ticks.
+            if (migrationClaims == null) migrationClaims = new ArrayList<>(claims.keySet()).iterator();
+            for (int i = 0; i < 128 && migrationClaims.hasNext() && System.nanoTime() < deadline; i++) {
+                ChunkPos position = migrationClaims.next(); ChunkData claim = claims.get(position);
+                if (claim != null) queueInfillAround(position, claim.getOwnerUUID());
+            }
+            if (migrationClaims.hasNext()) return;
+            infillMigrationComplete = true; migrationClaims = null; setDirty();
+        }
+        if (pocketJob != null && pocketJob.revision != topologyRevision) pocketJob = null;
+        if (pocketJob == null) {
+            Iterator<Map.Entry<Long, UUID>> seeds = pendingInfill.entrySet().iterator();
+            while (seeds.hasNext()) {
+                var seed = seeds.next(); ChunkPos start = ChunkPos.unpack(seed.getKey());
+                if (claims.containsKey(start) || rejectedInfill.contains(seed.getKey())) { seeds.remove(); continue; }
+                if (level.getGameTime() < infillDeferred.getOrDefault(seed.getKey(), 0L)) continue;
+                PocketJob paused = pausedPockets.remove(seed.getKey());
+                pocketJob = paused != null && paused.revision == topologyRevision ? paused : new PocketJob(start, seed.getValue(), topologyRevision); break;
+            }
+            if (pocketJob == null) return;
+        }
+        PocketJob job = pocketJob;
+        int[] bounds = ownerBounds.get(job.owner);
+        if (bounds == null) { rejectPocket(job); return; }
+        for (int work = 0; work < 128 && !job.frontier.isEmpty() && System.nanoTime() < deadline; work++) {
+            ChunkPos current = job.frontier.removeFirst();
+            for (int dx = -1; dx <= 1; dx++) for (int dz = -1; dz <= 1; dz++) {
+                if (dx == 0 && dz == 0) continue;
+                ChunkPos next = new ChunkPos(current.x() + dx, current.z() + dz);
+                if (next.x() < bounds[0] || next.z() < bounds[1] || next.x() > bounds[2] || next.z() > bounds[3]) job.rejected = true;
+                ChunkData claim = claims.get(next);
+                if (claim != null) {
+                    if (!job.owner.equals(claim.getOwnerUUID())) job.rejected = true;
+                    else job.boundary.add(next);
+                } else if (job.cells.add(next)) job.frontier.addLast(next);
+            }
+            // An unbounded exterior is never guessed to be an enclosed pocket.
+            if (job.rejected) { rejectPocket(job); return; }
+            if (job.cells.size() > 2048) { deferPocket(job, level, 1200); return; }
+        }
+        if (!job.frontier.isEmpty()) return;
+        if (job.inspect == null) job.inspect = job.cells.iterator();
+        while (System.nanoTime() < deadline) {
+            if (job.inspecting == null) {
+                if (!job.inspect.hasNext()) break;
+                job.inspecting = job.inspect.next(); job.column = 0;
+            }
+            int x = job.inspecting.x() * 16 + (job.column & 15), z = job.inspecting.z() * 16 + (job.column >> 4);
+            var ground = MapDataService.baseSurface(level, x, z);
+            if (ground.ground() == MapDataService.Ground.UNKNOWN) { deferPocket(job, level, 5); return; }
+            if (ground.ocean() && (ground.ground() == MapDataService.Ground.DEEP || ground.ground() == MapDataService.Ground.SHALLOW)) { rejectPocket(job); return; }
+            if (ground.dry()) job.land.add(job.inspecting);
+            if (++job.column == 256) job.inspecting = null;
+        }
+        if (job.inspecting != null || job.inspect.hasNext()) return;
+        if (!job.land.isEmpty()) {
+            if (job.origin == null) {
+                for (ChunkPos edge : job.boundary) {
+                    for (int i = 0; i < 256; i++) {
+                        int x = edge.x() * 16 + (i & 15), z = edge.z() * 16 + (i >> 4);
+                        var ground = MapDataService.surface(level, x, z);
+                        if (ground.dry()) { job.origin = new BlockPos(x, (int) ground.height(), z); break; }
+                    }
+                    if (job.origin != null || System.nanoTime() >= deadline) break;
+                }
+                if (job.origin == null) { deferPocket(job, level, 5); return; }
+                for (ChunkPos cell : job.cells) job.radius = Math.max(job.radius, Math.max(Math.abs(cell.x() * 16 + 8 - job.origin.getX()), Math.abs(cell.z() * 16 + 8 - job.origin.getZ())) + 16);
+                if (job.radius > 512) { deferPocket(job, level, 1200); return; }
+            }
+            var reachable = MapDataService.reachableArea(level, job.origin, job.radius, false);
+            if (!reachable.dryChunks().containsAll(job.land)) {
+                if (reachable.status() == MapDataService.Verification.PENDING || reachable.status() == MapDataService.Verification.UNKNOWN
+                        || reachable.status() == MapDataService.Verification.LIMITED) { deferPocket(job, level, 5); return; }
+                rejectPocket(job); return;
+            }
+        }
+        StateManager states = StateManager.get(level); StateData state = states.getState(job.owner);
+        if (state == null) { rejectPocket(job); return; }
+        if (!states.canAcquireChunks(state, getClaimCountForState(job.owner), job.cells.size())) {
+            deferPocket(job, level, 200); return;
+        }
+        if (job.revision != topologyRevision || job.cells.stream().anyMatch(claims::containsKey)) { pocketJob = null; return; }
+        for (ChunkPos cell : job.cells) setClaim(cell, job.owner, "", false, 0);
+        job.cells.forEach(cell -> pendingInfill.remove(cell.pack())); pocketJob = null;
+        states.refreshProgression(level); setDirty();
+    }
+
+    //claim infill helper functions: deferPocket and rejectPocket manage the state of a pocket job, either deferring it for later processing or rejecting it entirely
+    private void deferPocket(PocketJob job, ServerLevel level, int delay) {
+        for (ChunkPos cell : job.cells) if (pendingInfill.containsKey(cell.pack())) infillDeferred.put(cell.pack(), level.getGameTime() + delay);
+        // Retain the survey cursor across pending samples instead of restarting at columns that age before the next retry.
+        if (delay < 1200) {
+            if (pausedPockets.size() >= 16) pausedPockets.remove(pausedPockets.keySet().iterator().next());
+            pausedPockets.put(job.seed, job);
+        }
+        pocketJob = null;
+    }
+
+    private void rejectPocket(PocketJob job) {
+        for (ChunkPos cell : job.cells) { pendingInfill.remove(cell.pack()); rejectedInfill.add(cell.pack()); }
+        if (rejectedInfill.size() > 131072) rejectedInfill.clear();
+        pocketJob = null; setDirty();
+    }
     public double getChunkDistance(ChunkPos a, ChunkPos b) { return Math.hypot((double) a.x() - b.x(), (double) a.z() - b.z()); }
     public double getProtectiveRadius(int ignoredTier) { return StateBalance.SETTLEMENT_RADIUS / 16.0; }
     public double getProtectiveRadius(SettlementData settlement) { return settlement.getProtectiveRadius() / 16.0; }
@@ -93,11 +259,11 @@ public class ClaimManager extends SavedData {
     /** Do not force world generation merely to sample water on the map's distant edge. */
     //land claim checker
     public static boolean isClaimableLand(ServerLevel level, ChunkPos chunk) {
-        BlockPos sample = new BlockPos(chunk.x() * 16 + 8, 64, chunk.z() * 16 + 8);
-        // If the chunk is not available, we cannot determine if it is claimable. The
-        // existing abstract claim fallback permits it without generating remote chunks.
-        if (!level.getWorldBorder().isWithinBounds(sample)) return false;
-        return !level.hasChunkAt(sample) || (!level.getBiome(sample).is(BiomeTags.IS_OCEAN) && !level.getBiome(sample).is(BiomeTags.IS_RIVER));
+        // Unknown columns wait for inspection; water in a forest or custom biome is still water.
+        // This eligibility helper does not establish reachability from an expansion origin.
+        for (int z = 0; z < 16; z++) for (int x = 0; x < 16; x++)
+            if (MapDataService.surface(level, chunk.x() * 16 + x, chunk.z() * 16 + z).usable()) return true;
+        return false;
     }
 
     /** Legacy overload is intentionally unable to conquer without a server/diplomacy context. */
@@ -145,17 +311,21 @@ public class ClaimManager extends SavedData {
             if (states.areAtWar(attacker, other.getOwningStateId()) && other.isViable(armies)) defenders.add(other.getStoredPosition());
         }
         BlockPos position = army.getStoredPosition();
+        var reachable = MapDataService.reachableArea(level, position, StateBalance.CAMPAIGN_RADIUS, false);
+        if (reachable.status() == MapDataService.Verification.PENDING || reachable.status() == MapDataService.Verification.LIMITED) return acquired;
         // Capture the protected core only after reaching its altar and removing its defenders.
         for (SettlementData settlement : new ArrayList<>(states.getAllSettlements())) {
             if (!states.areAtWar(attacker, settlement.getOwningStateId())
                     || horizontalDistanceSquared(position, settlement.getCenterAltarPos()) > 16L * 16
+                    || MapDataService.verifySegment(level, position.getX() + .5, position.getZ() + .5,
+                            settlement.getCenterAltarPos().getX() + .5, settlement.getCenterAltarPos().getZ() + .5) != MapDataService.Verification.VERIFIED
                     || threatened(settlement.getCenterAltarPos(), defenders)) continue;
             List<ChunkPos> captured = claims.entrySet().stream()
                     .filter(e -> settlement.getSettlementId().toString().equals(e.getValue().getSettlementID()) && !attacker.equals(e.getValue().getOwnerUUID()))
                     .map(Map.Entry::getKey).toList();
             if (states.captureSettlement(level, settlement.getSettlementId(), attacker)) acquired.addAll(captured);
         }
-        List<ChunkPos> candidates = StateManager.squareChunks(position, StateBalance.CAMPAIGN_RADIUS);
+        List<ChunkPos> candidates = new ArrayList<>(reachable.chunks());
         candidates.sort(Comparator.comparingLong(c -> horizontalDistanceSquared(position, new BlockPos(c.x() * 16 + 8, position.getY(), c.z() * 16 + 8))));
         for (ChunkPos candidate : candidates) {
             BlockPos center = new BlockPos(candidate.x() * 16 + 8, position.getY(), candidate.z() * 16 + 8);
@@ -185,6 +355,12 @@ public class ClaimManager extends SavedData {
         CompoundTag centers = new CompoundTag();
         settlementCenters.forEach((id, pos) -> centers.putLong(id, pos.pack()));
         tag.put("SettlementCenters", centers);
+        tag.putBoolean("InfillMigrationComplete", infillMigrationComplete);
+        ListTag pending = new ListTag();
+        pendingInfill.forEach((position, owner) -> {
+            CompoundTag item = new CompoundTag(); item.putLong("Position", position); item.putString("Owner", owner.toString()); pending.add(item);
+        });
+        tag.put("PendingInfill", pending);
         return tag;
     }
     private static ClaimManager fromTag(CompoundTag tag) {
@@ -201,6 +377,11 @@ public class ClaimManager extends SavedData {
         CompoundTag centers = tag.getCompound("SettlementCenters").orElse(new CompoundTag());
         for (String id : centers.keySet()) centers.getLong(id).ifPresent(p -> manager.settlementCenters.put(id, ChunkPos.unpack(p)));
         manager.rebuildClaimCounts();
+        manager.infillMigrationComplete = tag.getBoolean("InfillMigrationComplete").orElse(false);
+        for (var value : tag.getListOrEmpty("PendingInfill")) if (value instanceof CompoundTag item) {
+            try { manager.pendingInfill.put(item.getLong("Position").orElseThrow(), UUID.fromString(item.getString("Owner").orElseThrow())); }
+            catch (RuntimeException ignored) { /* An invalid seed must not affect saved ownership. */ }
+        }
         return manager;
     }
 }

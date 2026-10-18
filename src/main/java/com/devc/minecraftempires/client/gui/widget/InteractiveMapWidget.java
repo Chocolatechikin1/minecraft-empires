@@ -56,9 +56,30 @@ public final class InteractiveMapWidget {
     private List<UUID> cohortOrderSelection = List.of();
 
     // Road plans are client previews; the server validates ownership, geometry and price atomically.
-    private boolean roadPlanning, supplyOverlay;
+    private boolean roadPlanning, bridgePlanning, supplyOverlay;
     private final List<BlockPos> roadPoints = new ArrayList<>();
+    private List<List<BlockPos>> routePreview = List.of();
+    public void setRoutePreview(List<List<BlockPos>> runs) {
+        refreshViewport(); routePreview = runs;
+        List<BlockPos> points = runs.stream().flatMap(List::stream).toList(); if (points.isEmpty()) return;
+        int minX = points.stream().mapToInt(BlockPos::getX).min().orElse(0), maxX = points.stream().mapToInt(BlockPos::getX).max().orElse(0);
+        int minZ = points.stream().mapToInt(BlockPos::getZ).min().orElse(0), maxZ = points.stream().mapToInt(BlockPos::getZ).max().orElse(0);
+        centerChunkX = (minX + maxX) / 32.0; centerChunkZ = (minZ + maxZ) / 32.0;
+        zoom = Math.clamp(Math.min(width * 16.0 / (maxX - minX + 64), height * 16.0 / (maxZ - minZ + 64)), MIN_ZOOM, MAX_ZOOM);
+    }
     private UUID selectedCampId;
+    private UUID focusedBridgeId;
+    public void clearBridgeFocus() { focusedBridgeId = null; }
+    public void focusBridge(UUID id) {
+        refreshViewport();
+        var bridge = ClientMapData.get().roads().stream().filter(road -> road.bridge() && road.id().equals(id) && !road.points().isEmpty()).findFirst().orElse(null);
+        if (bridge == null) return;
+        focusedBridgeId = id;
+        var first = bridge.points().getFirst(); var last = bridge.points().getLast();
+        centerChunkX = (first.getX() + last.getX() + 1) / 32.0; centerChunkZ = (first.getZ() + last.getZ() + 1) / 32.0;
+        double fit = Math.min(width, height) * 16.0 / (Math.max(Math.abs(first.getX() - last.getX()), Math.abs(first.getZ() - last.getZ())) + 32);
+        zoom = Math.clamp(Math.min(fit, Math.max(zoom, 12)), MIN_ZOOM, MAX_ZOOM); dragging = false;
+    }
     private Object viewportWorld;
     private int hoverX, hoverY;
     private final List<int[]> occupiedLabels = new ArrayList<>();
@@ -224,8 +245,17 @@ public final class InteractiveMapWidget {
 
                 int eyeX = screenX + iconSize / 2 - 3;
                 int eyeY = screenY + iconSize + 4;
-                graphics.fill(eyeX - 1, eyeY - 1, eyeX + 10, eyeY + 9, 0x88003355);
-                if (font != null) graphics.text(font, Component.literal("\u25CE"), eyeX, eyeY, 0xFF44AAFF);
+                boolean hovered = hoverX >= eyeX - 1 && hoverX <= eyeX + 10 && hoverY >= eyeY - 1 && hoverY <= eyeY + 9;
+                graphics.fill(eyeX - 1, eyeY - 1, eyeX + 10, eyeY + 9, hovered ? 0xFF6C8EB1 : 0xFF305A80);
+                graphics.fill(eyeX - 1, eyeY - 1, eyeX + 10, eyeY, 0xFFB9D5EB);
+                graphics.fill(eyeX - 1, eyeY, eyeX, eyeY + 9, 0xFFB9D5EB);
+                graphics.fill(eyeX, eyeY + 8, eyeX + 10, eyeY + 9, 0xFF11283E);
+                // A tiny eye fits the existing hit box without a font-dependent symbol or new texture.
+                graphics.fill(eyeX + 2, eyeY + 2, eyeX + 7, eyeY + 3, 0xFFF3F9FF);
+                graphics.fill(eyeX + 1, eyeY + 3, eyeX + 8, eyeY + 5, 0xFFF3F9FF);
+                graphics.fill(eyeX + 2, eyeY + 5, eyeX + 7, eyeY + 6, 0xFFF3F9FF);
+                graphics.fill(eyeX + 4, eyeY + 3, eyeX + 6, eyeY + 5, 0xFF132B42);
+                if (hovered && font != null) graphics.setTooltipForNextFrame(font, Component.literal("Open battle map"), hoverX, hoverY);
             }
 
             // Troop count label
@@ -463,7 +493,14 @@ public final class InteractiveMapWidget {
         if (ClientMapData.isLayerVisible(ClientMapData.MapLayer.ROADS)) {
             // Thin overview roads stay subordinate to terrain; planning and supply remain independently visible.
             int thickness = zoom >= 6 ? 2 : 1;
-            for (var road : snapshot.roads()) drawConnectedPath(graphics, road.points(), 0xFFBA9B6D, thickness);
+            for (var road : snapshot.roads()) drawConnectedPath(graphics, road.points(), road.bridge() ? 0xFFE6CE91 : 0xFFBA9B6D, road.bridge() ? Math.max(2, thickness) : thickness, road.bridge());
+        }
+        for (var bridge : snapshot.roads()) if (bridge.bridge() && !bridge.points().isEmpty() && bridge.id().equals(focusedBridgeId)) {
+            drawConnectedPath(graphics, bridge.points(), 0xFFFFFF55, 3, true);
+            for (BlockPos bank : List.of(bridge.points().getFirst(), bridge.points().getLast())) {
+                int px = worldScreenX(bank), py = worldScreenY(bank);
+                if (intersects(px - 5, py - 5, 11, 11)) drawMask(graphics, px - 5, py - 5, px + 6, py + 6, 15, 0xFFFFFF55, 1);
+            }
         }
         if (supplyOverlay) {
             var route = ClientManagementData.get().selectedRoute();
@@ -478,6 +515,7 @@ public final class InteractiveMapWidget {
                 }
             }
         }
+        for (List<BlockPos> run : routePreview) drawConnectedPath(graphics, run, 0xFF65E8D4, 2);
         if (roadPlanning) {
             drawConnectedPath(graphics, expandedRoadPreview(), roadPreviewValid() ? 0xFF88E577 : 0xFFFF7777, 2);
             for (BlockPos point : roadPoints) {
@@ -498,7 +536,7 @@ public final class InteractiveMapWidget {
                     camp.id().equals(selectedCampId) ? 0 : nearMarker(px, py) ? 1 : 4);
         }
         if (roadPlanning || snapshot.logisticsTruncated() || !cohortOrderSelection.isEmpty()) {
-            String message = roadPlanning ? "ROAD PLAN: click points | right-click undo | drag with middle button"
+            String message = roadPlanning ? (bridgePlanning ? "BRIDGE PLAN: click two banks | right-click undo | middle-drag" : "ROAD PLAN: click points | right-click undo | drag with middle button")
                     : !cohortOrderSelection.isEmpty() ? cohortOrderSelection.size() + " cohorts: right-click destination | Shift queues | Escape clears"
                     : "Some infrastructure omitted at this scale; refresh closer to inspect.";
             // Leave the upper-right row clear for the map's view and layer buttons.
@@ -509,6 +547,9 @@ public final class InteractiveMapWidget {
     private int worldScreenX(BlockPos point) { return chunkToScreenX(point.getX() / 16.0); }
     private int worldScreenY(BlockPos point) { return chunkToScreenY(point.getZ() / 16.0); }
     private void drawConnectedPath(GuiGraphicsExtractor graphics, List<BlockPos> points, int color, int thickness) {
+        drawConnectedPath(graphics, points, color, thickness, false);
+    }
+    private void drawConnectedPath(GuiGraphicsExtractor graphics, List<BlockPos> points, int color, int thickness, boolean bridge) {
         BlockPos previous = null;
         for (BlockPos point : points) {
             int px = worldScreenX(point), py = worldScreenY(point);
@@ -517,7 +558,7 @@ public final class InteractiveMapWidget {
             if (previous != null) {
                 int dx = Math.abs((previous.getX() >> 4) - (point.getX() >> 4));
                 int dz = Math.abs((previous.getZ() >> 4) - (point.getZ() >> 4));
-                if (dx + dz <= 1) {
+                if (dx + dz <= 1 || bridge) {
                     int beforeX = worldScreenX(previous), beforeY = worldScreenY(previous);
                     if (previous.getX() == point.getX() || previous.getZ() == point.getZ())
                         graphics.fill(Math.min(px, beforeX), Math.min(py, beforeY), Math.max(px, beforeX) + thickness, Math.max(py, beforeY) + thickness, color);
@@ -559,7 +600,10 @@ public final class InteractiveMapWidget {
     }
 
     public boolean isRoadPlanning() { return roadPlanning; }
-    public void setRoadPlanning(boolean enabled) { roadPlanning = enabled; roadPoints.clear(); dragging = false; }
+    public void setRoadPlanning(boolean enabled) { roadPlanning = enabled; bridgePlanning = false; roadPoints.clear(); dragging = false; focusedBridgeId = null; }
+    public void setBridgePlanning() { setRoadPlanning(true); bridgePlanning = true; }
+    public void restoreBridgePlan(List<BlockPos> points) { setBridgePlanning(); roadPoints.addAll(points.stream().limit(2).toList()); }
+    public boolean isBridgePlanning() { return bridgePlanning; }
     public List<BlockPos> getRoadPoints() { return List.copyOf(roadPoints); }
     public void clearRoadPlan() { roadPoints.clear(); }
     public boolean isSupplyOverlay() { return supplyOverlay; }
@@ -579,6 +623,7 @@ public final class InteractiveMapWidget {
     }
     // Expand the same cardinal staircase used by the server, with an early preview bound.
     public List<BlockPos> expandedRoadPreview() {
+        if (bridgePlanning) return List.copyOf(roadPoints);
         List<BlockPos> result = new ArrayList<>();
         for (BlockPos target : roadPoints) {
             if (result.isEmpty()) result.add(target);
@@ -596,6 +641,10 @@ public final class InteractiveMapWidget {
         return result;
     }
     public boolean roadPreviewValid() {
+        if (bridgePlanning) return roadPoints.size() == 2
+                && (roadPoints.getFirst().getX() == roadPoints.getLast().getX() || roadPoints.getFirst().getZ() == roadPoints.getLast().getZ())
+                && roadPoints.getFirst().distManhattan(roadPoints.getLast()) >= 2
+                && roadPoints.getFirst().distManhattan(roadPoints.getLast()) <= 64;
         List<BlockPos> points = expandedRoadPreview();
         if (roadPoints.size() < 2 || points.size() > StateBalance.MAX_ROAD_CHUNKS) return false;
         UUID viewer = ClientMapData.get().viewerStateId();
@@ -607,7 +656,7 @@ public final class InteractiveMapWidget {
     }
     public int roadNewCells() {
         Set<Long> existing = new HashSet<>(), planned = new HashSet<>();
-        for (var road : ClientMapData.get().roads()) for (BlockPos p : road.points()) existing.add(ChunkPos.containing(p).pack());
+        for (var road : ClientMapData.get().roads()) if (!road.bridge()) for (BlockPos p : road.points()) existing.add(ChunkPos.containing(p).pack());
         for (BlockPos p : expandedRoadPreview()) planned.add(ChunkPos.containing(p).pack());
         planned.removeAll(existing);
         return planned.size();
@@ -662,6 +711,9 @@ public final class InteractiveMapWidget {
     //Shift + Right click queues an additional waypoint instead of overwriting.
     //If no army is selected, deselects everything.
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
+        return mouseClicked(mouseX, mouseY, button, false);
+    }
+    public boolean mouseClicked(double mouseX, double mouseY, int button, boolean shiftHeld) {
         if (!contains(mouseX, mouseY)) return false;
 
         int chunkX = floorChunk(screenToChunkX(mouseX));
@@ -669,8 +721,10 @@ public final class InteractiveMapWidget {
 
         if (roadPlanning) {
             if (button == 0) {
-                BlockPos point = new BlockPos(chunkX * 16 + 8, 100, chunkZ * 16 + 8);
-                if (roadPoints.size() < StateBalance.MAX_ROAD_POINTS && (roadPoints.size() <= 1 || !roadPoints.getLast().equals(point))) roadPoints.add(point);
+                BlockPos point = bridgePlanning ? new BlockPos((int) Math.floor(screenToChunkX(mouseX) * 16), 100,
+                        (int) Math.floor(screenToChunkZ(mouseY) * 16)) : new BlockPos(chunkX * 16 + 8, 100, chunkZ * 16 + 8);
+                if (roadPoints.size() < (bridgePlanning ? 2 : StateBalance.MAX_ROAD_POINTS)
+                        && ((!bridgePlanning && roadPoints.size() <= 1) || roadPoints.isEmpty() || !roadPoints.getLast().equals(point))) roadPoints.add(point);
                 return true;
             }
             if (button == 1) { if (!roadPoints.isEmpty()) roadPoints.removeLast(); return true; }
@@ -684,9 +738,15 @@ public final class InteractiveMapWidget {
                     .map(ArmyMapPayload.CohortSummary::cohortId).sorted().toList();
             boolean shared = ClientArmyData.get().getArmyIdAtChunk(chunkX, chunkZ) != null
                     || ClientArmyData.get().getLegionIdAtChunk(chunkX, chunkZ) != null;
-            if (!nearbyCohorts.isEmpty() && (!shared || net.minecraft.client.Minecraft.getInstance().options.keyShift.isDown())) {
+            if (!nearbyCohorts.isEmpty() && (!shared || shiftHeld)) {
                 int next = (nearbyCohorts.indexOf(selectedArmyId) + 1) % nearbyCohorts.size();
-                selectUnit(nearbyCohorts.get(next)); return true;
+                UUID id = nearbyCohorts.get(next);
+                if (shiftHeld) {
+                    List<UUID> selected = new ArrayList<>(cohortOrderSelection);
+                    if (selected.contains(id)) selected.remove(id); else selected.add(id);
+                    cohortOrderSelection = List.copyOf(selected); selectedArmyId = selected.isEmpty() ? null : selected.getLast(); selectedIsArmy = false;
+                } else selectUnit(id);
+                return true;
             }
             cohortOrderSelection = List.of();
             // Priority 0: spectate eye on an engaged Army?
@@ -697,7 +757,7 @@ public final class InteractiveMapWidget {
             }
 
             // A second click on a camp under the selected unit opens the camp rather than trapping selection on the unit.
-            if (selectedArmyId != null || net.minecraft.client.Minecraft.getInstance().options.keyShift.isDown()) {
+            if (selectedArmyId != null || shiftHeld) {
                 for (var camp : ClientMapData.get().camps()) {
                     if (Math.abs(mouseX - worldScreenX(camp.position())) <= 8 && Math.abs(mouseY - worldScreenY(camp.position())) <= 8) {
                         selectedCampId = camp.id(); selectedChunk = ChunkPos.containing(camp.position()).pack();
@@ -763,7 +823,7 @@ public final class InteractiveMapWidget {
                         : !cohortOrderSelection.isEmpty() ? ClientManagementData.get().stateId()
                         : snapshot.legionsById().containsKey(selectedArmyId) ? snapshot.legionsById().get(selectedArmyId).ownerStateId() : null;
                 if (viewer == null || !viewer.equals(owner)) return true;
-                boolean isQueueing = net.minecraft.client.Minecraft.getInstance().options.keyShift.isDown();
+                boolean isQueueing = shiftHeld;
                 BlockPos targetPos = new BlockPos(chunkX * 16 + 8, 100, chunkZ * 16 + 8);
 
                 if (!cohortOrderSelection.isEmpty()) {
@@ -890,6 +950,7 @@ public final class InteractiveMapWidget {
             selectedArmyId = null; selectedCampId = null; selectedChunk = Long.MIN_VALUE;
             cohortOrderSelection = List.of();
             roadPlanning = false; roadPoints.clear(); supplyOverlay = false;
+            focusedBridgeId = null;
         }
         if (snapshot.version() == loadedSnapshotVersion) {
             return;

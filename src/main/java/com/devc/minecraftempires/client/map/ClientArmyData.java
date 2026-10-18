@@ -33,10 +33,11 @@ public final class ClientArmyData {
             Map<UUID, ArmyMapPayload.ArmySummary> armiesById,
             Map<Long, UUID> armiesByChunk,
             Map<UUID, ArmyMapPayload.CohortSummary> cohortsById,
-            Map<Long, List<UUID>> cohortsByChunk
+            Map<Long, List<UUID>> cohortsByChunk,
+            List<ArmyMapPayload.BattleSummary> battles
     ) {
         static Snapshot empty() {
-            return new Snapshot(Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
+            return new Snapshot(Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), List.of());
         }
 
         //returns a snapshot of the current state of legions and armies on the map, based on the given payload from the server
@@ -68,7 +69,7 @@ public final class ClientArmyData {
                     Collections.unmodifiableMap(legionsByChunk),
                     Collections.unmodifiableMap(armiesById),
                     Collections.unmodifiableMap(armiesByChunk),
-                    Collections.unmodifiableMap(cohortsById), Collections.unmodifiableMap(cohortsByChunk)
+                    Collections.unmodifiableMap(cohortsById), Collections.unmodifiableMap(cohortsByChunk), payload.battles()
             );
         }
 

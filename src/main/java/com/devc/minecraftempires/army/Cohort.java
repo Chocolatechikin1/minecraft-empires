@@ -79,6 +79,23 @@ public class Cohort {
     private double preciseZ;
     private BlockPos retreatTarget;
     private UUID retreatOpponent;
+    private CompoundTag marchState = new CompoundTag();
+    public CompoundTag getMarchState() { return marchState.copy(); }
+    public void setMarchState(CompoundTag value) { marchState = value.copy(); }
+    public String getTerrainStatus() { return marchState.getString("TerrainStatus").orElse(""); }
+    public boolean isRetreatBlocked() { return marchState.getBoolean("BlockedRetreat").orElse(false); }
+
+    //if a battle is interrupted (e.g. server crash, player disconnect), this method applies the outcome of the battle to the cohort, updating soldier count, morale, and routing status
+    public void applyInterruptedBattle(UUID battleId, int survivors, int finalMorale) {
+        if (hasResolvedBattle(battleId)) return;
+        applyTerrainLoss(Math.max(0, soldierCount - survivors));
+        setMorale(finalMorale); setRouting(false); lastResolvedBattleId = battleId;
+    }
+    //terrain loss application: applies losses to the cohort due to terrain effects, ensuring soldier count does not go below zero and clamping supply after losses
+    public void applyTerrainLoss(int losses) {
+        int previous = soldierCount;
+        soldierCount = Math.max(0, soldierCount - Math.max(0, losses)); clampSupplyAfterLosses(previous);
+    }
     private boolean detached, regrouping;
 
     //waypoint tracking
@@ -236,9 +253,10 @@ public class Cohort {
     public void beginRetreat(BlockPos target, UUID opponent) {
         detached = true; regrouping = false;
         retreatTarget = target; retreatOpponent = opponent;
+        marchState.putBoolean("BlockedRetreat", false); marchState.remove("TerrainStatus");
         clearWaypoints(); addWaypoint(target);
     }
-    public void finishRetreat() { retreatTarget = null; retreatOpponent = null; clearWaypoints(); }
+    public void finishRetreat() { retreatTarget = null; retreatOpponent = null; marchState.putBoolean("BlockedRetreat", false); marchState.remove("TerrainStatus"); clearWaypoints(); }
     public void clearRetreatOpponent() { retreatOpponent = null; }
 
     public long getCarriedSupplySoldierTicks() { return carriedSupplySoldierTicks; }
@@ -367,6 +385,7 @@ public class Cohort {
         if (lastResolvedBattleId != null) tag.putString("LastResolvedBattle", lastResolvedBattleId.toString());
         if (retreatTarget != null) tag.putLong("RetreatTarget", retreatTarget.asLong());
         if (retreatOpponent != null) tag.putString("RetreatOpponent", retreatOpponent.toString());
+        tag.put("March", marchState.copy());
         // Deployment tracking
         tag.putString("AssignedArmyId",         assignedArmyId != null ? assignedArmyId.toString() : "");
         tag.putBoolean("IsGarrisoned",           isGarrisoned);
@@ -439,6 +458,7 @@ public class Cohort {
         });
         tag.getLong("RetreatTarget").ifPresent(value -> c.retreatTarget = BlockPos.of(value));
         tag.getString("RetreatOpponent").ifPresent(value -> c.retreatOpponent = UUID.fromString(value));
+        tag.getCompound("March").ifPresent(value -> c.marchState = value.copy());
         c.detached = tag.getBoolean("Detached").orElse(false);
         c.regrouping = tag.getBoolean("Regrouping").orElse(false);
         return c;

@@ -46,8 +46,13 @@ public final class MapScreen extends Screen {
     private UUID requestedSupplyTarget;
     private Object mapWorld;
     private UUID mapViewer;
-    private Button terrainViewButton, roadLayerButton;
+    private Button terrainViewButton, roadLayerButton, battleListButton, helpButton;
+    private final HelpOverlay help = new HelpOverlay();
+    private boolean battlesOpen;
+    private int battleScroll, battleSelected, battleLeft, battleTop, battleWidth, battleHeight;
+    private List<ArmyMapPayload.BattleSummary> displayedBattles = List.of();
     private List<UUID> pendingCohorts;
+    private boolean bridgeManagement;
 
     public MapScreen() {
         this(List.of());
@@ -71,6 +76,10 @@ public final class MapScreen extends Screen {
         this.mapWidget.refreshViewport();
         syncSupplySelection();
 
+        var draft = ClientMapData.bridgeDraft();
+        if (!mapWidget.isRoadPlanning() && draft != null && Objects.equals(draft.owner(), ClientMapData.get().viewerStateId()))
+            mapWidget.restoreBridgePlan(draft.points());
+
         int panelX = this.width - PANEL_WIDTH + 10;
         int buttonY = this.height - 30;
         int buttonWidth = 56;
@@ -92,7 +101,7 @@ public final class MapScreen extends Screen {
 
         // View selection is local: all three modes reuse the same surveyed terrain.
         // Small vanilla square buttons keep the map visible; tooltips/narration carry the full state.
-        int controlsX = MARGIN + mapWidth - 6 - 44;
+        int controlsX = MARGIN + mapWidth - 6 - 68;
         terrainViewButton = this.addRenderableWidget(new MapControlButton(controlsX, MARGIN + 6, false, button -> {
             ClientMapData.cycleTerrainView(false);
             updateMapControlLabels();
@@ -101,6 +110,14 @@ public final class MapScreen extends Screen {
             ClientMapData.toggleLayer(ClientMapData.MapLayer.ROADS);
             updateMapControlLabels();
         }));
+        battleListButton = this.addRenderableWidget(new MapControlButton(controlsX + 48, MARGIN + 6, 2, button -> {
+            battlesOpen = !battlesOpen; help.close(); this.mapWidget.mouseReleased(0);
+            if (battlesOpen) ClientNetworking.requestMapData();
+        }));
+        battleListButton.setMessage(Component.literal("Active battles"));
+        battleListButton.setTooltip(Tooltip.create(Component.literal("Active battles involving your state. Click to open the list.")));
+        helpButton = this.addRenderableWidget(Button.builder(Component.literal("?"), button -> { help.toggle(); battlesOpen = false; this.mapWidget.mouseReleased(0); })
+                .bounds(this.width - 29, 5, 18, 18).tooltip(Tooltip.create(Component.literal("Map controls and shortcuts"))).build());
         updateMapControlLabels();
 
         ClientNetworking.requestMapData();
@@ -128,15 +145,18 @@ public final class MapScreen extends Screen {
 
     /** Native button frame/focus handling with an item icon or a tiny road glyph, without new assets. */
     private static final class MapControlButton extends Button {
-        private final boolean roads;
+        private final int mode;
         MapControlButton(int x, int y, boolean roads, OnPress action) {
+            this(x, y, roads ? 1 : 0, action);
+        }
+        MapControlButton(int x, int y, int mode, OnPress action) {
             super(x, y, 20, 20, Component.empty(), action, DEFAULT_NARRATION);
-            this.roads = roads;
+            this.mode = mode;
         }
         @Override protected void extractContents(GuiGraphicsExtractor g, int mx, int my, float tick) {
             extractDefaultSprite(g);
-            if (!roads) {
-                g.item(Items.MAP.getDefaultInstance(), getX() + 2, getY() + 2);
+            if (mode != 1) {
+                g.item((mode == 2 ? Items.IRON_SWORD : Items.MAP).getDefaultInstance(), getX() + 2, getY() + 2);
                 return;
             }
             int x = getX(), y = getY();
@@ -152,14 +172,22 @@ public final class MapScreen extends Screen {
     }
 
     // State-tab actions return to this initialized map instead of creating a fresh view.
-    public void startRoadPlanning() { if (mapWidget != null && !mapWidget.isRoadPlanning()) mapWidget.setRoadPlanning(true); }
+    public void startRoadPlanning() { if (mapWidget != null && (!mapWidget.isRoadPlanning() || mapWidget.isBridgePlanning())) mapWidget.setRoadPlanning(true); }
+    public void startBridgePlanning() {
+        bridgeManagement = false;
+        if (mapWidget != null && !mapWidget.isBridgePlanning()) {
+            var draft = ClientMapData.bridgeDraft();
+            if (draft != null) mapWidget.restoreBridgePlan(draft.points()); else mapWidget.setBridgePlanning();
+        }
+    }
     public boolean isSupplyRouteVisible() { return mapWidget != null && mapWidget.isSupplyOverlay(); }
     public void toggleSupplyRoute() {
         if (mapWidget != null) { mapWidget.toggleSupplyOverlay(); syncSupplySelection(); }
     }
     private boolean overMapControls(double x, double y) {
         return terrainViewButton != null && terrainViewButton.isMouseOver(x, y)
-                || roadLayerButton != null && roadLayerButton.isMouseOver(x, y);
+                || roadLayerButton != null && roadLayerButton.isMouseOver(x, y)
+                || battleListButton != null && battleListButton.isMouseOver(x, y) || battlesOpen && battleListContains(x, y);
     }
 
     @Override
@@ -178,7 +206,7 @@ public final class MapScreen extends Screen {
     public void extractRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {
         //draw the map widget if it exists
         if (this.mapWidget != null) {
-            boolean overControls = overMapControls(mouseX, mouseY);
+            boolean overControls = help.isOpen() || overMapControls(mouseX, mouseY);
             this.mapWidget.render(graphics, this.font, overControls ? -1 : mouseX, overControls ? -1 : mouseY);
         }
 
@@ -199,8 +227,65 @@ public final class MapScreen extends Screen {
             graphics.disableScissor();
         }
         drawSidebarScrollbar(graphics);
-
+        if (battlesOpen) drawBattleList(graphics, mouseX, mouseY);
         super.extractRenderState(graphics, mouseX, mouseY, partialTick);
+        help.render(graphics, font, width, height, helpButton, mapHelpText());
+    }
+    private boolean battleListContains(double x, double y) { return x >= battleLeft && x < battleLeft + battleWidth && y >= battleTop && y < battleTop + battleHeight; }
+    private void drawBattleList(GuiGraphicsExtractor g, int mx, int my) {
+        displayedBattles = ClientArmyData.get().battles();
+        battleWidth = Math.min(300, Math.max(68, width - PANEL_WIDTH - MARGIN * 2 - 12));
+        battleLeft = Math.max(MARGIN + 4, battleListButton.getRight() - battleWidth); battleTop = battleListButton.getBottom() + 4;
+        battleHeight = Math.max(38, Math.min(height - battleTop - MARGIN - 4, 26 + Math.max(1, displayedBattles.size()) * 40));
+        int visible = Math.max(1, (battleHeight - 26) / 40);
+        battleSelected = Math.clamp(battleSelected, 0, Math.max(0, displayedBattles.size() - 1));
+        battleScroll = Math.clamp(battleScroll, 0, Math.max(0, displayedBattles.size() - visible));
+        g.fill(battleLeft - 1, battleTop - 1, battleLeft + battleWidth + 1, battleTop + battleHeight + 1, 0xCC8BA1B5);
+        g.fill(battleLeft, battleTop, battleLeft + battleWidth, battleTop + battleHeight, 0xB8121E2A);
+        g.text(font, Component.literal("Active battles (" + displayedBattles.size() + ")"), battleLeft + 6, battleTop + 7, 0xFFFFD45A);
+        g.enableScissor(battleLeft, battleTop + 23, battleLeft + battleWidth, battleTop + battleHeight - 2);
+        if (displayedBattles.isEmpty()) g.text(font, Component.literal("No active battles"), battleLeft + 6, battleTop + 25, 0xFFE2EAF2);
+        for (int i = battleScroll; i < Math.min(displayedBattles.size(), battleScroll + visible); i++) {
+            var battle = displayedBattles.get(i); int y = battleTop + 25 + (i - battleScroll) * 40, bx = battleLeft + battleWidth - 48;
+            g.text(font, Component.literal(font.plainSubstrByWidth(battle.title(), Math.max(16, battleWidth - 62))), battleLeft + 6, y, 0xFFF0F4F8);
+            String detail = battle.position().getX() + ", " + battle.position().getZ() + " | " + battle.attackers() + " / " + battle.defenders();
+            g.text(font, Component.literal(font.plainSubstrByWidth(detail, Math.max(16, battleWidth - 62))), battleLeft + 6, y + 12, 0xFFB9C9D8);
+            boolean hovered = mx >= bx && mx < bx + 42 && my >= y && my < y + 20;
+            g.fill(bx, y, bx + 42, y + 20, hovered || i == battleSelected ? 0xFF6986A0 : 0xFF344C63);
+            g.centeredText(font, Component.literal("Open"), bx + 21, y + 6, 0xFFFFFFFF);
+            if (mx >= battleLeft && mx < bx && my >= y && my < y + 26) g.setTooltipForNextFrame(font, Component.literal(battle.title() + "\n" + battle.phase().toLowerCase(Locale.ROOT) + " | " + detail), mx, my);
+        }
+        g.disableScissor();
+        if (displayedBattles.size() > visible) g.text(font, Component.literal("Scroll for more"), battleLeft + 6, battleTop + battleHeight - 11, 0xFFCEDAE5);
+    }
+    /** Shared question-mark panel keeps map shortcuts out of the permanent UI, without another screen file. */
+    public static final class HelpOverlay {
+        private boolean open;
+        private int scroll, left, top, panelWidth, panelHeight, contentHeight;
+        public void toggle() { open = !open; scroll = 0; }
+        public void close() { open = false; }
+        public boolean isOpen() { return open; }
+        public boolean click(MouseButtonEvent event, Button button) {
+            if (!open || button.isMouseOver(event.x(), event.y())) return false;
+            if (event.x() < left || event.x() >= left + panelWidth || event.y() < top || event.y() >= top + panelHeight) close();
+            return true;
+        }
+        public boolean scroll(double amount) { if (!open) return false; scroll = Math.clamp(scroll - (int) (amount * 22), 0, Math.max(0, contentHeight - panelHeight + 12)); return true; }
+        public void render(GuiGraphicsExtractor g, net.minecraft.client.gui.Font font, int width, int height, Button button, String text) {
+            if (!open) return;
+            panelWidth = Math.min(280, width - 20); left = Math.clamp(button.getRight() - panelWidth, 10, Math.max(10, width - panelWidth - 10)); top = button.getBottom() + 4;
+            var lines = font.split(Component.literal(text), panelWidth - 12); contentHeight = lines.size() * 11;
+            panelHeight = Math.min(contentHeight + 12, Math.max(24, height - top - 8)); scroll = Math.clamp(scroll, 0, Math.max(0, contentHeight - panelHeight + 12));
+            g.fill(left - 1, top - 1, left + panelWidth + 1, top + panelHeight + 1, 0xFFD3BC77);
+            g.fill(left, top, left + panelWidth, top + panelHeight, 0xFF17212C);
+            g.enableScissor(left, top + 3, left + panelWidth, top + panelHeight - 3);
+            int y = top + 6 - scroll; for (var line : lines) { g.text(font, line, left + 6, y, 0xFFE1E7ED); y += 11; }
+            g.disableScissor();
+        }
+    }
+    private String mapHelpText() {
+        // Right-click hints and the former permanent controls section now live in this panel.
+        return "Map controls\n\nLeft-click: select a unit, settlement or chunk\nShift + left-click: select multiple independent cohorts\nRight-click: replace movement orders\nShift + right-click: queue a waypoint\nDrag or middle-drag: pan\nMouse wheel: zoom\nR: reset view\nEscape: cancel planning, clear selection, then close\n\nSelect your units to see their dotted movement paths.\nUse the eye below an engaged army or the Battles list to open its battle map.\n\nRoad/bridge planning: left-click adds points, right-click undoes a point, middle-drag pans. Escape cancels planning.\nScroll this help panel if needed.";
     }
 
     private void drawSidebarFrame(GuiGraphicsExtractor graphics) {
@@ -220,7 +305,7 @@ public final class MapScreen extends Screen {
         graphics.fill(panelX + 12, footerTop + 2, this.width - 12, footerTop + 3, 0xFF3E4A55);
     }
 
-    private int drawSidebarContents(GuiGraphicsExtractor graphics, int mouseX, int mouseY) { //TODO: move these contents to an info button
+    private int drawSidebarContents(GuiGraphicsExtractor graphics, int mouseX, int mouseY) { // Controls are available from the question-mark button.
         UUID selectedId = mapWidget == null ? null : mapWidget.getSelectedArmyId();
         ClientArmyData.Snapshot units = ClientArmyData.get();
         boolean selectedUnit = selectedId != null
@@ -230,30 +315,20 @@ public final class MapScreen extends Screen {
                 : selectedUnit ? drawArmyTopBar(graphics, mouseX, mouseY) : drawDetailsPanel(graphics);
         int textX = this.width - PANEL_WIDTH + 12;
         if (mapWidget != null && !mapWidget.isRoadPlanning() && ClientMapData.get().viewerStateId() != null) {
+            var selectedChunk = mapWidget.getSelectedPosition();
+            if (selectedChunk != null) for (var bridge : ClientMapData.get().roads()) {
+                if (bridge.bridge() && bridge.ownerId().equals(ClientMapData.get().viewerStateId())
+                        && bridgeTouchesChunk(bridge, selectedChunk))
+                    y = drawLogisticsAction(graphics, mouseX, mouseY, y, "Remove bridge", () -> stateAction("REMOVE_BRIDGE", bridge.id(), List.of()), true);
+            }
             if (selectedUnit && units.armiesById().containsKey(selectedId)) {
                 var army = units.armiesById().get(selectedId);
+                if (army.isEngaged() && army.battleId() != null && army.ownerStateId().equals(ClientMapData.get().viewerStateId()))
+                    y = drawLogisticsAction(graphics, mouseX, mouseY, y, "Return to battle", () -> ClientNetworking.requestSpectate(army.battleId()), true);
                 if (army.ownerStateId().equals(ClientMapData.get().viewerStateId()))
                     y = drawLogisticsAction(graphics, mouseX, mouseY, y, "Create camp (" + StateBalance.CAMP_COST + ")",
                             () -> stateAction("CREATE_CAMP", selectedId, List.of()), !army.isEngaged());
             }
-        }
-        y = drawHeading(graphics, textX, y + 8, Component.translatable("gui.minecraftempires.map.controls").getString());
-        if (mapWidget != null && mapWidget.isRoadPlanning()) {
-            y = drawWrappedHint(graphics, textX, y, "Left-click adds control points (click one cell twice for a single segment). Right-click undoes a point. Middle-drag pans; wheel zooms. Escape cancels. This mode does not issue marching orders.");
-            return y;
-        }
-        y = drawWrappedHint(graphics, textX, y, Component.translatable("gui.minecraftempires.map.controls.general").getString());
-        if (selectedUnit) {
-            UUID owner = units.armiesById().containsKey(selectedId)
-                    ? units.armiesById().get(selectedId).ownerStateId() : units.cohortsById().containsKey(selectedId)
-                    ? units.cohortsById().get(selectedId).ownerStateId() : units.legionsById().get(selectedId).ownerStateId();
-            // Right-click hint
-            String key = owner.equals(ClientMapData.get().viewerStateId())
-                    ? "gui.minecraftempires.map.controls.military" : "gui.minecraftempires.map.controls.foreign";
-            y = drawWrappedHint(graphics, textX, y + 4, Component.translatable(key).getString());
-        } else {
-            y = drawWrappedHint(graphics, textX, y + 4,
-                    Component.translatable("gui.minecraftempires.map.controls.selection").getString());
         }
         return y;
     }
@@ -385,6 +460,16 @@ public final class MapScreen extends Screen {
     //sidebar input handles scrolling and actions; map input handles panning, zooming, and selecting chunks, settlements, and states
     @Override
     public boolean mouseClicked(MouseButtonEvent event, boolean doubleClick) {
+        if (help.click(event, helpButton)) return true;
+        if (battlesOpen && !battleListButton.isMouseOver(event.x(), event.y())) {
+            if (battleListContains(event.x(), event.y())) {
+                int row = (int) (event.y() - battleTop - 25) / 40 + battleScroll;
+                if (event.button() == 0 && event.y() >= battleTop + 25 && row >= 0 && row < displayedBattles.size()
+                        && event.x() >= battleLeft + battleWidth - 48 && event.x() < battleLeft + battleWidth - 6
+                        && (event.y() - battleTop - 25) % 40 < 20) ClientNetworking.requestSpectate(displayedBattles.get(row).battleId());
+            } else battlesOpen = false;
+            return true;
+        }
         syncSidebarContext();
         if (event.button() == 0 && sidebarScroll.containsY(event.y())) {
             for (SidebarAction action : List.copyOf(logisticsActions)) {
@@ -430,7 +515,8 @@ public final class MapScreen extends Screen {
         }
 
         if (event.x() >= this.width - PANEL_WIDTH && event.x() < this.width) return true;
-        boolean handled = this.mapWidget != null && this.mapWidget.mouseClicked(event.x(), event.y(), event.button());
+        boolean handled = this.mapWidget != null && this.mapWidget.mouseClicked(event.x(), event.y(), event.button(), event.hasShiftDown());
+        rememberBridgePlan();
         syncSupplySelection();
         return handled;
     }
@@ -450,6 +536,7 @@ public final class MapScreen extends Screen {
 
     @Override
     public boolean mouseDragged(MouseButtonEvent event, double dragX, double dragY) {
+        if (help.isOpen() || battlesOpen) return true;
         if (event.button() == 0 && sidebarScroll.dragging) {
             sidebarScroll.dragTo(event.y());
             actionButtonY = -1;
@@ -464,6 +551,8 @@ public final class MapScreen extends Screen {
 
     @Override
     public boolean mouseScrolled(double mouseX, double mouseY, double scrollX, double scrollY) {
+        if (help.scroll(scrollY)) return true;
+        if (battlesOpen) { battleScroll = Math.clamp(battleScroll - (int) Math.signum(scrollY), 0, Math.max(0, displayedBattles.size() - 1)); return true; }
         if (overMapControls(mouseX, mouseY)) return true;
         if (mouseX >= this.width - PANEL_WIDTH && mouseX < this.width && mouseY >= 0 && mouseY < this.height) {
             syncSidebarContext();
@@ -480,7 +569,20 @@ public final class MapScreen extends Screen {
 
     @Override
     public boolean keyPressed(KeyEvent event) {
+        if (help.isOpen()) { if (event.key() == GLFW.GLFW_KEY_ESCAPE) help.close(); else helpButton.keyPressed(event); return true; }
+        if (battlesOpen) {
+            if (event.key() == GLFW.GLFW_KEY_ESCAPE) battlesOpen = false;
+            else if (event.key() == GLFW.GLFW_KEY_DOWN) battleSelected = Math.min(Math.max(0, displayedBattles.size() - 1), battleSelected + 1);
+            else if (event.key() == GLFW.GLFW_KEY_UP) battleSelected = Math.max(0, battleSelected - 1);
+            else if (event.key() == GLFW.GLFW_KEY_ENTER && battleSelected < displayedBattles.size()) ClientNetworking.requestSpectate(displayedBattles.get(battleSelected).battleId());
+            int visible = Math.max(1, (battleHeight - 26) / 40);
+            if (battleSelected < battleScroll) battleScroll = battleSelected;
+            if (battleSelected >= battleScroll + visible) battleScroll = battleSelected - visible + 1;
+            return true;
+        }
         if (event.key() == GLFW.GLFW_KEY_ESCAPE && mapWidget != null && mapWidget.isRoadPlanning()) {
+            if (mapWidget.isBridgePlanning() && bridgeManagement) { bridgeManagement = false; mapWidget.clearBridgeFocus(); return true; }
+            if (mapWidget.isBridgePlanning()) cancelBridgePlan();
             mapWidget.setRoadPlanning(false);
             return true;
         }
@@ -504,6 +606,7 @@ public final class MapScreen extends Screen {
 
     @Override
     public void removed() {
+        rememberBridgePlan();
         if (requestedSupplyTarget != null && minecraft != null && minecraft.getConnection() != null)
             stateAction("SELECT_SUPPLY", null, List.of());
         requestedSupplyTarget = null;
@@ -560,6 +663,7 @@ public final class MapScreen extends Screen {
                 y = drawLine(graphics, textX, y, "Status", "\u00a7cIn Battle"); //shows the status of the selected army, colored in light gray
                 //shows the status of the selected army, colored in red
             }
+            if (!armyData.terrainStatus().isEmpty()) y = drawLine(graphics, textX, y, "Movement", armyData.terrainStatus());
             y += 6;
 
             //disband button
@@ -588,9 +692,9 @@ public final class MapScreen extends Screen {
         y = drawLine(graphics, x, y, "Soldiers", Integer.toString(c.soldiers()));
         y = drawLine(graphics, x, y, "Position", c.position().getX() + ", " + c.position().getZ());
         if (!c.ownerStateId().equals(ClientMapData.get().viewerStateId())) return y;
-        y = drawLine(graphics, x, y, "Status", c.retreating() ? "Retreating" : c.waypoints().isEmpty() ? "Stationary" : "Marching");
+        y = drawLine(graphics, x, y, "Status", !c.terrainStatus().isEmpty() ? c.terrainStatus() : c.retreating() ? "Retreating" : c.waypoints().isEmpty() ? "Stationary" : "Marching");
         y = drawLine(graphics, x, y, "Selected cohorts", Integer.toString(Math.max(1, mapWidget.getCohortOrderSelection().size())));
-        y = drawWrappedHint(graphics, x, y, "Right-click to move; Shift-right-click queues a destination. Detached cohorts stay here until ordered. Garrison and regroup from the cohort roster.");
+        y = drawWrappedHint(graphics, x, y, "Detached cohorts stay here until ordered. Garrison and regroup from the cohort roster.");
         drawActionButton(graphics, mx, my, x, y + 4, "Manage cohorts");
         return drawSupplyDetails(graphics, x, y + 30, c.cohortId(), false);
     }
@@ -611,9 +715,48 @@ public final class MapScreen extends Screen {
         ClientPacketDistributor.sendToServer(new StateActionPayload(action, target == null ? new UUID(0, 0) : target, BlockPos.ZERO, "", points));
         ClientNetworking.requestMapData();
     }
+    private void rememberBridgePlan() {
+        if (mapWidget != null && mapWidget.isBridgePlanning()) {
+            var old = ClientMapData.bridgeDraft();
+            if (old != null && !old.points().equals(mapWidget.getRoadPoints())) stateAction("CANCEL_BRIDGE", old.id(), List.of());
+            ClientMapData.saveBridgeDraft(mapWidget.getRoadPoints());
+        }
+    }
+    private void cancelBridgePlan() {
+        var draft = ClientMapData.bridgeDraft();
+        if (draft != null) stateAction("CANCEL_BRIDGE", draft.id(), List.of());
+        ClientMapData.clearBridgeDraft();
+    }
+    private void requestBridge(String action) {
+        rememberBridgePlan(); var draft = ClientMapData.bridgeDraft();
+        if (draft == null || draft.points().size() != 2) return;
+        stateAction(action, draft.id(), draft.points()); ClientMapData.bridgeCheckRequested();
+    }
 
     //when roads are physically loaded, change the wording of these
     private int drawRoadPlan(GuiGraphicsExtractor graphics, int mx, int my) {
+        if (mapWidget.isBridgePlanning()) {
+            rememberBridgePlan();
+            if (bridgeManagement) return drawBridgeManagement(graphics, mx, my);
+            int x = width - PANEL_WIDTH + 12, y = drawHeading(graphics, x, 4, "Plan a bridge");
+            y = drawLogisticsAction(graphics, mx, my, y, "Manage placed bridges (" + ownedBridges().size() + ")", () -> { bridgeManagement = true; ClientNetworking.requestMapData(); }, true);
+            List<BlockPos> points = mapWidget.getRoadPoints();
+            int length = points.size() == 2 ? points.getFirst().distManhattan(points.getLast()) : 0;
+            y = drawLine(graphics, x, y, "Length", length + "/64 blocks");
+            y = drawLine(graphics, x, y, "Width", "3 blocks");
+            y = drawLine(graphics, x, y, "Cost", length * 10L + " emeralds");
+            y = drawWrappedHint(graphics, x, y, "Choose two banks on the same north–south or east–west line. Start on your land. The full deck and approaches must avoid foreign territory.");
+            var draft = ClientMapData.bridgeDraft();
+            String phase = draft == null ? "DRAFT" : draft.phase();
+            if (draft != null) y = drawWrappedHint(graphics, x, y + 4, draft.message());
+            boolean ready = phase.equals("READY"), checking = phase.equals("CHECKING"), built = phase.equals("BUILT");
+            String label = ready ? "Purchase bridge" : checking ? "Checking crossing..." : built ? "Bridge purchased" : phase.equals("FAILED") ? "Retry check" : "Check bridge";
+            y = drawLogisticsAction(graphics, mx, my, y + 4, label, () -> requestBridge(ready ? "BUILD_BRIDGE" : "CHECK_BRIDGE"),
+                    mapWidget.roadPreviewValid() && !checking && !built && (!ready || ClientManagementData.get().treasury() >= length * 10L));
+            if (checking) y = drawLogisticsAction(graphics, mx, my, y, "Retry / check status", () -> requestBridge("CHECK_BRIDGE"), true);
+            y = drawLogisticsAction(graphics, mx, my, y, "Clear points", () -> { cancelBridgePlan(); mapWidget.clearRoadPlan(); }, !points.isEmpty());
+            return drawLogisticsAction(graphics, mx, my, y, "Cancel bridge planning", () -> { cancelBridgePlan(); mapWidget.setRoadPlanning(false); }, true);
+        }
         int x = width - PANEL_WIDTH + 12, y = drawHeading(graphics, x, 4, "Plan abstract roads");
         int cells = mapWidget.expandedRoadPreview().size();
         long cost = (long) mapWidget.roadNewCells() * StateBalance.ROAD_COST_PER_CHUNK;
@@ -634,6 +777,40 @@ public final class MapScreen extends Screen {
         }, mapWidget.roadPreviewValid());
         y = drawLogisticsAction(graphics, mx, my, y, "Clear points", mapWidget::clearRoadPlan, cells > 0);
         return drawLogisticsAction(graphics, mx, my, y, "Cancel road planning", () -> mapWidget.setRoadPlanning(false), true);
+    }
+    private List<MapDataPayload.RoadSummary> ownedBridges() {
+        UUID owner = ClientMapData.get().viewerStateId();
+        return ClientMapData.get().roads().stream().filter(bridge -> bridge.bridge() && bridge.ownerId().equals(owner) && !bridge.points().isEmpty())
+                .collect(Collectors.toMap(MapDataPayload.RoadSummary::id, bridge -> bridge, (first, next) -> first)).values().stream()
+                .sorted(java.util.Comparator.comparingInt((MapDataPayload.RoadSummary bridge) -> bridge.points().getFirst().getX())
+                        .thenComparingInt(bridge -> bridge.points().getFirst().getZ()).thenComparing(MapDataPayload.RoadSummary::id)).toList();
+    }
+    private static boolean bridgeTouchesChunk(MapDataPayload.RoadSummary bridge, ChunkPos chunk) {
+        if (bridge.points().isEmpty()) return false;
+        BlockPos first = bridge.points().getFirst(), last = bridge.points().getLast();
+        return chunk.x() >= Math.min(first.getX() >> 4, last.getX() >> 4) && chunk.x() <= Math.max(first.getX() >> 4, last.getX() >> 4)
+                && chunk.z() >= Math.min(first.getZ() >> 4, last.getZ() >> 4) && chunk.z() <= Math.max(first.getZ() >> 4, last.getZ() >> 4);
+    }
+    private int drawBridgeManagement(GuiGraphicsExtractor graphics, int mx, int my) {
+        int x = width - PANEL_WIDTH + 12, y = drawHeading(graphics, x, 4, "Placed bridges");
+        y = drawLogisticsAction(graphics, mx, my, y, "Back to bridge plan", () -> { bridgeManagement = false; mapWidget.clearBridgeFocus(); }, true);
+        var bridges = ownedBridges();
+        y = drawWrappedHint(graphics, x, y, "Bridges controlled by your state: " + bridges.size() + ". Show a crossing on the map or dismantle it from here.");
+        y = drawWrappedHint(graphics, x, y, "Removal needs an available army, legion or cohort near either bank, with no nearby enemies. No refund.");
+        if (ClientMapData.get().logisticsTruncated()) y = drawWrappedHint(graphics, x, y, "Some infrastructure is omitted from this snapshot.");
+        if (bridges.isEmpty()) return drawWrappedHint(graphics, x, y + 4, "Your state controls no bridges in this snapshot.");
+        for (var bridge : bridges) {
+            BlockPos first = bridge.points().getFirst(), last = bridge.points().getLast();
+            y = drawWrappedHint(graphics, x, y + 8, "Bridge: " + first.getX() + ", " + first.getZ() + " to " + last.getX() + ", " + last.getZ());
+            y = drawLine(graphics, x, y, "Span / width", (Math.abs(first.getX() - last.getX()) + Math.abs(first.getZ() - last.getZ())) + " / 3 blocks");
+            y = drawLogisticsAction(graphics, mx, my, y, "Show on map", () -> mapWidget.focusBridge(bridge.id()), true);
+            y = drawLogisticsAction(graphics, mx, my, y, "Remove bridge", () -> minecraft.gui.setScreen(new net.minecraft.client.gui.screens.ConfirmScreen(confirmed -> {
+                minecraft.gui.setScreen(this);
+                if (confirmed) stateAction("REMOVE_BRIDGE", bridge.id(), List.of());
+            }, Component.literal("Remove this bridge?"), Component.literal("Crossing at " + first.getX() + ", " + first.getZ()
+                    + ". Construction costs are not refunded. Troops on the crossing may suffer losses."))), true);
+        }
+        return y;
     }
     private int drawCampDetails(GuiGraphicsExtractor graphics, int mx, int my) {
         UUID id = mapWidget.getSelectedCampId();
@@ -701,6 +878,7 @@ public final class MapScreen extends Screen {
             if (requestedSupplyTarget != null && minecraft.level != null && minecraft.getConnection() != null)
                 stateAction("SELECT_SUPPLY", null, List.of());
             mapWorld = minecraft.level; mapViewer = viewer; requestedSupplyTarget = null;
+            bridgeManagement = false;
             mapWidget.setRoadPlanning(false);
             mapWidget.clearSelectedArmy(); mapWidget.clearSelectedCamp();
             if (mapWidget.isSupplyOverlay()) mapWidget.toggleSupplyOverlay();
@@ -744,7 +922,7 @@ public final class MapScreen extends Screen {
             }
         }
         ChunkPos chunk = mapWidget == null ? null : mapWidget.getSelectedPosition();
-        String context = viewer + ":" + (mapWidget != null && mapWidget.isRoadPlanning() ? "road"
+        String context = viewer + ":" + (mapWidget != null && mapWidget.isRoadPlanning() ? mapWidget.isBridgePlanning() && bridgeManagement ? "bridges" : "road"
                 : mapWidget != null && mapWidget.getSelectedCampId() != null ? "camp:" + mapWidget.getSelectedCampId()
                 : unit != null ? "unit:" + unit : chunk != null ? "chunk:" + chunk.pack() : "state");
         if (!context.equals(sidebarContext)) {
