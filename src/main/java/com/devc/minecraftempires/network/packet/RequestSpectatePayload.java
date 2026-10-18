@@ -50,15 +50,20 @@ public record RequestSpectatePayload(UUID battleId) implements CustomPacketPaylo
 
             BattleManager manager = BattleManager.get(player.level());
             BattleSession session = manager.getBattle(payload.battleId());
-            if (session == null || !session.isActive() || !manager.canSpectate(player, session)) return;
+            if (session == null || !session.isActive()) { player.sendSystemMessage(net.minecraft.network.chat.Component.literal("That battle has ended. Refresh the map to see current battles.")); return; }
+            if (!manager.canSpectate(player, session)) return;
 
             // A player views one battle at a time. Also recover if a screen-switch leave packet
-            // was lost: its old battle must regain its autoresolve countdown.
+            // was lost: its old battle must resume AI control or an explicitly requested autoresolve countdown.
             for (BattleSession previous : manager.getAllBattles()) {
                 if (previous != session) previous.removeSpectator(player.getUUID());
             }
             session.addSpectator(player.getUUID());
             manager.setDirty();
+
+            // A command can open a battle before any empire/management screen has supplied membership.
+            // Terrain requests use that membership, so initialize it before the battle screen opens.
+            PacketDistributor.sendToPlayer(player, com.devc.minecraftempires.network.ManagementDataService.build(player));
 
             // Tell them to open the BattleMapScreen
             PacketDistributor.sendToPlayer(player, new OpenBattleMapPayload(

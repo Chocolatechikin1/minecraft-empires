@@ -254,17 +254,19 @@ public record MapDataPayload( //weird ai formatting, i like it tho
     }
 
     // A road can have several visible runs with the same ID. Never join across hidden or removed cells.
-    public record RoadSummary(UUID id, UUID ownerId, List<BlockPos> points) {
+    public record RoadSummary(UUID id, UUID ownerId, List<BlockPos> points, boolean bridge) {
+        public RoadSummary(UUID id, UUID ownerId, List<BlockPos> points) { this(id, ownerId, points, false); }
         public RoadSummary {
             points = points.stream().map(BlockPos::immutable).toList();
             if (points.size() > MAX_ROAD_POINTS) throw new IllegalArgumentException("Road geometry too large");
         }
         public RoadSummary(RegistryFriendlyByteBuf buffer) {
-            this(buffer.readUUID(), buffer.readUUID(), readBoundedList(buffer, value -> value.readBlockPos(), MAX_ROAD_POINTS));
+            this(buffer.readUUID(), buffer.readUUID(), readBoundedList(buffer, value -> value.readBlockPos(), MAX_ROAD_POINTS), buffer.readBoolean());
         }
         private void write(RegistryFriendlyByteBuf buffer) {
             buffer.writeUUID(id); buffer.writeUUID(ownerId);
             writeList(buffer, points, (point, b) -> b.writeBlockPos(point));
+            buffer.writeBoolean(bridge);
         }
     }
 
