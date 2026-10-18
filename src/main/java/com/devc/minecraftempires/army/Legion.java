@@ -160,10 +160,10 @@ public class Legion {
         return allCohorts().stream().filter(Cohort::isAlive).findFirst().orElse(null);
     }
 
-    //function for deployed and detached cohorts
+    // Select the attached field body, excluding deployed and detached cohorts. Marching orders do not detach a cohort.
     public Cohort getFieldCohort() {
         var candidates = allCohorts().stream().filter(c -> c.isAlive() && !c.isDeployed() && !c.isGarrisoned()
-                && !c.isDetached() && !c.isRetreating() && c.getWaypoints().isEmpty()).toList();
+                && !c.isDetached() && !c.isRetreating()).toList();
         Cohort best = null; int largest = 0;
         // The largest co-located group also gives old saves a sensible anchor without relocating outliers.
         for (Cohort candidate : candidates) {
@@ -176,7 +176,7 @@ public class Legion {
         Cohort anchor = getFieldCohort();
         if (anchor == null) return List.of();
         return allCohorts().stream().filter(c -> c.isAlive() && !c.isDeployed() && !c.isGarrisoned()
-                && !c.isDetached() && !c.isRetreating() && c.getWaypoints().isEmpty()
+                && !c.isDetached() && !c.isRetreating()
                 && ArmyManager.near(anchor.getStoredPosition(), c.getStoredPosition(), ArmyManager.ASSEMBLY_RANGE)).toList();
     }
 

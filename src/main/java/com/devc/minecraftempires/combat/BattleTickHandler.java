@@ -18,5 +18,6 @@ public final class BattleTickHandler {
         var level = event.getServer().overworld();
         BattleManager.get(level).tick(level);
         ArmyManager.get(level).tickArmies(level);
+        com.devc.minecraftempires.commands.BattleTestCommand.tickPending(level);
     }
 }

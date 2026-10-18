@@ -31,13 +31,17 @@ public final class BattleManager extends SavedData {
             Identifier.withDefaultNamespace("minecraftempires_battles"), BattleManager::new, CODEC, DataFixTypes.LEVEL);
     private final Map<UUID, BattleSession> activeBattles = new LinkedHashMap<>();
     private final LinkedHashMap<UUID, String> completedResults = new LinkedHashMap<>();
+    private record NoSpacePair(UUID first, UUID second) {
+        static NoSpacePair of(UUID a, UUID b) { return a.compareTo(b) < 0 ? new NoSpacePair(a, b) : new NoSpacePair(b, a); }
+    }
+    private final LinkedHashSet<NoSpacePair> noSpacePairs = new LinkedHashSet<>();
     private boolean recoveryPending;
     public BattleManager() {}
     public static BattleManager get(ServerLevel level) {
         return level.getServer().overworld().getDataStorage().computeIfAbsent(TYPE);
     }
-    /** Kept for the existing shutdown hook; SavedData has no process-wide cache. */
-    public static void clearAll() {}
+    /** The shutdown hook clears transient deployment previews; saved battles remain in SavedData. */
+    public static void clearAll() { BattleSession.clearDeploymentPreviews(); }
 
     public BattleSession startBattle(Army attacker, Army defender, ServerLevel level) {
         if (attacker.isEngaged()) return getBattle(attacker.getCurrentBattleId());
@@ -47,11 +51,23 @@ public final class BattleManager extends SavedData {
         ArmyManager manager = ArmyManager.get(level);
         if (!attacker.isViable(manager) || !defender.isViable(manager)) return null;
         BlockPos origin = attacker.getStoredPosition();
+        if (com.devc.minecraftempires.network.MapDataService.battleRoute(level, origin, defender.getStoredPosition(), origin.getX(), origin.getZ()).status()
+                != com.devc.minecraftempires.network.MapDataService.Verification.VERIFIED) return null;
+        NoSpacePair pair = NoSpacePair.of(attacker.getArmyId(), defender.getArmyId());
+        if (noSpacePairs.contains(pair)) {
+            // A failed deployment must not reopen every second. Recheck capacity privately until terrain or positions permit it.
+            int a = (int) attacker.getDeployedCohortIds().stream().map(manager::resolveCohort).filter(c -> c != null && c.isAlive()).count();
+            int d = (int) defender.getDeployedCohortIds().stream().map(manager::resolveCohort).filter(c -> c != null && c.isAlive()).count();
+            if (BattleSession.verifyDeployment(level, origin, defender.getStoredPosition(), a, d) != com.devc.minecraftempires.network.MapDataService.Verification.VERIFIED) return null;
+            noSpacePairs.remove(pair);
+        }
         BattleSession session = new BattleSession(attacker.getArmyId(), defender.getArmyId(), origin.getX(), origin.getZ());
+        session.attachTerrain(level);
         attacker.setCampPosition(attacker.getStoredPosition());
         defender.setCampPosition(defender.getStoredPosition());
         deployArmy(session, attacker, true, manager);
         deployArmy(session, defender, false, manager);
+        session.deployStackedCohorts();
         attacker.setCurrentBattleId(session.getBattleId());
         defender.setCurrentBattleId(session.getBattleId());
         attacker.clearWaypoints();
@@ -67,10 +83,10 @@ public final class BattleManager extends SavedData {
         for (UUID id : army.getDeployedCohortIds()) {
             Cohort cohort = manager.resolveCohort(id);
             if (cohort == null || !cohort.isAlive()) continue;
-            CohortData snapshot = CohortData.fromCohort(cohort, 0, attacker ? -20 : 20);
+            CohortData snapshot = CohortData.fromCohort(cohort, cohort.getPreciseX() - session.getMapOriginX(), cohort.getPreciseZ() - session.getMapOriginZ());
             if (attacker) session.addAttackerCohort(snapshot); else session.addDefenderCohort(snapshot);
         }
-        session.applyFormation(attacker, BattleSession.Formation.TRIPLEX);
+        // Retain marching positions and saved bridge columns when the battlefield opens.
     }
     public boolean canControlSide(ServerPlayer player, BattleSession session, boolean attacker) {
         if (player.level() != player.level().getServer().overworld()) return false;
@@ -94,10 +110,12 @@ public final class BattleManager extends SavedData {
         ArmyManager manager = ArmyManager.get(level);
         if (recoveryPending) {
             recoveryPending = false;
-            // Never reconstruct fresh-strength armies after a restart: resolve the saved snapshots.
-            resolveAll(level);
+            // Resume saved casualties and positions; unloaded terrain must be inspected before resolution.
+            for (BattleSession session : activeBattles.values()) session.attachTerrain(level);
         }
         for (BattleSession session : new ArrayList<>(activeBattles.values())) {
+            session.attachTerrain(level);
+            session.checkTerrain();
             for (UUID id : new HashSet<>(session.getSpectatingPlayerIds())) {
                 ServerPlayer player = level.getServer().getPlayerList().getPlayer(id);
                 if (player == null || !canSpectate(player, session)) session.removeSpectator(id);
@@ -108,7 +126,8 @@ public final class BattleManager extends SavedData {
                     session.tick(!hasCommander(session, true, level), !hasCommander(session, false, level));
                 } else {
                     session.tickIdle();
-                    session.tickDeployment();
+                    if (session.continuesWithoutViewers()) session.tick(true, true);
+                    else session.tickDeployment();
                     if (session.isAutoResolveAllowed()) resolve(session, manager);
                 }
             }
@@ -135,8 +154,9 @@ public final class BattleManager extends SavedData {
     }
     private void resolveAll(ServerLevel level) {
         for (BattleSession session : new ArrayList<>(activeBattles.values())) {
-            if (session.isActive()) resolve(session, ArmyManager.get(level));
-            finalizeBattle(session, level);
+            session.attachTerrain(level);
+            if (session.isActive() && !session.continuesWithoutViewers() && !session.isSpectated()) resolve(session, ArmyManager.get(level));
+            if (!session.isActive()) finalizeBattle(session, level);
         }
     }
     public static void resolveAllOnShutdown(MinecraftServer server) {
@@ -151,6 +171,10 @@ public final class BattleManager extends SavedData {
             while (completedResults.size() > 128) completedResults.remove(completedResults.keySet().iterator().next());
         }
         // Send the terminal snapshot while spectators still know the battle, then discard the active entry.
+        if (session.getResultLabel().equals("INTERRUPTED_NO_SPACE")) {
+            noSpacePairs.add(NoSpacePair.of(session.getAttackerArmyId(), session.getDefenderArmyId()));
+            while (noSpacePairs.size() > 128) noSpacePairs.remove(noSpacePairs.iterator().next());
+        }
         broadcastSync(session, level);
         activeBattles.remove(session.getBattleId());
         manager.setDirty();
@@ -160,6 +184,7 @@ public final class BattleManager extends SavedData {
     private void commitSide(BattleSession session, boolean attacking, ArmyManager manager) {
         Army army = manager.getArmy(attacking ? session.getAttackerArmyId() : session.getDefenderArmyId());
         boolean won = session.getResult() == (attacking ? BattleSession.BattleResult.ATTACKER_WINS : BattleSession.BattleResult.DEFENDER_WINS);
+        boolean interrupted = session.getResult() == BattleSession.BattleResult.INTERRUPTED;
         List<CohortData> snapshots = attacking ? session.getAttackerCohorts() : session.getDefenderCohorts();
         boolean needsCommit = snapshots.stream().map(c -> manager.resolveCohort(c.getCohortId()))
                 .anyMatch(c -> c != null && !c.hasResolvedBattle(session.getBattleId()));
@@ -181,17 +206,19 @@ public final class BattleManager extends SavedData {
         if (army != null) {
             army.setCurrentBattleId(null);
             army.finishRetreat();
-            if (!won) army.beginRetreat(retreat, opponent);
+            if (!won && !interrupted) army.beginRetreat(retreat, opponent);
             army.setCampPosition(null);
         }
         for (CohortData data : snapshots) {
             Cohort cohort = manager.resolveCohort(data.getCohortId());
             if (cohort == null || cohort.hasResolvedBattle(session.getBattleId())) continue;
-            cohort.applyBattleOutcome(session.getBattleId(), data.getCurrentHealth(), data.getMorale(), won);
+            if (interrupted) cohort.applyInterruptedBattle(session.getBattleId(), data.getCurrentHealth(), data.getMorale());
+            else cohort.applyBattleOutcome(session.getBattleId(), data.getCurrentHealth(), data.getMorale(), won);
+            cohort.setMarchState(data.marchState(session.getMapOriginX(), session.getMapOriginZ()));
             cohort.finishRetreat();
             var parent = manager.getParentLegion(cohort.getCohortId());
             if (parent != null && parent.getMainCohort() == cohort) parent.clearWaypoints();
-            boolean fleeing = !won || data.isRouting() || data.hasEscaped() || data.isWithdrawing();
+            boolean fleeing = !interrupted && (!won || data.isRouting() || data.hasEscaped() || data.isWithdrawing());
             boolean wasGarrisoned = cohort.isGarrisoned();
             if (cohort.isGarrisoned()) {
                 // A routed garrison abandons its post; successful defenders stay at the altar.
@@ -199,7 +226,13 @@ public final class BattleManager extends SavedData {
                     cohort.setIsGarrisoned(false);
                     cohort.setGarrisonedSettlementId(null);
                 }
-            } else cohort.setStoredPosition(position);
+            } else if (session.hasTerrain()) cohort.setPrecisePos(session.getMapOriginX() + data.getPosition().x, session.getMapOriginZ() + data.getPosition().y);
+            else cohort.setStoredPosition(position);
+            if (data.hasRecoveredFromCollapse()) {
+                if (army != null) army.removeCohortId(cohort.getCohortId());
+                cohort.setAssignedArmyId(null); cohort.setDetached(true); cohort.clearWaypoints(); fleeing = false;
+                CompoundTag march = cohort.getMarchState(); march.putBoolean("Recovered", false); cohort.setMarchState(march);
+            }
             if (fleeing && cohort.isAlive()) cohort.beginRetreat(retreat, opponent);
             if (army != null && (cohort.isGarrisoned() || wasGarrisoned && fleeing || won && fleeing || !cohort.isAlive())) {
                 army.removeCohortId(cohort.getCohortId());
@@ -208,7 +241,9 @@ public final class BattleManager extends SavedData {
         }
         if (army != null) {
             if (!army.isViable(manager)) army.finishRetreat();
-            manager.syncCohortPositions(army);
+            if (!session.hasTerrain()) manager.syncCohortPositions(army);
+            else army.getDeployedCohortIds().stream().map(manager::resolveCohort).filter(c -> c != null && c.isAlive()).findFirst()
+                    .ifPresent(c -> army.setPrecisePos(c.getPreciseX(), c.getPreciseZ()));
         }
     }
     private void notifyOnlinePlayers(BattleSession session, Army attacker, Army defender, ServerLevel level) {
@@ -236,6 +271,8 @@ public final class BattleManager extends SavedData {
         ListTag results = new ListTag();
         completedResults.forEach((id, result) -> { CompoundTag r = new CompoundTag(); r.putString("Id", id.toString()); r.putString("Result", result); results.add(r); });
         tag.put("Results", results);
+        ListTag blocked = new ListTag();
+        noSpacePairs.forEach(pair -> { CompoundTag value = new CompoundTag(); value.putString("First", pair.first.toString()); value.putString("Second", pair.second.toString()); blocked.add(value); }); tag.put("NoSpacePairs", blocked);
         return tag;
     }
     private static BattleManager fromTag(CompoundTag tag) {
@@ -253,6 +290,9 @@ public final class BattleManager extends SavedData {
             });
         });
         manager.recoveryPending = true;
+        tag.getList("NoSpacePairs").ifPresent(values -> { for (int i = 0; i < Math.min(128, values.size()); i++) values.getCompound(i).ifPresent(value -> {
+            try { manager.noSpacePairs.add(NoSpacePair.of(UUID.fromString(value.getString("First").orElseThrow()), UUID.fromString(value.getString("Second").orElseThrow()))); } catch (RuntimeException ignored) { }
+        }); });
         return manager;
     }
 }
