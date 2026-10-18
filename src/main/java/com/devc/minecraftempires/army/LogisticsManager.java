@@ -38,6 +38,22 @@ public final class LogisticsManager extends SavedData {
 
     private final Map<UUID, Road> roads = new LinkedHashMap<>();
     private final Map<UUID, Camp> camps = new LinkedHashMap<>();
+    private final Map<UUID, Bridge> bridges = new LinkedHashMap<>();
+    private final Map<Long, Bridge> bridgeColumns = new HashMap<>();
+    private final Map<UUID, BridgePlan> bridgePlans = new LinkedHashMap<>();
+    private static final class BridgePlan {
+        final UUID id, owner;
+        final List<BlockPos> points;
+        MapDataService.TerrainInspection inspection;
+        boolean purchaseRequested;
+        long expires;
+        String phase = "CHECKING", message = "Checking both banks and the full three-block crossing. Your points are saved.";
+        BridgePlan(UUID id, UUID owner, List<BlockPos> points, ServerLevel level) {
+            this.id = id; this.owner = owner; this.points = List.copyOf(points);
+            inspection = new MapDataService.TerrainInspection(level, List.of(points)); expires = level.getGameTime() + 2400;
+        }
+    }
+    private record BridgeResult(String phase, String message) {}
     private final Set<Long> roadCells = new HashSet<>();
     private final Map<UUID, Long> activeClocks = new HashMap<>();
     private final Map<UUID, Network> networks = new HashMap<>();
@@ -46,6 +62,46 @@ public final class LogisticsManager extends SavedData {
     private long lastGameTime = -1;
     private long infrastructureRevision;
     private long inspectionTick = Long.MIN_VALUE;
+    private final Map<String, SupplyResult> terrainSupplyQueries = new HashMap<>();
+    private long terrainSupplyTick = Long.MIN_VALUE;
+    private record SupplySource(UUID id, String name, BlockPos position, List<BlockPos> path, boolean camp) {}
+    private record SupplySources(List<SupplySource> values, boolean pending) {}
+    private final Map<UUID, SupplySources> terrainSources = new HashMap<>();
+    private record DeliveryKey(UUID owner, BlockPos start, BlockPos end, double maximum, boolean local, long rights, int enemies) {}
+    private static final class DeliveryCheck {
+        final DeliveryKey key;
+        final List<BlockPos> path, enemies;
+        int cursor = 1;
+        double cost, delivery;
+        boolean finalLeg;
+        long requested, completed = Long.MIN_VALUE;
+        MapDataService.Verification status = MapDataService.Verification.PENDING;
+        DeliveryCheck(DeliveryKey key, List<BlockPos> path, List<BlockPos> enemies, long time) { this.key = key; this.path = path; this.enemies = enemies; requested = time; }
+        MapDataService.TerrainRoute result() { return new MapDataService.TerrainRoute(status, status == MapDataService.Verification.VERIFIED ? path : List.of(), cost); }
+    }
+    private final Map<DeliveryKey, DeliveryCheck> deliveries = new LinkedHashMap<>();
+    public void invalidateTerrainDelivery() { deliveries.clear(); terrainSupplyQueries.clear(); terrainSources.clear(); }
+    public boolean hasRoadAt(int x, int z) { return roadCells.contains(ChunkPos.pack(x >> 4, z >> 4)); }
+    private final Map<Long, Boolean> usableRoads = new HashMap<>();
+    private long roadSampleTick = Long.MIN_VALUE, roadSampleRevision = Long.MIN_VALUE;
+    public boolean usableRoadAt(int x, int z, ServerLevel level) {
+        long cell = ChunkPos.pack(x >> 4, z >> 4);
+        if (!roadCells.contains(cell)) return false;
+        long revision = MapDataService.terrainRevision(level) + infrastructureRevision;
+        if (roadSampleTick != level.getGameTime() || roadSampleRevision != revision) { usableRoads.clear(); roadSampleTick = level.getGameTime(); roadSampleRevision = revision; }
+        return usableRoads.computeIfAbsent(cell, ignored -> {
+            BlockPos position = center(cell);
+            if (!MapDataService.surface(level, position).usable()) return false;
+            ChunkPos chunk = ChunkPos.unpack(cell);
+            for (int[] direction : DIRECTIONS) {
+                long adjacent = ChunkPos.pack(chunk.x() + direction[0], chunk.z() + direction[1]);
+                if (!roadCells.contains(adjacent)) continue;
+                BlockPos next = center(adjacent);
+                if (MapDataService.verifySegment(level, position.getX() + .5, position.getZ() + .5, next.getX() + .5, next.getZ() + .5) != MapDataService.Verification.VERIFIED) return false;
+            }
+            return true;
+        });
+    }
 
     public static LogisticsManager get(Level level) {
         return level.getServer().overworld().getDataStorage().computeIfAbsent(TYPE);
@@ -55,6 +111,198 @@ public final class LogisticsManager extends SavedData {
     public record Road(UUID id, UUID ownerId, List<BlockPos> points, List<BlockPos> controlPoints, Set<Long> cells) {
         public Road {
             points = List.copyOf(points); controlPoints = List.copyOf(controlPoints); cells = Set.copyOf(cells);
+        }
+    }
+
+    /** Bank centers, deck elevation and width remain usable by later physical construction. */
+    public record Bridge(UUID id, UUID ownerId, BlockPos start, BlockPos end, int width) {
+        public Bridge {
+            start = start.immutable(); end = end.immutable();
+            int length = Math.abs(start.getX() - end.getX()) + Math.abs(start.getZ() - end.getZ());
+            if (width != 3 || length < 2 || length > 64 || start.getX() != end.getX() && start.getZ() != end.getZ()
+                    || Math.abs(start.getY() - end.getY()) > 1) throw new IllegalArgumentException("Choose a straight bridge of 2–64 blocks with level banks and a three-block width.");
+        }
+        public int length() { return Math.abs(start.getX() - end.getX()) + Math.abs(start.getZ() - end.getZ()); }
+        public long cost() { return length() * 10L; }
+        public double progress(double x, double z) {
+            double dx = end.getX() - start.getX(), dz = end.getZ() - start.getZ();
+            return Math.clamp(((x - start.getX() - .5) * dx + (z - start.getZ() - .5) * dz) / (dx * dx + dz * dz), 0, 1);
+        }
+        public List<BlockPos> points() {
+            List<BlockPos> result = new ArrayList<>();
+            int dx = Integer.signum(end.getX() - start.getX()), dz = Integer.signum(end.getZ() - start.getZ());
+            for (int i = 0; i <= length(); i++) result.add(start.offset(dx * i, 0, dz * i));
+            return List.copyOf(result);
+        }
+        public BlockPos nearestBank(double progress) { return progress <= .5 ? start : end; }
+    }
+
+    public static int collapseLoss(int remainingHealth, double progress) {
+        if (remainingHealth <= 0) return 0;
+        double fraction = progress >= .25 && progress <= .75 ? .5 : .25;
+        return Math.min(remainingHealth, Math.max(1, (int) Math.ceil(remainingHealth * fraction)));
+    }
+
+    public Collection<Bridge> getBridges() { return Collections.unmodifiableCollection(bridges.values()); }
+    public Bridge bridgeAt(int x, int z) { return bridgeColumns.get(BlockPos.asLong(x, 0, z)); }
+    private void rebuildBridgeColumns() {
+        bridgeColumns.clear();
+        for (Bridge bridge : bridges.values()) {
+            int sx = Integer.signum(bridge.end.getZ() - bridge.start.getZ()), sz = Integer.signum(bridge.start.getX() - bridge.end.getX());
+            for (BlockPos point : bridge.points()) for (int side = -1; side <= 1; side++)
+                bridgeColumns.put(BlockPos.asLong(point.getX() + sx * side, 0, point.getZ() + sz * side), bridge);
+        }
+    }
+
+    //bridge construction function: checks the proposed bridge points for validity, and if valid, either returns a ready status or completes the purchase and builds the bridge
+    private BridgeResult buildBridge(ServerLevel level, StateData state, List<BlockPos> points, MapDataService.TerrainInspection inspection, boolean purchase) {
+        if (points.size() != 2) return bridgeFailure("Choose two bank positions for the bridge.");
+        var readiness = inspection.status(level);
+        if (readiness == MapDataService.Verification.PENDING) return new BridgeResult("CHECKING", "Checking both banks and the full three-block crossing. Your points are saved.");
+        if (readiness != MapDataService.Verification.VERIFIED) return bridgeFailure("The crossing includes terrain that cannot currently be inspected. Visit the area, then retry these saved points.");
+        var first = inspection.baseSurface(level, points.getFirst());
+        var last = inspection.baseSurface(level, points.getLast());
+        if (!first.dry() || !last.dry()) return bridgeFailure("Both bridge approaches need usable dry ground.");
+        Bridge bridge;
+        try { bridge = new Bridge(UUID.randomUUID(), state.getStateId(),
+                new BlockPos(points.getFirst().getX(), (int) Math.floor(first.height()), points.getFirst().getZ()),
+                new BlockPos(points.getLast().getX(), (int) Math.floor(last.height()), points.getLast().getZ()), 3); }
+        catch (IllegalArgumentException invalid) { return bridgeFailure(invalid.getMessage()); }
+        ClaimManager claims = ClaimManager.get(level);
+        ChunkData bank = claims.getClaim(ChunkPos.containing(bridge.start));
+        if (bank == null || !state.getStateId().equals(bank.getOwnerUUID())) return bridgeFailure("Start the bridge on your own bank.");
+        int sx = Integer.signum(bridge.end.getZ() - bridge.start.getZ()), sz = Integer.signum(bridge.start.getX() - bridge.end.getX());
+        boolean water = false;
+        for (BlockPos center : bridge.points()) for (int side = -1; side <= 1; side++) {
+            BlockPos point = center.offset(sx * side, 0, sz * side);
+            ChunkData claim = claims.getClaim(ChunkPos.containing(point));
+            if (!level.getWorldBorder().isWithinBounds(point) || claim != null && !state.getStateId().equals(claim.getOwnerUUID()))
+                return bridgeFailure("The deck and both approaches cannot occupy another state's territory.");
+            if (bridgeAt(point.getX(), point.getZ()) != null) return bridgeFailure("A bridge already occupies part of this crossing.");
+            var ground = inspection.baseSurface(level, point);
+            if (ground.ground() == MapDataService.Ground.UNKNOWN) return bridgeFailure("Part of the crossing could not be inspected. Retry these saved points.");
+            boolean approach = center.equals(bridge.start) || center.getX() == bridge.end.getX() && center.getZ() == bridge.end.getZ();
+            if (approach && (!ground.dry() || Math.abs(ground.height() - (center.equals(bridge.start) ? first.height() : last.height())) > .5))
+                return bridgeFailure("Both banks need three blocks of clear, level approach space.");
+            if (!approach && (ground.ground() == MapDataService.Ground.BLOCKED || ground.height() > Math.max(first.height(), last.height()) + .001))
+                return bridgeFailure("An obstacle blocks the proposed deck.");
+            water |= ground.ground() == MapDataService.Ground.DEEP || ground.ground() == MapDataService.Ground.SHALLOW;
+        }
+        if (!water) return bridgeFailure("Choose a crossing over water.");
+        if (!purchase) return new BridgeResult("READY", "Crossing checked. Purchase this bridge for " + bridge.cost() + " emeralds.");
+        if (state.getTreasuryBalance() < bridge.cost()) return bridgeFailure("This bridge costs " + bridge.cost() + " emeralds.");
+        state.deductFunds(bridge.cost()); bridges.put(bridge.id, bridge); rebuildBridgeColumns();
+        MapDataService.crossingsChanged(level); StateManager.get(level).setDirty(); infrastructureChanged();
+        return new BridgeResult("BUILT", "Three-block-wide bridge purchased for " + bridge.cost() + " emeralds.");
+    }
+    private static BridgeResult bridgeFailure(String message) { return new BridgeResult("FAILED", message); }
+
+    //bridge planning function: handles the bridge planning process, including checking the proposed points, requesting a purchase, and building the bridge if valid
+    public String handleBridgePlan(String action, ServerPlayer player, StateData state, UUID id, List<BlockPos> points) {
+        if (player.level() != player.level().getServer().overworld() || !player.getUUID().equals(state.getLeaderId()))
+            return "Only the state leader may plan bridges in the Overworld.";
+        BridgePlan plan = bridgePlans.get(player.getUUID());
+        if (action.equals("CANCEL_BRIDGE")) {
+            if (plan != null && plan.id.equals(id)) bridgePlans.remove(player.getUUID());
+            return "";
+        }
+        // Bound geometry before requesting any terrain, including malicious client coordinates.
+        try {
+            if (points.size() != 2) throw new IllegalArgumentException("Choose two bank positions for the bridge.");
+            new Bridge(id, state.getStateId(), new BlockPos(points.getFirst().getX(), 0, points.getFirst().getZ()),
+                    new BlockPos(points.getLast().getX(), 0, points.getLast().getZ()), 3);
+            if (points.stream().anyMatch(p -> !player.level().getWorldBorder().isWithinBounds(p))) throw new IllegalArgumentException("Choose banks within the world border.");
+        } catch (IllegalArgumentException invalid) {
+            sendBridgeStatus(player, id, state.getStateId(), points, "FAILED", invalid.getMessage()); return "";
+        }
+        boolean matching = plan != null && plan.id.equals(id) && plan.owner.equals(state.getStateId()) && plan.points.equals(points);
+        if (matching && plan.phase.equals("BUILT")) {
+            sendBridgeStatus(player, plan.id, plan.owner, plan.points, plan.phase, plan.message); return "";
+        }
+        if (matching && plan.purchaseRequested && plan.phase.equals("CHECKING") && action.equals("BUILD_BRIDGE")) {
+            sendBridgeStatus(player, plan.id, plan.owner, plan.points, plan.phase, plan.message); return "";
+        }
+        if (action.equals("BUILD_BRIDGE") && (!matching || !plan.phase.equals("READY"))) {
+            sendBridgeStatus(player, id, state.getStateId(), points, "FAILED", "Check these bridge points before purchasing."); return "";
+        }
+        if (!matching || plan.phase.equals("FAILED") || player.level().getGameTime() > plan.expires) {
+            if (bridgePlans.size() >= 128 && !bridgePlans.containsKey(player.getUUID())) return "Too many bridge checks are active. Retry shortly.";
+            plan = new BridgePlan(id, state.getStateId(), points, player.level()); bridgePlans.put(player.getUUID(), plan);
+        }
+        if (action.equals("BUILD_BRIDGE")) {
+            // A ready preview authorizes only this exact crossing. Refresh once more, then finish this purchase over ticks.
+            plan.inspection = new MapDataService.TerrainInspection(player.level(), List.of(plan.points));
+            plan.purchaseRequested = true; plan.expires = player.level().getGameTime() + 2400;
+        }
+        if (!plan.phase.equals("BUILT")) {
+            var result = buildBridge(player.level(), state, plan.points, plan.inspection, plan.purchaseRequested);
+            plan.phase = result.phase; plan.message = result.message;
+        }
+        sendBridgeStatus(player, plan.id, plan.owner, plan.points, plan.phase, plan.message);
+        return "";
+    }
+
+    //bridge status notification service
+    private static void sendBridgeStatus(ServerPlayer player, UUID id, UUID owner, List<BlockPos> points, String phase, String message) {
+        net.neoforged.neoforge.network.PacketDistributor.sendToPlayer(player,
+                new com.devc.minecraftempires.network.packet.StateActionPayload.BridgeStatus(id, owner, points, phase, message));
+    }
+    private void tickBridgePlans(ServerLevel level) {
+        for (var entry : new ArrayList<>(bridgePlans.entrySet())) {
+            BridgePlan plan = entry.getValue(); ServerPlayer player = level.getServer().getPlayerList().getPlayer(entry.getKey());
+            StateData state = StateManager.get(level).getState(plan.owner);
+            if (player == null || player.level() != level || state == null || !player.getUUID().equals(state.getLeaderId())
+                    || !plan.owner.equals(Optional.ofNullable(StateManager.get(level).getStateByPlayer(player.getUUID())).map(StateData::getStateId).orElse(null))) {
+                bridgePlans.remove(entry.getKey()); continue;
+            }
+            if (level.getGameTime() > plan.expires) {
+                if (!plan.phase.equals("BUILT")) sendBridgeStatus(player, plan.id, plan.owner, plan.points, "FAILED", "The bridge check expired. Retry uses the same saved points.");
+                bridgePlans.remove(entry.getKey()); continue;
+            }
+            if (!plan.phase.equals("CHECKING")) continue;
+            var result = buildBridge(level, state, plan.points, plan.inspection, plan.purchaseRequested);
+            if (!result.phase.equals(plan.phase)) {
+                plan.phase = result.phase; plan.message = result.message;
+                sendBridgeStatus(player, plan.id, plan.owner, plan.points, plan.phase, plan.message);
+                player.sendSystemMessage(net.minecraft.network.chat.Component.literal(plan.message));
+                if (plan.phase.equals("BUILT")) com.devc.minecraftempires.network.ModNetworking.sendSnapshots(player);
+            }
+        }
+    }
+
+    //bridge removal function: checks if the player has a valid bridge to remove, and if so, removes it from the game world and updates the state
+    private String removeBridge(ServerLevel level, StateData state, UUID bridgeId) {
+        Bridge bridge = bridges.get(bridgeId);
+        if (bridge == null || !state.getStateId().equals(bridge.ownerId)) return "Choose a bridge controlled by your state.";
+        ArmyManager armies = ArmyManager.get(level);
+        boolean present = armies.getLegionsForState(state.getStateId()).stream().flatMap(l -> l.allCohorts().stream()).anyMatch(c -> {
+            Army army = armies.getArmy(c.getAssignedArmyId());
+            return c.isAlive() && !c.isRetreating() && !c.isGarrisoned() && (army == null || !army.isEngaged() && !army.isRetreating())
+                    && (ArmyManager.near(c.getStoredPosition(), bridge.start, StateBalance.CAMP_OPERATION_RANGE)
+                    || ArmyManager.near(c.getStoredPosition(), bridge.end, StateBalance.CAMP_OPERATION_RANGE));
+        });
+        if (!present) return "Bring an available army, legion or cohort to either bridge approach.";
+        if (hostileWithin(level, state.getStateId(), bridge.start, ArmyManager.ENGAGEMENT_RANGE)
+                || hostileWithin(level, state.getStateId(), bridge.end, ArmyManager.ENGAGEMENT_RANGE)) return "Nearby enemies prevent bridge dismantling.";
+        bridges.remove(bridgeId); rebuildBridgeColumns(); MapDataService.crossingsChanged(level); infrastructureChanged();
+        return "Bridge removed. Construction costs are not refunded.";
+    }
+
+    /** Control may change, but bridge ownership never blocks an enemy's physical crossing. */
+    //bridge status function: checks the status of the bridges in the game world, and updates the state if any bridges have been captured by enemy states
+    private void captureBridges(ServerLevel level) {
+        StateManager states = StateManager.get(level); ClaimManager claims = ClaimManager.get(level); ArmyManager armies = ArmyManager.get(level);
+        for (Bridge bridge : new ArrayList<>(bridges.values())) {
+            ChunkData first = claims.getClaim(ChunkPos.containing(bridge.start)), last = claims.getClaim(ChunkPos.containing(bridge.end));
+            if (first == null || last == null || !Objects.equals(first.getOwnerUUID(), last.getOwnerUUID())) continue;
+            UUID owner = first.getOwnerUUID();
+            if (!states.areAtWar(owner, bridge.ownerId)) continue;
+            var forces = armies.getArmiesForState(owner).stream().filter(a -> a.isViable(armies) && !a.isEngaged() && !a.isRetreating()).toList();
+            if (forces.stream().noneMatch(a -> ArmyManager.near(a.getStoredPosition(), bridge.start, 16))
+                    || forces.stream().noneMatch(a -> ArmyManager.near(a.getStoredPosition(), bridge.end, 16))
+                    || hostileWithin(level, owner, bridge.start, 16) || hostileWithin(level, owner, bridge.end, 16)) continue;
+            bridges.put(bridge.id, new Bridge(bridge.id, owner, bridge.start, bridge.end, bridge.width));
+            rebuildBridgeColumns(); infrastructureChanged();
         }
     }
 
@@ -115,6 +363,9 @@ public final class LogisticsManager extends SavedData {
         rebuildRoadCells();
         // A deleted road discount or camp relay cannot remain usable through a previous search tree.
         networks.clear();
+        terrainSupplyQueries.clear();
+        terrainSources.clear();
+        deliveries.clear();
         setDirty();
     }
     private void rebuildRoadCells() {
@@ -165,9 +416,11 @@ public final class LogisticsManager extends SavedData {
             ChunkData claim = claims.getClaim(ChunkPos.containing(point));
             if (!level.getWorldBorder().isWithinBounds(point) || claim == null || !state.getStateId().equals(claim.getOwnerUUID()))
                 return "Error. The entire road selection must lie in your current territory.";
-            if (!remove && MapDataService.isKnownWaterOrLava(level, state.getStateId(), point))
-                return "Error. The selected road crosses known water or lava. Draw another route.";
+            if (!remove && !MapDataService.surface(level, point).usable())
+                return "The road needs verified usable ground or a crossing. Inspect the route and retry.";
         }
+        if (!remove) for (int i = 1; i < path.size(); i++) if (MapDataService.verifySegment(level, path.get(i - 1).getX() + .5, path.get(i - 1).getZ() + .5, path.get(i).getX() + .5, path.get(i).getZ() + .5) != MapDataService.Verification.VERIFIED)
+            return "The road crosses blocked or unverified terrain. Inspect the full route or choose another path.";
         Set<Long> selected = cellsOf(path);
         if (remove) {
             int before = roadCells.size();
@@ -204,6 +457,8 @@ public final class LogisticsManager extends SavedData {
         return switch (action) {
             case "BUILD_ROAD" -> changeRoad(level, state, points, false);
             case "REMOVE_ROAD" -> changeRoad(level, state, points, true);
+            case "CHECK_BRIDGE", "BUILD_BRIDGE", "CANCEL_BRIDGE" -> handleBridgePlan(action, player, state, targetId, points);
+            case "REMOVE_BRIDGE" -> removeBridge(level, state, targetId);
             case "CREATE_CAMP" -> createCamp(level, state, targetId);
             case "DISMANTLE_CAMP" -> dismantleCamp(level, state, targetId);
             case "SELECT_SUPPLY" -> {
@@ -228,7 +483,7 @@ public final class LogisticsManager extends SavedData {
         ChunkData claim = ClaimManager.get(level).getClaim(ChunkPos.containing(position));
         if (claim == null || !state.getStateId().equals(claim.getOwnerUUID()) || !level.getWorldBorder().isWithinBounds(position))
             return "Error. Establish camps inside your own territory.";
-        if (MapDataService.isKnownWaterOrLava(level, state.getStateId(), position)) return "Error. A camp needs dry ground.";
+        if (!MapDataService.surface(level, position).dry()) return "A camp needs verified dry ground. Inspect the site and retry.";
         if (StateManager.get(level).getAllSettlements().stream().anyMatch(s -> !state.getStateId().equals(s.getOwningStateId())
                 && StateManager.isInSettlementFootprint(s, ChunkPos.containing(position))))
             return "Error. A foreign settlement's protected footprint prevents camp construction.";
@@ -259,6 +514,8 @@ public final class LogisticsManager extends SavedData {
 
     /** Called by the existing once-per-second cadence. No wall-clock catch-up and no offline supply effects. */
     public void tick(ServerLevel level) {
+        tickBridgePlans(level);
+        captureBridges(level);
         long now = level.getGameTime();
         long elapsed = lastGameTime < 0 || now < lastGameTime ? 0 : Math.min(20, now - lastGameTime);
         lastGameTime = now;
@@ -270,7 +527,7 @@ public final class LogisticsManager extends SavedData {
             StateData state = states.getStateByPlayer(player.getUUID());
             if (state != null) online.add(state.getStateId());
         }
-        long deadline = System.nanoTime() + 6_000_000L;
+        long deadline = System.nanoTime() + 250_000L;
         for (StateData state : states.getAllStates()) {
             Network network = ensureNetwork(state.getStateId(), level);
             advanceNetwork(network, state.getStateId(), level, deadline);
@@ -297,7 +554,7 @@ public final class LogisticsManager extends SavedData {
                 results.put(cohort.getCohortId(), result);
                 if (result.connected() || result.recalculating()) continue;
                 List<Camp> nearby = availableCamps.stream().filter(c -> c.stockTicks > 0 && ArmyManager.near(c.position(), cohort.getStoredPosition(), StateBalance.CAMP_SUPPLY_RANGE)
-                                && !lineInterrupted(c.position(), cohort.getStoredPosition(), network.enemies))
+                                && localCampDelivery(stateId, c, cohort.getStoredPosition(), level).status() == MapDataService.Verification.VERIFIED)
                         .sorted(Comparator.comparingDouble(c -> distance(c.position(), cohort.getStoredPosition()))).toList();
                 eligible.put(cohort.getCohortId(), nearby);
             }
@@ -516,9 +773,15 @@ public final class LogisticsManager extends SavedData {
     public SupplyResult describe(UUID stateId, Cohort cohort, ServerLevel level) {
         SupplyResult network = supplyAt(stateId, cohort.getStoredPosition(), level);
         if (network.connected() || network.recalculating()) return network;
+        for (Camp candidate : camps.values()) if (candidate.stockTicks > 0 && stateId.equals(candidate.ownerId()) && ownedCampChunk(candidate, level)
+                && ArmyManager.near(candidate.position(), cohort.getStoredPosition(), StateBalance.CAMP_SUPPLY_RANGE)) {
+            var status = localCampDelivery(stateId, candidate, cohort.getStoredPosition(), level).status();
+            if (status == MapDataService.Verification.PENDING || status == MapDataService.Verification.LIMITED)
+                return new SupplyResult("Recalculating", "Checking camp delivery terrain", null, "", 0, List.of(), false, null, true);
+        }
         Camp camp = camps.values().stream().filter(c -> c.stockTicks > 0 && stateId.equals(c.ownerId()) && ownedCampChunk(c, level)
                         && ArmyManager.near(c.position(), cohort.getStoredPosition(), StateBalance.CAMP_SUPPLY_RANGE)
-                        && !lineInterrupted(c.position(), cohort.getStoredPosition(), ensureNetwork(stateId, level).enemies))
+                        && localCampDelivery(stateId, c, cohort.getStoredPosition(), level).status() == MapDataService.Verification.VERIFIED)
                 .min(Comparator.comparingDouble(c -> distance(c.position(), cohort.getStoredPosition()))).orElse(null);
         return new SupplyResult(camp != null ? "Using camp stock" : cohort.isSupplyExhausted() ? "Exhausted" : "Using carried reserves",
                 network.reason(), camp == null ? null : camp.id(), camp == null ? "" : "Camp stores", network.cost(),
@@ -534,14 +797,108 @@ public final class LogisticsManager extends SavedData {
     }
 
     private SupplyResult supplyAt(UUID stateId, BlockPos position, ServerLevel level) {
-        Network building = ensureNetwork(stateId, level);
-        return querySupply(stateId, position, ClaimManager.get(level), StateManager.get(level), building, level.getGameTime());
+        if (terrainSupplyTick != level.getGameTime()) { terrainSupplyQueries.clear(); terrainSources.clear(); terrainSupplyTick = level.getGameTime(); }
+        return terrainSupply(stateId, position, level);
+    }
+
+    /** Live delivery uses continuous block routes from actual altars and camp positions. */
+    //supply line verification function: checks if a supply line exists from a settlement or camp to a given destination, and returns the result
+    private SupplyResult terrainSupply(UUID owner, BlockPos destination, ServerLevel level) {
+        String key = owner + ":" + destination.getX() + ":" + destination.getZ();
+        SupplyResult cached = terrainSupplyQueries.get(key); if (cached != null) return cached;
+        SupplySources sources = terrainSources.computeIfAbsent(owner, ignored -> connectedSources(owner, level));
+        SupplyResult best = null; boolean pending = sources.pending();
+        for (SupplySource source : sources.values()) {
+            if (distance(source.position(), destination) > StateBalance.SUPPLY_RANGE / StateBalance.ROAD_TRANSPORT_MULTIPLIER) continue;
+            var route = deliveryRoute(owner, source.position(), destination, level, StateBalance.SUPPLY_RANGE, false);
+            pending |= route.status() == MapDataService.Verification.PENDING || route.status() == MapDataService.Verification.LIMITED;
+            if (route.status() == MapDataService.Verification.VERIFIED && (best == null || route.cost() < best.cost())) {
+                List<BlockPos> path = new ArrayList<>(source.path()); path.addAll(route.points());
+                best = new SupplyResult("Supplied", "Verified settlement-rooted route", source.id(), source.name(), route.cost(), List.copyOf(path), true, source.camp() ? source.id() : null, false);
+            }
+        }
+        if (best == null) best = new SupplyResult(pending ? "Recalculating" : "Using carried reserves", pending ? "Verifying terrain along supply routes" : "No usable supply route within range", null, "", 0, List.of(), false, null, pending);
+        terrainSupplyQueries.put(key, best);
+        return best;
+    }
+
+    /** Shared, iterative relay discovery avoids recursive camp cycles and repeats for each cohort. */
+    private SupplySources connectedSources(UUID owner, ServerLevel level) {
+        List<SupplySource> sources = new ArrayList<>(); Set<UUID> reachedCamps = new HashSet<>(); boolean pending = false; int attempts = 0;
+        for (SettlementData root : StateManager.get(level).getAllSettlements()) if (owner.equals(root.getOwningStateId()) && root.isSupplyReady()
+                && accessible(owner, ChunkPos.containing(root.getCenterAltarPos()).pack(), level))
+            sources.add(new SupplySource(root.getSettlementId(), root.getSettlementName(), root.getCenterAltarPos(), List.of(), false));
+        for (int cursor = 0; cursor < sources.size(); cursor++) {
+            SupplySource source = sources.get(cursor);
+            for (Camp camp : camps.values()) {
+                if (reachedCamps.contains(camp.id()) || !owner.equals(camp.ownerId()) || !ownedCampChunk(camp, level)
+                        || distance(source.position(), camp.position()) > StateBalance.SUPPLY_RANGE / StateBalance.ROAD_TRANSPORT_MULTIPLIER) continue;
+                if (++attempts > 256) return new SupplySources(List.copyOf(sources), true);
+                var route = deliveryRoute(owner, source.position(), camp.position(), level, StateBalance.SUPPLY_RANGE, false);
+                pending |= route.status() == MapDataService.Verification.PENDING || route.status() == MapDataService.Verification.LIMITED;
+                if (route.status() == MapDataService.Verification.VERIFIED) {
+                    reachedCamps.add(camp.id()); List<BlockPos> path = new ArrayList<>(source.path()); path.addAll(route.points());
+                    sources.add(new SupplySource(camp.id(), "Camp relay", camp.position(), List.copyOf(path), true));
+                }
+            }
+        }
+        return new SupplySources(List.copyOf(sources), pending);
+    }
+
+    private MapDataService.TerrainRoute localCampDelivery(UUID owner, Camp camp, BlockPos destination, ServerLevel level) {
+        return deliveryRoute(owner, camp.position(), destination, level, StateBalance.CAMP_SUPPLY_RANGE, true);
+    }
+
+    //supply line verification function: verifies the terrain route between a supply source and a destination, taking into account hostile positions and maximum distance
+    private MapDataService.TerrainRoute deliveryRoute(UUID owner, BlockPos start, BlockPos end, ServerLevel level, double maximum, boolean local) {
+        var route = MapDataService.route(level, start, end, 128, owner);
+        if (route.status() != MapDataService.Verification.VERIFIED) return route;
+        List<BlockPos> enemies = ensureNetwork(owner, level).enemies;
+        long rights = ClaimManager.get(level).getTopologyRevision() * 31 + StateManager.get(level).getLogisticsRevision();
+        DeliveryKey key = new DeliveryKey(owner, new BlockPos(start.getX(), 0, start.getZ()), new BlockPos(end.getX(), 0, end.getZ()), maximum, local, rights, enemies.hashCode());
+        DeliveryCheck check = deliveries.get(key);
+        if (check == null || check.path != route.points() || check.completed != Long.MIN_VALUE && level.getGameTime() - check.completed >= 20) {
+            if (check == null && deliveries.size() >= 512) {
+                deliveries.values().removeIf(job -> job.status != MapDataService.Verification.PENDING || level.getGameTime() - job.requested > 200);
+                if (deliveries.size() >= 512) return new MapDataService.TerrainRoute(MapDataService.Verification.PENDING, List.of(), 0);
+            }
+            check = new DeliveryCheck(key, route.points(), List.copyOf(enemies), level.getGameTime()); deliveries.put(key, check);
+        }
+        check.requested = level.getGameTime(); return check.result();
+    }
+
+    /** Delivery validation shares the terrain tick budget; many troops reuse one completed corridor. */
+    public void tickTerrainDelivery(ServerLevel level, long deadline) {
+        for (DeliveryCheck check : new ArrayList<>(deliveries.values())) {
+            if (System.nanoTime() >= deadline) break;
+            if (check.status != MapDataService.Verification.PENDING) continue;
+            if (level.getGameTime() - check.requested > 200) { deliveries.remove(check.key); continue; }
+            DeliveryKey key = check.key;
+            int examined = 0;
+            while (check.cursor < check.path.size() && examined++ < 64 && System.nanoTime() < deadline) {
+                BlockPos previous = check.path.get(check.cursor - 1), point = check.path.get(check.cursor);
+                var verified = MapDataService.verifySegment(level, previous.getX() + .5, previous.getZ() + .5, point.getX() + .5, point.getZ() + .5);
+                if (verified != MapDataService.Verification.VERIFIED) { if (verified == MapDataService.Verification.BLOCKED) check.status = verified; break; }
+                if (lineInterrupted(previous, point, check.enemies)) { check.status = MapDataService.Verification.BLOCKED; break; }
+                var a = MapDataService.surface(level, previous); var b = MapDataService.surface(level, point);
+                double slope = b.height() - a.height(); double length = Math.hypot(distance(previous, point), slope);
+                double step = length * Math.max(a.travelCost(), b.travelCost()) * (slope > 0 ? 1.25 : 1);
+                boolean access = accessible(key.owner, ChunkPos.containing(point).pack(), level);
+                check.finalLeg |= !access; if (check.finalLeg) check.delivery += step;
+                check.cost += step * (!key.local && access && usableRoadAt(previous.getX(), previous.getZ(), level) && usableRoadAt(point.getX(), point.getZ(), level) ? StateBalance.ROAD_TRANSPORT_MULTIPLIER : 1);
+                if (check.cost > key.maximum || check.delivery > StateBalance.FINAL_DELIVERY_RANGE) { check.status = MapDataService.Verification.BLOCKED; break; }
+                check.cursor++;
+            }
+            if (check.cursor >= check.path.size()) check.status = MapDataService.Verification.VERIFIED;
+            if (check.status != MapDataService.Verification.PENDING) check.completed = level.getGameTime();
+            deliveries.remove(key); deliveries.put(key, check);
+        }
     }
 
     /**
      * Evaluate strategic supply from saved territory/infrastructure without loading a
-     * Minecraft world. This completes the same incremental engine used by live play;
-     * only derived caches change, never reserves, camp stock or saved clocks.
+     * Minecraft world. This is the topology/range policy oracle; live play additionally
+     * requires continuous verified terrain. Neither path mutates reserves, stock or clocks.
      */
     public SupplyResult inspectSupply(UUID owner, BlockPos position, ClaimManager claims, StateManager states, List<BlockPos> enemies) {
         long queryTick = inspectionTick++;
@@ -643,10 +1000,7 @@ public final class LogisticsManager extends SavedData {
     public boolean isCampConnected(UUID campId, ServerLevel level) {
         Camp camp = camps.get(campId);
         if (camp == null || !ownedCampChunk(camp, level)) return false;
-        Network current = ensureNetwork(camp.ownerId(), level);
-        Network network = current.complete ? current : current.previous;
-        Node node = network == null ? null : network.best.get(ChunkPos.containing(camp.position()).pack());
-        return node != null && network.connectedCamps.contains(campId) && validRoute(camp.ownerId(), node, level, current, 0);
+        return supplyAt(camp.ownerId(), camp.position(), level).connected();
     }
 
     //cohort selection function
@@ -667,12 +1021,26 @@ public final class LogisticsManager extends SavedData {
         Cohort cohort = state == null || target == null ? null : selectedCohort(player.level(), state.getStateId(), target);
         if (cohort == null) return new SelectedRoute(null, List.of(), false);
         List<BlockPos> route = describe(state.getStateId(), cohort, player.level()).route();
-        return new SelectedRoute(target, route.size() > MAX_ROUTE_DISPLAY ? route.subList(0, MAX_ROUTE_DISPLAY) : route, route.size() > MAX_ROUTE_DISPLAY);
+        List<BlockPos> visible = new ArrayList<>();
+        for (BlockPos point : route) { if (visible.size() >= MAX_ROUTE_DISPLAY || !MapDataService.canPreviewTerrain(player.level(), state.getStateId(), point)) break; visible.add(point); }
+        return new SelectedRoute(target, List.copyOf(visible), visible.size() < route.size());
     }
 
     /** Spend the movement time on either side of a chunk boundary at that side's road speed. */
     public double movementDistance(UUID owner, double x, double z, double directionX, double directionZ, double baseDistance, ServerLevel level) {
-        return movementDistance(x, z, directionX, directionZ, baseDistance, cell -> accessible(owner, cell, level));
+        return movementDistance(x, z, directionX, directionZ, baseDistance, cell -> {
+            if (!accessible(owner, cell, level)) return false;
+            BlockPos center = center(cell);
+            if (!MapDataService.surface(level, center).usable()) return false;
+            ChunkPos chunk = ChunkPos.unpack(cell);
+            for (int[] direction : DIRECTIONS) {
+                long adjacent = ChunkPos.pack(chunk.x() + direction[0], chunk.z() + direction[1]);
+                if (!roadCells.contains(adjacent)) continue;
+                BlockPos next = center(adjacent);
+                if (MapDataService.verifySegment(level, center.getX() + .5, center.getZ() + .5, next.getX() + .5, next.getZ() + .5) != MapDataService.Verification.VERIFIED) return false;
+            }
+            return true;
+        });
     }
     /** Shared strategic movement calculation; the caller supplies current transit rights. */
     public double movementDistance(double x, double z, double directionX, double directionZ, double baseDistance, LongPredicate accessibleCell) {
@@ -716,6 +1084,13 @@ public final class LogisticsManager extends SavedData {
             tag.putLong("Position", camp.position().asLong()); tag.putLong("StockTicks", camp.stockTicks); campTags.add(tag);
         }
         root.put("Camps", campTags);
+        ListTag bridgeTags = new ListTag();
+        for (Bridge bridge : bridges.values()) {
+            CompoundTag tag = new CompoundTag(); tag.putString("Id", bridge.id.toString()); tag.putString("Owner", bridge.ownerId.toString());
+            tag.putLong("Start", bridge.start.asLong()); tag.putLong("End", bridge.end.asLong()); tag.putInt("Width", bridge.width);
+            bridgeTags.add(tag);
+        }
+        root.put("Bridges", bridgeTags);
         CompoundTag clocks = new CompoundTag(); activeClocks.forEach((id, ticks) -> clocks.putLong(id.toString(), ticks)); root.put("ActiveClocks", clocks);
         return root;
     }
@@ -758,6 +1133,14 @@ public final class LogisticsManager extends SavedData {
             try { manager.activeClocks.put(UUID.fromString(key), Math.max(0, clocks.getLong(key).orElse(0L))); }
             catch (IllegalArgumentException ignored) { /* Invalid state identifier in an old optional clock. */ }
         }));
-        manager.rebuildRoadCells(); return manager;
+        for (var value : root.getListOrEmpty("Bridges")) {
+            if (!(value instanceof CompoundTag tag)) continue;
+            try {
+                Bridge bridge = new Bridge(UUID.fromString(tag.getString("Id").orElseThrow()), UUID.fromString(tag.getString("Owner").orElseThrow()),
+                        BlockPos.of(tag.getLong("Start").orElseThrow()), BlockPos.of(tag.getLong("End").orElseThrow()), tag.getInt("Width").orElse(3));
+                manager.bridges.put(bridge.id, bridge);
+            } catch (RuntimeException ignored) { /* Keep other infrastructure when one bridge record is malformed. */ }
+        }
+        manager.rebuildRoadCells(); manager.rebuildBridgeColumns(); return manager;
     }
 }
