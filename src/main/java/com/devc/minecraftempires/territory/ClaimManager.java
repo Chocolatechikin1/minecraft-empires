@@ -297,7 +297,7 @@ public class ClaimManager extends SavedData {
     //campaign area claimer, with additional checks for nearby enemies and settlement capture.
     public List<ChunkPos> claimCampaignArea(ServerLevel level, Army army) {
         List<ChunkPos> acquired = new ArrayList<>();
-        if (level != level.getServer().overworld() || !army.isOnCampaign() || army.isEngaged() || army.isRetreating()) return acquired;
+        if (level != level.getServer().overworld() || !ArmyManager.get(level).isActiveCampaign(army) || army.isEngaged() || army.isRetreating()) return acquired;
         UUID attacker = army.getOwningStateId();
         StateManager states = StateManager.get(level);
         if (states.getState(attacker) == null) return acquired;

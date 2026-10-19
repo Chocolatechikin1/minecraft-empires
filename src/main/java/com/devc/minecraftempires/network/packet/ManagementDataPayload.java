@@ -16,19 +16,27 @@ public record ManagementDataPayload(UUID stateId, String stateName, String tier,
         int graceDays, long dailyIncome, long dailyUpkeep, boolean freeLegion, boolean endgameChoice,
         List<SettlementEntry> settlements, List<LegionEntry> legions, List<CohortEntry> cohorts,
         List<RelationEntry> relations, List<CohortSupplyEntry> supplies, List<CampEntry> camps,
-        SelectedSupplyRoute selectedRoute) implements CustomPacketPayload {
+        SelectedSupplyRoute selectedRoute, List<ArmyEntry> armies, List<CampaignEntry> campaigns) implements CustomPacketPayload {
     public static final Type<ManagementDataPayload> TYPE = new Type<>(Identifier.fromNamespaceAndPath(MinecraftEmpires.MODID, "management_data"));
     public static final StreamCodec<RegistryFriendlyByteBuf, ManagementDataPayload> STREAM_CODEC = StreamCodec.ofMember(ManagementDataPayload::write, ManagementDataPayload::new);
     public ManagementDataPayload {
         settlements = List.copyOf(settlements); legions = List.copyOf(legions);
         cohorts = List.copyOf(cohorts); relations = List.copyOf(relations);
         supplies = List.copyOf(supplies); camps = List.copyOf(camps);
+        armies = List.copyOf(armies); campaigns = List.copyOf(campaigns);
         selectedRoute = selectedRoute == null ? SelectedSupplyRoute.empty() : selectedRoute;
         if (settlements.size() > 8192 || legions.size() > 8192 || cohorts.size() > 8192
-                || relations.size() > 8192 || supplies.size() > 8192 || camps.size() > 8192)
+                || relations.size() > 8192 || supplies.size() > 8192 || camps.size() > 8192 || armies.size() > 8192 || campaigns.size() > 8192)
             throw new IllegalArgumentException("Too many management entries");
     }
     // Retain construction convenience for older callers; matching clients use the extended wire format.
+    public ManagementDataPayload(UUID stateId, String stateName, String tier, long treasury,
+            int graceDays, long dailyIncome, long dailyUpkeep, boolean freeLegion, boolean endgameChoice,
+            List<SettlementEntry> settlements, List<LegionEntry> legions, List<CohortEntry> cohorts,
+            List<RelationEntry> relations, List<CohortSupplyEntry> supplies, List<CampEntry> camps, SelectedSupplyRoute selectedRoute) {
+        this(stateId, stateName, tier, treasury, graceDays, dailyIncome, dailyUpkeep, freeLegion, endgameChoice,
+                settlements, legions, cohorts, relations, supplies, camps, selectedRoute, List.of(), List.of());
+    }
     public ManagementDataPayload(UUID stateId, String stateName, String tier, long treasury,
             int graceDays, long dailyIncome, long dailyUpkeep, boolean freeLegion, boolean endgameChoice,
             List<SettlementEntry> settlements, List<LegionEntry> legions, List<CohortEntry> cohorts,
@@ -40,7 +48,7 @@ public record ManagementDataPayload(UUID stateId, String stateName, String tier,
         this(readId(b), b.readUtf(80), b.readUtf(32), b.readLong(), b.readVarInt(), b.readLong(), b.readLong(),
                 b.readBoolean(), b.readBoolean(), readList(b, SettlementEntry::new), readList(b, LegionEntry::new),
                 readList(b, CohortEntry::new), readList(b, RelationEntry::new), readList(b, CohortSupplyEntry::new),
-                readList(b, CampEntry::new), new SelectedSupplyRoute(b));
+                readList(b, CampEntry::new), new SelectedSupplyRoute(b), readList(b, ArmyEntry::new), readList(b, CampaignEntry::new));
     }
     private void write(RegistryFriendlyByteBuf b) {
         writeId(b, stateId); b.writeUtf(stateName, 80); b.writeUtf(tier, 32); b.writeLong(treasury);
@@ -53,6 +61,43 @@ public record ManagementDataPayload(UUID stateId, String stateName, String tier,
         b.writeVarInt(supplies.size()); supplies.forEach(s -> s.write(b));
         b.writeVarInt(camps.size()); camps.forEach(s -> s.write(b));
         selectedRoute.write(b);
+        b.writeVarInt(armies.size()); armies.forEach(s -> s.write(b));
+        b.writeVarInt(campaigns.size()); campaigns.forEach(s -> s.write(b));
+    }
+    /** Complete private army state is independent of scouted foreign map markers. */
+    public record ArmyEntry(UUID id, String name, BlockPos position, int soldiers, int fieldSoldiers, int morale,
+                           int upkeep, UUID campaignId, UUID battleId, String status, String releaseProblem) {
+        ArmyEntry(RegistryFriendlyByteBuf b) {
+            this(b.readUUID(), b.readUtf(80), b.readBlockPos(), b.readVarInt(), b.readVarInt(), b.readVarInt(), b.readVarInt(),
+                    readId(b), readId(b), b.readUtf(80), b.readUtf(160));
+        }
+        void write(RegistryFriendlyByteBuf b) {
+            b.writeUUID(id); b.writeUtf(name, 80); b.writeBlockPos(position); b.writeVarInt(soldiers); b.writeVarInt(fieldSoldiers);
+            b.writeVarInt(morale); b.writeVarInt(upkeep); writeId(b, campaignId); writeId(b, battleId); b.writeUtf(status, 80); b.writeUtf(releaseProblem, 160);
+        }
+    }
+    public record CampaignEntry(UUID id, String name, String objective, boolean active, BlockPos focus,
+                                List<UUID> armyIds, String startProblem, String endProblem) {
+        public CampaignEntry {
+            armyIds = List.copyOf(armyIds);
+            if (armyIds.size() > 128) throw new IllegalArgumentException("Campaign roster too large");
+        }
+        CampaignEntry(RegistryFriendlyByteBuf b) {
+            this(b.readUUID(), b.readUtf(80), b.readUtf(1024), b.readBoolean(), b.readBoolean() ? b.readBlockPos() : null,
+                    readArmies(b), b.readUtf(160), b.readUtf(160));
+        }
+        private static List<UUID> readArmies(RegistryFriendlyByteBuf b) {
+            int count = b.readVarInt();
+            if (count < 0 || count > 128 || count > b.readableBytes() / 16) throw new IllegalArgumentException("Invalid campaign roster");
+            List<UUID> ids = new ArrayList<>(count);
+            for (int i = 0; i < count; i++) ids.add(b.readUUID());
+            return ids;
+        }
+        void write(RegistryFriendlyByteBuf b) {
+            b.writeUUID(id); b.writeUtf(name, 80); b.writeUtf(objective, 1024); b.writeBoolean(active);
+            b.writeBoolean(focus != null); if (focus != null) b.writeBlockPos(focus);
+            b.writeVarInt(armyIds.size()); armyIds.forEach(b::writeUUID); b.writeUtf(startProblem, 160); b.writeUtf(endProblem, 160);
+        }
     }
     public record SettlementEntry(UUID id, String name, BlockPos position, int tier, int population, int capacity,
             boolean martialLaw, long supplyPreparationTicks) {

@@ -11,20 +11,24 @@ import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.neoforge.network.handling.IPayloadContext;
 import java.util.UUID;
 
-/** Validated tactical movement, withdrawal, or deployment formation. */
+/** Validated tactical movement, enemy targeting, withdrawal, or deployment formation. */
 public record BattleCommandPayload(UUID battleId, UUID cohortId, double targetX, double targetZ,
-                                   boolean clearExisting, String action) implements CustomPacketPayload {
+                                   boolean clearExisting, String action, UUID targetCohortId) implements CustomPacketPayload {
     public static final Type<BattleCommandPayload> TYPE = new Type<>(Identifier.fromNamespaceAndPath(MinecraftEmpires.MODID, "battle_command"));
     public static final StreamCodec<RegistryFriendlyByteBuf, BattleCommandPayload> STREAM_CODEC = StreamCodec.ofMember(BattleCommandPayload::write, BattleCommandPayload::new);
     public BattleCommandPayload(UUID battleId, UUID cohortId, double x, double z, boolean clear) {
         this(battleId, cohortId, x, z, clear, "MOVE");
     }
+    public BattleCommandPayload(UUID battleId, UUID cohortId, double x, double z, boolean clear, String action) {
+        this(battleId, cohortId, x, z, clear, action, null);
+    }
     public BattleCommandPayload(RegistryFriendlyByteBuf buf) {
-        this(buf.readUUID(), buf.readUUID(), buf.readDouble(), buf.readDouble(), buf.readBoolean(), buf.readUtf(24));
+        this(buf.readUUID(), buf.readUUID(), buf.readDouble(), buf.readDouble(), buf.readBoolean(), buf.readUtf(24), buf.readBoolean() ? buf.readUUID() : null);
     }
     private void write(RegistryFriendlyByteBuf buf) {
         buf.writeUUID(battleId); buf.writeUUID(cohortId); buf.writeDouble(targetX); buf.writeDouble(targetZ);
         buf.writeBoolean(clearExisting); buf.writeUtf(action, 24);
+        buf.writeBoolean(targetCohortId != null); if (targetCohortId != null) buf.writeUUID(targetCohortId);
     }
     @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
     public static void handle(BattleCommandPayload payload, IPayloadContext context) {
@@ -36,6 +40,10 @@ public record BattleCommandPayload(UUID battleId, UUID cohortId, double targetX,
             boolean attacker = session.isAttackerCohort(payload.cohortId());
             if (!manager.canControlSide(player, session, attacker)) return;
             switch (payload.action()) {
+                case "ATTACK" -> {
+                    if (!session.issueAttackOrder(payload.cohortId(), payload.targetCohortId()))
+                        session.getCohortById(payload.cohortId()).ifPresent(cohort -> cohort.setOrderStatus("Target order rejected: choose a live enemy during combat"));
+                }
                 case "MOVE" -> {
                     if (!session.issueOrder(payload.cohortId(), payload.targetX(), payload.targetZ(), payload.clearExisting()))
                         session.getCohortById(payload.cohortId()).ifPresent(cohort -> cohort.setOrderStatus(session.getPhase() == BattleSession.BattlePhase.DEPLOYMENT

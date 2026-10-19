@@ -43,7 +43,8 @@ public final class ModNetworking {
     private static final long SUPPLY_SELECTION_COOLDOWN_MS = 200L;
 
     public static void registerPayloads(RegisterPayloadHandlersEvent event) {
-        PayloadRegistrar registrar = event.registrar("9");
+        PayloadRegistrar registrar = event.registrar("11");
+        registrar.playToServer(ArmyActionPayload.CampaignAction.TYPE, ArmyActionPayload.CampaignAction.STREAM_CODEC, ArmyManager::handleCampaignAction);
         registrar.playToClient(ArmyActionPayload.RoutePreview.TYPE, ArmyActionPayload.RoutePreview.STREAM_CODEC);
         registrar.playToClient(StateActionPayload.BridgeStatus.TYPE, StateActionPayload.BridgeStatus.STREAM_CODEC);
         // Independent packets let the client reuse terrain while army positions keep updating.

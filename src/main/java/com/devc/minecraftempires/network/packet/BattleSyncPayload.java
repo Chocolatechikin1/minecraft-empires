@@ -58,24 +58,40 @@ public record BattleSyncPayload(UUID battleId, List<CohortSnapshot> attackerCoho
                 c.isColumn() ? c.footprintAt(c.getPosition().x, c.getPosition().y).stream().map(point -> new FormationPoint(point.x, point.y)).toList() : List.of(),
                 controlled ? c.getMovementWaypoints().stream().map(point -> new FormationPoint(point.x, point.y)).toList() : List.of(),
                 controlled ? c.getOrderObjectives().stream().map(point -> new FormationPoint(point.x, point.y)).toList() : List.of(),
-                controlled ? session.getPendingObjectives(c.getCohortId()).stream().map(point -> new FormationPoint(point.x, point.y)).toList() : List.of(), controlled ? c.getOrderStatus() : "")).toList();
+                controlled ? session.getPendingObjectives(c.getCohortId()).stream().map(point -> new FormationPoint(point.x, point.y)).toList() : List.of(), controlled ? c.getOrderStatus() : "",
+                c.getCombatFacingX(), c.getCombatFacingZ(), controlled ? c.getAttackTarget() : null)).toList();
     }
     public record FormationPoint(double x, double z) {}
     public record CohortSnapshot(UUID cohortId, double x, double z, int currentHealth, int maxHealth, int morale,
                                   String type, boolean isRouting, boolean isEngaged, boolean isWithdrawing,
                                   boolean escaped, int strength, int endurance, double speed, double width, double length, double headingX, double headingZ, List<FormationPoint> body,
-                                  List<FormationPoint> route, List<FormationPoint> objectives, List<FormationPoint> pending, String orderStatus) {
+                                  List<FormationPoint> route, List<FormationPoint> objectives, List<FormationPoint> pending, String orderStatus,
+                                  double combatFacingX, double combatFacingZ, UUID attackTarget) {
         public CohortSnapshot {
             body = checked(body); route = checked(route); objectives = checked(objectives); pending = checked(pending);
         }
         private static List<FormationPoint> checked(List<FormationPoint> points) { if (points.size() > 64) throw new IllegalArgumentException("Formation path too large"); return List.copyOf(points); }
+        public CohortSnapshot(UUID id, double x, double z, int health, int max, int morale, String type, boolean routing, boolean engaged,
+                              boolean withdrawing, boolean escaped, int strength, int endurance, double speed, double width, double length,
+                              double headingX, double headingZ, List<FormationPoint> body, List<FormationPoint> route,
+                              List<FormationPoint> objectives, List<FormationPoint> pending, String status, double facingX, double facingZ) {
+            this(id, x, z, health, max, morale, type, routing, engaged, withdrawing, escaped, strength, endurance, speed,
+                    width, length, headingX, headingZ, body, route, objectives, pending, status, facingX, facingZ, null);
+        }
+        public CohortSnapshot(UUID id, double x, double z, int health, int max, int morale, String type, boolean routing, boolean engaged,
+                              boolean withdrawing, boolean escaped, int strength, int endurance, double speed, double width, double length,
+                              double headingX, double headingZ, List<FormationPoint> body, List<FormationPoint> route,
+                              List<FormationPoint> objectives, List<FormationPoint> pending, String status) {
+            this(id, x, z, health, max, morale, type, routing, engaged, withdrawing, escaped, strength, endurance, speed,
+                    width, length, headingX, headingZ, body, route, objectives, pending, status, headingX, headingZ);
+        }
         public CohortSnapshot(UUID id, double x, double z, int health, int max, int morale, String type, boolean routing, boolean engaged, boolean withdrawing, boolean escaped, int strength, int endurance, double speed) {
             this(id, x, z, health, max, morale, type, routing, engaged, withdrawing, escaped, strength, endurance, speed, 10, 10, 0, 1, List.of(), List.of(), List.of(), List.of(), "");
         }
         CohortSnapshot(RegistryFriendlyByteBuf buf) {
             this(buf.readUUID(), buf.readDouble(), buf.readDouble(), buf.readVarInt(), buf.readVarInt(), buf.readVarInt(),
                     buf.readUtf(32), buf.readBoolean(), buf.readBoolean(), buf.readBoolean(), buf.readBoolean(),
-                    buf.readVarInt(), buf.readVarInt(), buf.readDouble(), buf.readDouble(), buf.readDouble(), buf.readDouble(), buf.readDouble(), readBody(buf), readBody(buf), readBody(buf), readBody(buf), buf.readUtf(128));
+                    buf.readVarInt(), buf.readVarInt(), buf.readDouble(), buf.readDouble(), buf.readDouble(), buf.readDouble(), buf.readDouble(), readBody(buf), readBody(buf), readBody(buf), readBody(buf), buf.readUtf(128), buf.readDouble(), buf.readDouble(), buf.readBoolean() ? buf.readUUID() : null);
         }
         private static List<FormationPoint> readBody(RegistryFriendlyByteBuf buf) {
             int size = buf.readVarInt(); if (size < 0 || size > 64) throw new IllegalArgumentException("Invalid formation footprint");
@@ -90,6 +106,8 @@ public record BattleSyncPayload(UUID battleId, List<CohortSnapshot> attackerCoho
             buf.writeVarInt(body.size()); for (FormationPoint point : body) { buf.writeDouble(point.x()); buf.writeDouble(point.z()); }
             for (List<FormationPoint> path : List.of(route, objectives, pending)) { buf.writeVarInt(path.size()); for (FormationPoint point : path) { buf.writeDouble(point.x()); buf.writeDouble(point.z()); } }
             buf.writeUtf(orderStatus, 128);
+            buf.writeDouble(combatFacingX); buf.writeDouble(combatFacingZ);
+            buf.writeBoolean(attackTarget != null); if (attackTarget != null) buf.writeUUID(attackTarget);
         }
     }
 }
