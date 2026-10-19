@@ -39,6 +39,27 @@ public final class MapScreen extends Screen {
     private static final int MARGIN = 8;
 
     private InteractiveMapWidget mapWidget;
+    private Screen managementReturn, locationPickReturn;
+    private java.util.function.Consumer<BlockPos> locationPicker;
+    private List<BlockPos> pendingFocus = List.of();
+    private UUID pendingFocusUnit;
+
+    public void setManagementReturn(Screen screen) { managementReturn = screen; }
+    public void focusLocations(List<BlockPos> positions, UUID selected) {
+        pendingFocus = List.copyOf(positions); pendingFocusUnit = selected;
+        applyPendingCohorts();
+    }
+    public void pickLocation(Screen returnTo, java.util.function.Consumer<BlockPos> picked) {
+        help.close(); battlesOpen = false;
+        locationPickReturn = returnTo; locationPicker = picked;
+    }
+    private void finishLocationPick(BlockPos position) {
+        Screen previous = locationPickReturn;
+        var picker = locationPicker;
+        locationPicker = null; locationPickReturn = null;
+        if (position != null && picker != null) picker.accept(position);
+        minecraft.gui.setScreen(previous);
+    }
     private int actionButtonY = -1;
     private final SidebarScroll sidebarScroll = new SidebarScroll();
     private String sidebarContext = "";
@@ -122,11 +143,16 @@ public final class MapScreen extends Screen {
 
         ClientNetworking.requestMapData();
         this.addRenderableWidget(Button.builder(Component.literal("Manage"),
-                button -> this.minecraft.gui.setScreen(new EmpireManagementScreen(this)))
+                button -> { if (locationPicker != null) finishLocationPick(null);
+                    else this.minecraft.gui.setScreen(managementReturn == null ? new EmpireManagementScreen(this) : managementReturn); })
                 .bounds(panelX, buttonY - 24, 180, 20).build());
         applyPendingCohorts();
     }
     private void applyPendingCohorts() {
+        if (!pendingFocus.isEmpty() && mapWidget != null && ClientMapData.get().hasData()) {
+            mapWidget.refreshViewport();
+            mapWidget.focusLocations(pendingFocus, pendingFocusUnit); pendingFocus = List.of(); pendingFocusUnit = null;
+        }
         if (!pendingCohorts.isEmpty() && mapWidget != null && ClientMapData.get().hasData()) {
             mapWidget.refreshViewport(); // A delayed first snapshot must initialize before applying the roster selection.
             mapWidget.selectCohorts(pendingCohorts); pendingCohorts = List.of();
@@ -230,6 +256,14 @@ public final class MapScreen extends Screen {
         if (battlesOpen) drawBattleList(graphics, mouseX, mouseY);
         super.extractRenderState(graphics, mouseX, mouseY, partialTick);
         help.render(graphics, font, width, height, helpButton, mapHelpText());
+        if (locationPicker != null) {
+            int available = Math.max(1, width - PANEL_WIDTH - 2 * MARGIN);
+            int y = 32;
+            for (var line : font.split(Component.translatable("gui.minecraftempires.management.pick_location_hint"), available - 8)) {
+                graphics.fill(MARGIN, y - 2, MARGIN + available, y + font.lineHeight + 1, 0xDD101820);
+                graphics.text(font, line, MARGIN + 4, y, 0xFFFFD45A); y += font.lineHeight + 3;
+            }
+        }
     }
     private boolean battleListContains(double x, double y) { return x >= battleLeft && x < battleLeft + battleWidth && y >= battleTop && y < battleTop + battleHeight; }
     private void drawBattleList(GuiGraphicsExtractor g, int mx, int my) {
@@ -460,6 +494,12 @@ public final class MapScreen extends Screen {
     //sidebar input handles scrolling and actions; map input handles panning, zooming, and selecting chunks, settlements, and states
     @Override
     public boolean mouseClicked(MouseButtonEvent event, boolean doubleClick) {
+        if (locationPicker != null && mapWidget != null && !overMapControls(event.x(), event.y())
+                && event.x() >= MARGIN && event.x() < width - PANEL_WIDTH - MARGIN
+                && event.y() >= MARGIN && event.y() < height - MARGIN) {
+            if (event.button() == 0) { finishLocationPick(mapWidget.positionAt(event.x(), event.y())); return true; }
+            if (event.button() == 1) return true;
+        }
         if (help.click(event, helpButton)) return true;
         if (battlesOpen && !battleListButton.isMouseOver(event.x(), event.y())) {
             if (battleListContains(event.x(), event.y())) {
@@ -569,6 +609,7 @@ public final class MapScreen extends Screen {
 
     @Override
     public boolean keyPressed(KeyEvent event) {
+        if (locationPicker != null && event.key() == GLFW.GLFW_KEY_ESCAPE) { finishLocationPick(null); return true; }
         if (help.isOpen()) { if (event.key() == GLFW.GLFW_KEY_ESCAPE) help.close(); else helpButton.keyPressed(event); return true; }
         if (battlesOpen) {
             if (event.key() == GLFW.GLFW_KEY_ESCAPE) battlesOpen = false;
@@ -602,6 +643,10 @@ public final class MapScreen extends Screen {
     @Override
     public boolean isPauseScreen() {
         return false;
+    }
+    @Override public void onClose() {
+        if (locationPicker != null) finishLocationPick(null);
+        else super.onClose();
     }
 
     @Override
