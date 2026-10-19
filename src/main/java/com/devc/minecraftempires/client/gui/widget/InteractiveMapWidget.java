@@ -292,6 +292,20 @@ public final class InteractiveMapWidget {
         }
     }
     public List<UUID> getCohortOrderSelection() { return cohortOrderSelection; }
+    /** Explicit management focus does not issue orders or disturb the ordinary return camera. */
+    public void focusLocations(List<BlockPos> positions, UUID selected) {
+        if (positions.isEmpty()) return;
+        double minX = positions.stream().mapToDouble(BlockPos::getX).min().orElse(0), maxX = positions.stream().mapToDouble(BlockPos::getX).max().orElse(0);
+        double minZ = positions.stream().mapToDouble(BlockPos::getZ).min().orElse(0), maxZ = positions.stream().mapToDouble(BlockPos::getZ).max().orElse(0);
+        centerChunkX = (minX + maxX + 1) / 32.0; centerChunkZ = (minZ + maxZ + 1) / 32.0;
+        if (positions.size() > 1) zoom = Math.clamp(Math.min(Math.max(1, width - 48) / ((maxX - minX) / 16 + 3),
+                Math.max(1, height - 48) / ((maxZ - minZ) / 16 + 3)), MIN_ZOOM, MAX_ZOOM);
+        initializedViewport = true;
+        selectUnit(selected);
+    }
+    public BlockPos positionAt(double screenX, double screenY) {
+        return new BlockPos((int) Math.floor(screenToChunkX(screenX) * 16), 64, (int) Math.floor(screenToChunkZ(screenY) * 16));
+    }
     public void selectUnit(UUID id) {
         if (id == null) { clearSelectedArmy(); return; }
         selectedArmyId = id; selectedIsArmy = ClientArmyData.get().armiesById().containsKey(id);

@@ -30,7 +30,7 @@ public final class BattleGridWidget {
     private static final double MAX_ZOOM    = 40.0;
     private static final double DEFAULT_ZOOM = 2.0;
 
-   //variables that determine the size of the unit icons, set to a square currently
+   //variables that determine the size of the rectangular unit icons
     private static final int NATO_W = 18;
     private static final int NATO_H = 10;
 
@@ -54,6 +54,8 @@ public final class BattleGridWidget {
     private UUID defenderLegionId;
 
     private final List<UUID> selectedCohortIds = new ArrayList<>();
+    private final java.util.Map<UUID, RenderedMarker> renderedMarkers = new java.util.HashMap<>();
+    private record RenderedMarker(double worldX, double worldZ, double facing) { }
 
     public BattleGridWidget(int x, int y, int width, int height, UUID battleId, UUID attackerLegionId, UUID defenderLegionId) {
         this.x               = x;
@@ -81,6 +83,7 @@ public final class BattleGridWidget {
         drawField(graphics, data.isDeploymentPhase());
         drawMovementArrows(graphics, font, data, partialTick);
         drawCohorts(graphics, font, data, partialTick, mouseX, mouseY);
+        drawTargetIndicators(graphics, data, partialTick);
 
 
         //check if we are in the deployment phase, if we are draw a timer
@@ -150,6 +153,7 @@ public final class BattleGridWidget {
 
    //cohort drawer
     private void drawCohorts(GuiGraphicsExtractor graphics, Font font, ClientBattleData.Snapshot data, float partialTick, int mouseX, int mouseY) {
+        renderedMarkers.clear();
         if (!data.hasData()) {
             graphics.centeredText(font, Component.literal("Awaiting battle data..."), x + width / 2, y + height / 2, 0xFFB8C0C8);
             return;
@@ -161,6 +165,8 @@ public final class BattleGridWidget {
             double wz = data.getRenderZ(cohort.cohortId, partialTick);
             int sx = worldToScreenX(wx);
             int sz = worldToScreenZ(wz);
+            double facing = data.getRenderFacing(cohort.cohortId, partialTick);
+            renderedMarkers.put(cohort.cohortId, new RenderedMarker(wx, wz, facing));
 
             if (cohort.width < 10) {
                 drawColumn(graphics, cohort, wx, wz);
@@ -170,12 +176,18 @@ public final class BattleGridWidget {
             int hw = (int) Math.max(9, NATO_W * zoom / DEFAULT_ZOOM);
             int hh = (int) Math.max(5, NATO_H * zoom / DEFAULT_ZOOM);
 
-            int left = sx - hw / 2;
-            int top  = sz - hh / 2;
+            int left = -hw / 2;
+            int top  = -hh / 2;
             int right  = left + hw;
             int bottom = top  + hh;
 
-            if (!intersects(left, top, hw, hh)) continue;
+            int extent = (int) Math.ceil(Math.hypot(hw, hh) / 2) + 5;
+            if (!intersects(sx - extent, sz - extent, 2 * extent, 2 * extent)) continue;
+
+            graphics.pose().pushMatrix();
+            graphics.pose().translate((float) sx, (float) sz);
+            // The local top edge is the formation's front. Symbols and selection rotate as one body.
+            graphics.pose().rotate((float) (facing + Math.PI / 2));
 
             // Fill color
             int fillColor = cohort.isRouting ? COLOR_ROUTING : cohort.isAttacker ? COLOR_ATTACKER : COLOR_DEFENDER;
@@ -187,19 +199,13 @@ public final class BattleGridWidget {
             graphics.fill(left,  top,    left + 1,  bottom, 0xFF000000);
             graphics.fill(right - 1, top, right, bottom,    0xFF000000);
 
-            // NATO X cross (for infantry)
-            if (hw >= 12) {
-                graphics.fill(left + 1, top + 1, right - 1, top + 2, 0x88000000);
-                graphics.fill(left + 1, bottom - 2, right - 1, bottom - 1, 0x88000000);
+            // NATO X cross (for infantry); cavalry uses the single diagonal from the owner's reference.
+            if (hw >= 9 && hh >= 5) {
+                drawLine(graphics, left + 2, bottom - 2, right - 2, top + 2, 0xFF101820);
+                if (!"CAVALRY".equals(cohort.type)) drawLine(graphics, left + 2, top + 2, right - 2, bottom - 2, 0xFF101820);
             }
 
-            // Type letter in center (not sure if i want this, adjust later if needed)
-            if (font != null && hw >= 12) {
-                String letter = cohort.type.substring(0, 1); // "I", "C", "A"
-                int lx = sx - font.width(letter) / 2;
-                int lz = sz - 4;
-                graphics.text(font, Component.literal(letter), lx, lz, 0xFFFFFFFF);
-            }
+            // Type symbol in center (not sure if i want this, adjust later if needed): crossed infantry or diagonal cavalry.
 
             // Selection ring
             if (selectedCohortIds.contains(cohort.cohortId)) {
@@ -209,14 +215,19 @@ public final class BattleGridWidget {
                 graphics.fill(right,    top - 2, right + 2, bottom + 2, COLOR_SELECTED_RING);
             }
 
+            // A front-edge tick distinguishes a half-turn, which a symmetric rectangle alone cannot show.
+            graphics.fill(-1, top - 4, 1, top + 1, 0xFFFFFFFF);
+            graphics.pose().popMatrix();
+
             // Morale health bar below symbol
             if (hw >= 10) {
                 int barW = hw;
                 int barH = 2;
-                int barY = bottom + 2;
+                int barY = sz + extent;
+                int barLeft = sx - hw / 2;
                 int moraleW = (int)(barW * (cohort.morale / 100.0));
-                graphics.fill(left, barY, left + barW, barY + barH, 0xFF333333);
-                graphics.fill(left, barY, left + moraleW, barY + barH,
+                graphics.fill(barLeft, barY, barLeft + barW, barY + barH, 0xFF333333);
+                graphics.fill(barLeft, barY, barLeft + moraleW, barY + barH,
                         cohort.morale > 50 ? 0xFF55CC55 : cohort.morale > 25 ? 0xFFDDCC33 : 0xFFCC3333);
             }
         }
@@ -243,6 +254,11 @@ public final class BattleGridWidget {
         for (UUID id : selectedCohortIds) {
             var cohort = data.getCohort(id); if (cohort == null || !data.canControl(cohort) || cohort.escaped || cohort.currentHealth == 0) continue;
             int px = worldToScreenX(data.getRenderX(id, partialTick)), py = worldToScreenZ(data.getRenderZ(id, partialTick));
+            var target = data.getCohort(cohort.attackTarget);
+            if (target != null && target.currentHealth > 0 && !target.escaped) {
+                int tx = worldToScreenX(data.getRenderX(target.cohortId, partialTick)), ty = worldToScreenZ(data.getRenderZ(target.cohortId, partialTick));
+                drawDashedLine(graphics, px, py, tx, ty, 0xFFFF6666);
+            }
             for (var point : cohort.route) {
                 int nx = worldToScreenX(point.x()), ny = worldToScreenZ(point.z());
                 drawDashedLine(graphics, px, py, nx, ny, COLOR_ARROW); px = nx; py = ny;
@@ -261,6 +277,23 @@ public final class BattleGridWidget {
             if (!cohort.route.isEmpty()) {
                 var goal = cohort.route.getLast(); int nx = worldToScreenX(goal.x()), ny = worldToScreenZ(goal.z());
                 drawArrow(graphics, nx - 3, ny - 3, nx, ny, COLOR_ARROW);
+            }
+        }
+    }
+    private void drawTargetIndicators(GuiGraphicsExtractor graphics, ClientBattleData.Snapshot data, float partialTick) {
+        java.util.Set<UUID> targets = new java.util.HashSet<>();
+        for (UUID id : selectedCohortIds) {
+            var cohort = data.getCohort(id);
+            if (data.canControl(cohort) && cohort.attackTarget != null) targets.add(cohort.attackTarget);
+        }
+        int radius = (int) Math.ceil(Math.hypot(Math.max(9, NATO_W * zoom / DEFAULT_ZOOM), Math.max(5, NATO_H * zoom / DEFAULT_ZOOM)) / 2) + 3;
+        for (UUID id : targets) {
+            var target = data.getCohort(id); if (target == null || target.escaped || target.currentHealth <= 0) continue;
+            int cx = worldToScreenX(data.getRenderX(id, partialTick)), cy = worldToScreenZ(data.getRenderZ(id, partialTick));
+            for (int sideX : new int[]{-1, 1}) for (int sideY : new int[]{-1, 1}) {
+                int px = cx + sideX * radius, py = cy + sideY * radius;
+                graphics.fill(Math.min(px, px - sideX * 4), py, Math.max(px, px - sideX * 4) + 1, py + 1, 0xFFFF6666);
+                graphics.fill(px, Math.min(py, py - sideY * 4), px + 1, Math.max(py, py - sideY * 4) + 1, 0xFFFF6666);
             }
         }
     }
@@ -345,11 +378,13 @@ public final class BattleGridWidget {
             }
 
         } else if (button == 1) {
-            // Right-click replaces orders; Shift + right-click appends a waypoint.
+            // Right-click an enemy pursues it; ground replaces orders, or Shift appends a waypoint.
             if (!selectedCohortIds.isEmpty() && battleId != null) {
                 double wx = screenToWorldX((int) mouseX);
                 double wz = screenToWorldZ((int) mouseY);
                 ClientBattleData.Snapshot data = ClientBattleData.get();
+                var attacks = attackCommands(cohortAtScreen((int) mouseX, (int) mouseY));
+                if (!attacks.isEmpty()) { attacks.forEach(ClientPacketDistributor::sendToServer); return true; }
                 var moving = selectedCohortIds.stream().map(data::getCohort)
                         .filter(c -> data.canControl(c) && !c.isRouting && !c.isEngaged && !c.isWithdrawing && !c.escaped).toList();
                 double centerX = moving.stream().mapToDouble(c -> c.currentX).average().orElse(0);
@@ -364,6 +399,16 @@ public final class BattleGridWidget {
 
         dragging = button == 0 || button == 2;
         return dragging;
+    }
+
+    /** Build identity-based orders only for selected, controlled cohorts on the opposing side. */
+    private List<BattleCommandPayload> attackCommands(UUID clicked) {
+        var data = ClientBattleData.get(); var target = data.getCohort(clicked);
+        if (!java.util.Objects.equals(battleId, data.battleId()) || target == null || target.escaped || target.currentHealth <= 0
+                || data.isDeploymentPhase() || data.isPreparing() || data.hasEnded()) return List.of();
+        return selectedCohortIds.stream().map(data::getCohort)
+                .filter(c -> data.canControl(c) && c.isAttacker != target.isAttacker && !c.isRouting && !c.isWithdrawing && !c.escaped && c.currentHealth > 0)
+                .map(c -> new BattleCommandPayload(battleId, c.cohortId, 0, 0, true, "ATTACK", target.cohortId)).toList();
     }
 
     public boolean mouseReleased(int button) {
@@ -415,8 +460,9 @@ public final class BattleGridWidget {
 
         for (ClientBattleData.CohortRenderState cohort : data.cohorts().values()) {
             if (cohort.currentHealth <= 0 || cohort.escaped) continue;
-            double wx = data.getRenderX(cohort.cohortId, 1.0f);
-            double wz = data.getRenderZ(cohort.cohortId, 1.0f);
+            RenderedMarker rendered = renderedMarkers.get(cohort.cohortId);
+            double wx = rendered == null ? data.getRenderX(cohort.cohortId, 1.0f) : rendered.worldX();
+            double wz = rendered == null ? data.getRenderZ(cohort.cohortId, 1.0f) : rendered.worldZ();
             if (cohort.width < 10) {
                 double px = screenToWorldX(mx) - wx + cohort.currentX, pz = screenToWorldZ(mz) - wz + cohort.currentZ;
                 for (int i = 1; i < cohort.body.size(); i++) {
@@ -428,13 +474,20 @@ public final class BattleGridWidget {
             }
             int sx = worldToScreenX(wx);
             int sz = worldToScreenZ(wz);
-            int left = sx - hw / 2;
-            int top  = sz - hh / 2;
-            if (mx >= left && mx <= left + hw && mz >= top && mz <= top + hh) {
+            double facing = rendered == null ? data.getRenderFacing(cohort.cohortId, 1.0f) : rendered.facing();
+            if (markerContains(mx - sx, mz - sz, hw, hh, facing)) {
                 return cohort.cohortId;
             }
         }
         return null;
+    }
+
+    /** Inverse of the drawing transform, using the same displayed position and interpolated heading. */
+    public static boolean markerContains(double dx, double dz, int width, int height, double facing) {
+        double localX = -Math.sin(facing) * dx + Math.cos(facing) * dz;
+        double localY = -Math.cos(facing) * dx - Math.sin(facing) * dz;
+        int left = -width / 2, top = -height / 2;
+        return localX >= left && localX <= left + width && localY >= top && localY <= top + height;
     }
 
     private boolean containsPoint(int mx, int mz) {
