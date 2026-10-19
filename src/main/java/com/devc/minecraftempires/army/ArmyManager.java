@@ -45,6 +45,7 @@ public class ArmyManager extends SavedData {
     private final Map<UUID, List<UUID>> stateToLegionIndex = new HashMap<>();
     private final Map<UUID, Army> activeArmies = new LinkedHashMap<>();
     private final Map<UUID, List<UUID>> stateToArmyIndex = new HashMap<>();
+    // Includes inactive plans; only active operations establish an Army.campaignId lock.
     private final Map<UUID, Campaign> activeCampaigns = new LinkedHashMap<>();
     private final Map<UUID, Cohort> cohortRegistry = new LinkedHashMap<>();
     private final Map<UUID, UUID> cohortParents = new HashMap<>();
@@ -172,6 +173,7 @@ public class ArmyManager extends SavedData {
             campaign.removeArmy(armyId);
             if (campaign.isEmpty()) activeCampaigns.remove(campaign.getCampaignId());
         }
+        activeCampaigns.values().stream().filter(Campaign::isPlanned).forEach(plan -> plan.removeArmy(armyId));
         activeLegions.values().forEach(Legion::syncMainPosition);
         setDirty();
         return true;
@@ -273,8 +275,9 @@ public class ArmyManager extends SavedData {
         Army army = getArmy(armyId);
         if (army == null || !stateId.equals(army.getOwningStateId())) throw new IllegalArgumentException("Army does not belong to state");
         Campaign existing = getCampaign(army.getCampaignId());
-        if (existing != null) return existing;
+        if (existing != null && existing.isActive()) return existing;
         Campaign campaign = new Campaign(UUID.randomUUID(), stateId);
+        campaign.describe("Campaign " + campaign.getCampaignId().toString().substring(0, 8), "", null);
         campaign.addArmy(armyId);
         army.setCampaignId(campaign.getCampaignId());
         activeCampaigns.put(campaign.getCampaignId(), campaign);
@@ -282,10 +285,119 @@ public class ArmyManager extends SavedData {
         return campaign;
     }
 
+    /** A saved plan never changes orders, diplomacy, territorial claims or the army's active lock. */
+    public Optional<Campaign> saveCampaign(UUID owner, UUID id, String name, String objective, BlockPos focus, List<UUID> ids) {
+        if (ids.size() > Campaign.MAX_ARMIES || new HashSet<>(ids).size() != ids.size()
+                || name == null || name.length() > Campaign.MAX_NAME || objective == null || objective.length() > Campaign.MAX_OBJECTIVE) return Optional.empty();
+        Campaign campaign = id == null ? null : getCampaign(id);
+        if (id != null && (campaign == null || !owner.equals(campaign.getOwningStateId()))) return Optional.empty();
+        if (campaign == null && getCampaignsForState(owner).stream().filter(Campaign::isPlanned).count() >= 128) return Optional.empty();
+        for (UUID armyId : ids) {
+            Army army = getArmy(armyId);
+            if (army == null || !owner.equals(army.getOwningStateId())) return Optional.empty();
+            if (campaign != null && campaign.isActive() && !campaign.getArmyIds().contains(armyId)
+                    && !armyAssignmentProblem(army, null).isEmpty()) return Optional.empty();
+        }
+        // Active membership can grow, but removing a force must not bypass campaign ending checks.
+        if (campaign != null && campaign.isActive() && !ids.containsAll(campaign.getArmyIds())) return Optional.empty();
+        if (campaign == null) campaign = Campaign.plan(UUID.randomUUID(), owner);
+        campaign.describe(name, objective, focus);
+        if (campaign.isPlanned()) for (UUID previous : new HashSet<>(campaign.getArmyIds())) campaign.removeArmy(previous);
+        for (UUID armyId : ids) {
+            campaign.addArmy(armyId);
+            if (campaign.isActive()) getArmy(armyId).setCampaignId(campaign.getCampaignId());
+        }
+        activeCampaigns.put(campaign.getCampaignId(), campaign);
+        setDirty();
+        return Optional.of(campaign);
+    }
+
+    //error text list
+    public String armyAssignmentProblem(Army army, UUID sameCampaign) {
+        if (army == null) return "Army is no longer available";
+        if (!army.isViable(this)) return "Army has no surviving troops";
+        if (army.isEngaged()) return "Army is in battle";
+        if (army.isRetreating()) return "Army is retreating";
+        if (army.isOnCampaign() && !Objects.equals(sameCampaign, army.getCampaignId())) return "Army is already on another campaign";
+        return "";
+    }
+
+    //error list for campaigns
+    public String campaignStartProblem(Campaign campaign) {
+        if (campaign == null || !campaign.isPlanned()) return "This is not an inactive plan";
+        if (campaign.isEmpty()) return "Assign at least one army";
+        for (UUID id : campaign.getArmyIds()) {
+            Army army = getArmy(id);
+            if (army != null && !campaign.getOwningStateId().equals(army.getOwningStateId())) return "Army belongs to another state";
+            String problem = armyAssignmentProblem(army, null);
+            if (!problem.isEmpty()) return problem;
+        }
+        return "";
+    }
+
+    /** Validate the complete roster before assigning any active links. Armies need not be colocated. */
+    public boolean startCampaign(UUID owner, UUID id) {
+        Campaign campaign = getCampaign(id);
+        if (campaign == null || !owner.equals(campaign.getOwningStateId()) || !campaignStartProblem(campaign).isEmpty()) return false;
+        campaign.activate();
+        campaign.getArmyIds().forEach(army -> getArmy(army).setCampaignId(id));
+        setDirty();
+        return true;
+    }
+
+    public boolean deleteCampaignPlan(UUID owner, UUID id) {
+        Campaign campaign = getCampaign(id);
+        if (campaign == null || !campaign.isPlanned() || !owner.equals(campaign.getOwningStateId())) return false;
+        activeCampaigns.remove(id);
+        setDirty();
+        return true;
+    }
+
+    public boolean isActiveCampaign(Army army) {
+        Campaign campaign = getCampaign(army.getCampaignId());
+        return campaign != null && campaign.isActive() && campaign.getOwningStateId().equals(army.getOwningStateId())
+                && campaign.getArmyIds().contains(army.getArmyId());
+    }
+
+    public String campaignEndProblem(Campaign campaign, ServerLevel level) {
+        if (campaign == null || !campaign.isActive()) return "Campaign is not active";
+        if (campaign.getArmyIds().stream().map(this::getArmy).filter(Objects::nonNull).anyMatch(Army::isRetreating)) return "An army is retreating";
+        return campaign.checkEndConditions(this, level) ? "" : "A battle or hostile threat remains near your armies, conquered land, or settlements";
+    }
+
+    //campaign action handler function: handles the given campaign action payload and context, and performs the appropriate action on the campaign
+    public static void handleCampaignAction(ArmyActionPayload.CampaignAction payload, IPayloadContext context) {
+        context.enqueueWork(() -> {
+            if (!(context.player() instanceof ServerPlayer player)) return;
+            ServerLevel level = player.level().getServer().overworld();
+            StateData state = StateManager.get(level).getStateByPlayer(player.getUUID());
+            if (state == null || !controls(player, state.getStateId())) return;
+            ArmyManager manager = get(level);
+            UUID id = payload.campaignId(), owner = state.getStateId();
+            Campaign campaign = id == null ? null : manager.getCampaign(id);
+            if (id != null && (campaign == null || !owner.equals(campaign.getOwningStateId()))) return;
+            switch (payload.action()) {
+                case "SAVE" -> {
+                    if (payload.focus() != null && !validTarget(level, payload.focus())) { tell(player, "Choose a map location inside the world border."); break; }
+                    tell(player, manager.saveCampaign(owner, id, payload.name(), payload.objective(), payload.focus(), payload.armyIds()).isPresent()
+                            ? "Campaign saved." : "Campaign was not saved. Check its armies; active members cannot be removed or taken from another operation.");
+                }
+                case "START" -> {
+                    String problem = manager.campaignStartProblem(campaign);
+                    tell(player, manager.startCampaign(owner, id) ? "Campaign started." : problem);
+                }
+                case "DELETE" -> { if (manager.deleteCampaignPlan(owner, id)) tell(player, "Campaign plan deleted."); }
+                case "END" -> manager.endCampaign(id, player);
+                default -> { }
+            }
+            com.devc.minecraftempires.network.ModNetworking.sendSnapshots(player);
+        });
+    }
+
     //end campaign function: ends the campaign for the given state and army, if one exists and is eligible to end
     public boolean endCampaign(UUID campaignId, ServerPlayer player) {
         Campaign campaign = getCampaign(campaignId);
-        if (campaign == null || !controls(player, campaign.getOwningStateId())) return false;
+        if (campaign == null || !campaign.isActive() || !controls(player, campaign.getOwningStateId())) return false;
         if (campaign.getArmyIds().stream().map(this::getArmy).filter(Objects::nonNull).anyMatch(Army::isRetreating)
                 || !campaign.checkEndConditions(this, player.level())) {
             tell(player, "Cannot end campaign while a battle or hostile threat remains near your armies, conquered land, or settlements.");
@@ -409,7 +521,7 @@ public class ArmyManager extends SavedData {
                 if (army.isEngaged() || !army.isViable(this)) continue;
                 if (army.isOnCampaign() && !army.isRetreating()) {
                     Campaign campaign = getCampaign(army.getCampaignId());
-                    if (campaign != null) {
+                    if (campaign != null && isActiveCampaign(army)) {
                         List<ChunkPos> acquired = ClaimManager.get(level).claimCampaignArea(level, army);
                         acquired.forEach(pos -> campaign.trackConqueredChunk(pos.pack()));
                         changed |= !acquired.isEmpty();
@@ -1086,6 +1198,8 @@ public class ArmyManager extends SavedData {
         if (manager.getArmiesForState(stateId).stream().anyMatch(a -> a.isEngaged() || a.isOnCampaign())) return false;
         for (Army army : manager.getArmiesForState(stateId)) manager.disbandArmy(army.getArmyId(), false);
         for (Legion legion : manager.getLegionsForState(stateId)) manager.disbandLegion(legion.getLegionId());
+        manager.activeCampaigns.values().removeIf(campaign -> stateId.equals(campaign.getOwningStateId()));
+        manager.setDirty();
         manager.refreshGarrisons(level);
         return true;
     }
@@ -1137,6 +1251,9 @@ public class ArmyManager extends SavedData {
     public Legion getLegion(UUID id) { return activeLegions.get(id); }
     public Army getArmy(UUID id) { return activeArmies.get(id); }
     public Campaign getCampaign(UUID id) { return activeCampaigns.get(id); }
+    public List<Campaign> getCampaignsForState(UUID owner) {
+        return activeCampaigns.values().stream().filter(c -> owner.equals(c.getOwningStateId())).toList();
+    }
     public Collection<Cohort> getAllCohorts() { return Collections.unmodifiableCollection(cohortRegistry.values()); }
     public Collection<Legion> getAllLegions() { return Collections.unmodifiableCollection(activeLegions.values()); }
     public Collection<Army> getAllArmies() { return Collections.unmodifiableCollection(activeArmies.values()); }
@@ -1184,16 +1301,20 @@ public class ArmyManager extends SavedData {
             for (UUID id : new HashSet<>(campaign.getArmyIds())) {
                 Army army = manager.getArmy(id);
                 if (army == null || !army.getOwningStateId().equals(campaign.getOwningStateId())) campaign.removeArmy(id);
-                else army.setCampaignId(campaign.getCampaignId());
+                else if (campaign.isActive()) {
+                    Campaign already = manager.getCampaign(army.getCampaignId());
+                    if (already != null && already.isActive()) campaign.removeArmy(id);
+                    else army.setCampaignId(campaign.getCampaignId());
+                }
             }
-            if (campaign.isActive() && !campaign.isEmpty()) manager.activeCampaigns.put(campaign.getCampaignId(), campaign);
+            if (campaign.isPlanned() || campaign.isActive() && !campaign.isEmpty()) manager.activeCampaigns.put(campaign.getCampaignId(), campaign);
         });
         for (Cohort cohort : manager.cohortRegistry.values()) {
             Army army = manager.getArmy(cohort.getAssignedArmyId());
             if (army == null || !army.getDeployedCohortIds().contains(cohort.getCohortId())) cohort.setAssignedArmyId(null);
         }
         for (Army army : manager.activeArmies.values()) {
-            if (manager.getCampaign(army.getCampaignId()) == null) army.setCampaignId(null);
+            if (!manager.isActiveCampaign(army)) army.setCampaignId(null);
         }
         manager.shortenRetreats(StateBalance.POST_BATTLE_RETREAT_DISTANCE);
         manager.activeLegions.values().forEach(Legion::syncMainPosition);

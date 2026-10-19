@@ -22,6 +22,8 @@ import java.util.*;
 /** Cohort roster, army composition, auxiliary levy and physical regrouping. */
 public final class ComposeArmyScreen extends Screen {
     private final UUID sourceLegionId;
+    private final Screen returnScreen;
+    private final UUID armyFilter;
     private final Set<UUID> selected = new LinkedHashSet<>();
     private UUID hoveredCohort;
     private long cohortHoverStarted;
@@ -29,10 +31,14 @@ public final class ComposeArmyScreen extends Screen {
     private CohortList cohortList;
     private Button helpButton;
     private boolean allLegions, confirmDisband, helpOpen;
-    public ComposeArmyScreen(UUID sourceLegionId) { super(Component.literal("Legion and Cohorts")); this.sourceLegionId = sourceLegionId; }
+    public ComposeArmyScreen(UUID sourceLegionId) { this(sourceLegionId, null, null); }
+    public ComposeArmyScreen(UUID sourceLegionId, Screen returnScreen, UUID armyFilter) {
+        super(Component.literal("Legion and Cohorts")); this.sourceLegionId = sourceLegionId;
+        this.returnScreen = returnScreen; this.armyFilter = armyFilter;
+    }
     private ManagementDataPayload data() { return ClientManagementData.get(); }
     private List<ManagementDataPayload.CohortEntry> roster() {
-        return data().cohorts().stream().filter(c -> allLegions || c.legionId().equals(sourceLegionId)).toList();
+        return data().cohorts().stream().filter(c -> armyFilter == null ? allLegions || c.legionId().equals(sourceLegionId) : armyFilter.equals(c.armyId())).toList();
     }
     private void rebuild() { clearWidgets(); init(); }
     private Button button(String label, int x, int y, int w, Runnable action) {
@@ -44,11 +50,11 @@ public final class ComposeArmyScreen extends Screen {
     }
     @Override protected void init() {
         dataVersion = ClientManagementData.version();
-        button(allLegions ? "All legions" : "This legion", 12, 31, 95, () -> {
+        button(armyFilter != null ? "Army cohorts" : allLegions ? "All legions" : "This legion", 12, 31, 95, () -> {
             allLegions = !allLegions;
             if (cohortList != null) cohortList.setScrollAmount(0);
             rebuild();
-        });
+        }).active = armyFilter == null;
         button("Select available", 111, 31, 105, () -> { roster().stream().filter(ManagementDataPayload.CohortEntry::available).forEach(c -> selected.add(c.id())); rebuild(); });
         button("Clear", 220, 31, 58, () -> { selected.clear(); rebuild(); });
         helpButton = button("?", 282, 31, 20, () -> { helpOpen = !helpOpen; hoveredCohort = null; });
@@ -69,8 +75,8 @@ public final class ComposeArmyScreen extends Screen {
         move.active = !chosen.isEmpty() && chosen.size() <= 150 && chosen.stream().allMatch(ManagementDataPayload.CohortEntry::available);
         move.setTooltip(Tooltip.create(Component.literal("Detach deployed cohorts first. Right-click a destination on the map. Shift to add another waypoint.")));
         button("Compose army", 12, height - 98, w, this::compose);
-        button("Light infantry", 16 + w, height - 98, w, () -> action("RECRUIT_AUXILIARY"));
-        button("Regroup legion", 20 + 2 * w, height - 98, w, () -> action("REGROUP"));
+        button("Light infantry", 16 + w, height - 98, w, () -> action("RECRUIT_AUXILIARY")).active = armyFilter == null;
+        button("Regroup legion", 20 + 2 * w, height - 98, w, () -> action("REGROUP")).active = armyFilter == null;
         var settlements = data().settlements();
         if (!settlements.isEmpty()) {
             settlementIndex %= settlements.size();
@@ -87,15 +93,13 @@ public final class ComposeArmyScreen extends Screen {
             if (!confirmDisband) { confirmDisband = true; rebuild(); return; }
             ClientPacketDistributor.sendToServer(new DisbandArmyPayload(sourceLegionId));
             minecraft.gui.setScreen(new EmpireManagementScreen());
-        });
-        button("Back", width / 2 - 45, height - 25, 90, () -> minecraft.gui.setScreen(new EmpireManagementScreen()));
+        }).active = armyFilter == null;
+        button("Back", width / 2 - 45, height - 25, 90, this::onClose);
     }
     private void compose() {
-        var cohorts = data().cohorts().stream().filter(c -> selected.contains(c.id()) && c.available()).toList();
+        var cohorts = data().cohorts().stream().filter(c -> selected.contains(c.id()) && c.soldiers() > 0).toList();
         if (cohorts.isEmpty()) return;
-        ClientPacketDistributor.sendToServer(new ComposeArmyPayload(cohorts.stream().map(ManagementDataPayload.CohortEntry::id).toList(), cohorts.getFirst().position()));
-        selected.clear();
-        ClientNetworking.requestMapData();
+        minecraft.gui.setScreen(EmpireManagementScreen.composition(this, returnScreen, cohorts.stream().map(ManagementDataPayload.CohortEntry::id).toList()));
     }
     private void garrison(UUID settlement, boolean release) {
         Map<UUID, List<UUID>> groups = new LinkedHashMap<>();
@@ -241,5 +245,6 @@ public final class ComposeArmyScreen extends Screen {
         @Override public boolean keyPressed(KeyEvent event) { return row.keyPressed(event); }
         @Override public Component getNarration() { return row.getMessage(); }
     }
+    @Override public void onClose() { minecraft.gui.setScreen(returnScreen == null ? new EmpireManagementScreen() : returnScreen); }
     @Override public boolean isPauseScreen() { return false; }
 }

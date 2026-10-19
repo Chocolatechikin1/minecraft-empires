@@ -33,6 +33,13 @@ public class CohortData {
     private String orderStatus = "";
     private final Queue<Vector2d> orderObjectives = new ArrayDeque<>();
     private double headingX, headingZ = 1;
+    // Tactical facing is independent of terrain trial directions and the bridge column's route tangent.
+    private double combatFacingX, combatFacingZ = 1;
+    private boolean combatFacingInitialized;
+    private UUID primaryOpponent;
+    // Pursuit intent survives contact; primaryOpponent is only the current melee contact.
+    private UUID attackTarget;
+    private int attackSlot;
     private boolean column;
     private net.minecraft.core.BlockPos crossingStart, crossingEnd;
     private boolean recoveredFromCollapse;
@@ -63,6 +70,7 @@ public class CohortData {
         data.currentHealth = cohort.getSoldierCount();
         data.routing = cohort.isRouting() || cohort.getMorale() == 0;
         data.readMarch(cohort.getMarchState());
+        if (data.isColumn()) data.faceCombat(data.headingX, data.headingZ);
         double originX = cohort.getPreciseX() - x, originZ = cohort.getPreciseZ() - z;
         data.trail.forEach(point -> point.sub(originX, originZ));
         cohort.getWaypoints().forEach(point -> data.queueWaypoint(point.getX() + .5 - originX, point.getZ() + .5 - originZ));
@@ -161,6 +169,31 @@ public class CohortData {
 
     //end of bridge logic methods
 
+    //start of combat facing methods
+    public double getCombatFacingX() { return column ? headingX : combatFacingX; }
+    public double getCombatFacingZ() { return column ? headingZ : combatFacingZ; }
+    public boolean hasCombatFacing() { return combatFacingInitialized; }
+    public UUID getPrimaryOpponent() { return primaryOpponent; }
+    public void setPrimaryOpponent(UUID id) { primaryOpponent = id; }
+    public UUID getAttackTarget() { return attackTarget; }
+    public int getAttackSlot() { return attackSlot; }
+    public void setAttackTarget(UUID id, int slot) { attackTarget = id; attackSlot = Math.clamp(slot, 0, 1023); }
+    public void faceCombat(double dx, double dz) {
+        double magnitude = Math.hypot(dx, dz);
+        if (Double.isFinite(magnitude) && magnitude > 1.0e-8) {
+            combatFacingX = dx / magnitude; combatFacingZ = dz / magnitude; combatFacingInitialized = true;
+        }
+    }
+    /** Turn by the shortest arc using simulated elapsed time, never packet or render frequency. */
+    public void turnCombatToward(double dx, double dz, double maximumRadians) {
+        if (!Double.isFinite(dx) || !Double.isFinite(dz) || Math.hypot(dx, dz) < 1.0e-8) return;
+        double current = Math.atan2(combatFacingZ, combatFacingX), target = Math.atan2(dz, dx);
+        double delta = Math.atan2(Math.sin(target - current), Math.cos(target - current));
+        double next = current + Math.clamp(delta, -Math.max(0, maximumRadians), Math.max(0, maximumRadians));
+        faceCombat(Math.cos(next), Math.sin(next));
+    }
+
+    //end of combat facing methods
     public void tickMovement() {
         tickMovement(UnaryOperator.identity());
     }
@@ -180,7 +213,10 @@ public class CohortData {
         double remaining = resolved.distance(target);
         if (remaining < bestWaypointDistance - .05) { stalledMovementSteps = 0; bestWaypointDistance = remaining; }
         else stalledMovementSteps = Math.min(1000, stalledMovementSteps + 1);
-        if (position.distanceSquared(resolved) > 1.0e-8) recordMovement(position.x, position.y);
+        if (position.distanceSquared(resolved) > 1.0e-8) {
+            recordMovement(position.x, position.y);
+            if (remaining < position.distance(target) - 1.0e-8) faceCombat(resolved.x - position.x, resolved.y - position.y);
+        }
         position.set(resolved);
         if (position.distanceSquared(target) < 1.0e-8) {
             movementWaypoints.poll();
@@ -199,6 +235,7 @@ public class CohortData {
     public void applyMoraleShock(int shock) {
         morale = Math.clamp(morale - Math.max(0, shock), 0, 100);
         if (morale == 0) routing = true;
+        if (routing) setAttackTarget(null, 0);
     }
 
     public boolean announceRout() {
@@ -211,7 +248,7 @@ public class CohortData {
     public boolean canFight() { return isAlive() && !routing && !escaped; }
     public boolean canTakeOrders() { return canFight() && !withdrawing; }
     public void setEngaged(boolean value) {
-        if (value && !engaged && !routing && !withdrawing) clearOrders();
+        if (value && !engaged && !routing && !withdrawing) clearRoute();
         engaged = value;
     }
     public void queueWaypoint(double x, double z) {
@@ -247,6 +284,7 @@ public class CohortData {
         if (!canTakeOrders()) return;
         withdrawing = true;
         withdrawalSteps = engaged ? 12 : 0; // three seconds at four simulation steps/second
+        clearOrders();
         setRetreatWaypoint(x, z);
     }
     public void place(double x, double z) {
@@ -254,7 +292,9 @@ public class CohortData {
         previousPosition.set(position);
         clearOrders();
     }
-    public void clearOrders() { movementWaypoints.clear(); orderObjectives.clear(); automaticAdvance = false; stalledMovementSteps = 0; bestWaypointDistance = Double.POSITIVE_INFINITY; orderStatus = ""; }
+    public void clearOrders() { clearRoute(); attackTarget = null; attackSlot = 0; }
+    /** Route replacement/contact must not discard an explicit enemy target. */
+    public void clearRoute() { movementWaypoints.clear(); orderObjectives.clear(); automaticAdvance = false; stalledMovementSteps = 0; bestWaypointDistance = Double.POSITIVE_INFINITY; orderStatus = ""; }
     public UUID getCohortId() { return cohortId; }
     public String getType() { return type; }
     public int getCurrentHealth() { return currentHealth; }
@@ -292,6 +332,10 @@ public class CohortData {
         net.minecraft.nbt.ListTag objectives = new net.minecraft.nbt.ListTag();
         orderObjectives.forEach(point -> { CompoundTag value = new CompoundTag(); value.putDouble("X", point.x); value.putDouble("Z", point.y); objectives.add(value); }); tag.put("OrderObjectives", objectives);
         tag.put("March", marchState());
+        tag.putBoolean("CombatFacingInitialized", combatFacingInitialized);
+        tag.putDouble("CombatFacingX", combatFacingX); tag.putDouble("CombatFacingZ", combatFacingZ);
+        if (primaryOpponent != null) tag.putString("PrimaryOpponent", primaryOpponent.toString());
+        if (attackTarget != null) { tag.putString("AttackTarget", attackTarget.toString()); tag.putInt("AttackSlot", attackSlot); }
         net.minecraft.nbt.ListTag orders = new net.minecraft.nbt.ListTag();
         for (Vector2d point : movementWaypoints) { CompoundTag order = new CompoundTag(); order.putDouble("X", point.x); order.putDouble("Z", point.y); orders.add(order); }
         tag.put("Orders", orders); tag.putInt("WithdrawalSteps", withdrawalSteps); tag.putBoolean("RoutAnnounced", routAnnounced);
@@ -308,6 +352,10 @@ public class CohortData {
         data.escaped = tag.getBoolean("Escaped").orElse(false);
         data.withdrawing = tag.getBoolean("Withdrawing").orElse(false);
         tag.getCompound("March").ifPresent(data::readMarch);
+        if (tag.getBoolean("CombatFacingInitialized").orElse(false))
+            data.faceCombat(tag.getDouble("CombatFacingX").orElse(0.0), tag.getDouble("CombatFacingZ").orElse(1.0));
+        tag.getString("PrimaryOpponent").ifPresent(id -> { try { data.primaryOpponent = UUID.fromString(id); } catch (IllegalArgumentException ignored) { } });
+        tag.getString("AttackTarget").ifPresent(id -> { try { data.setAttackTarget(UUID.fromString(id), tag.getInt("AttackSlot").orElse(0)); } catch (IllegalArgumentException ignored) { } });
         tag.getList("Orders").ifPresent(values -> { for (int i = 0; i < Math.min(64, values.size()); i++) values.getCompound(i).ifPresent(value -> data.queueWaypoint(value.getDouble("X").orElse(0.0), value.getDouble("Z").orElse(0.0))); });
         data.withdrawalSteps = Math.clamp(tag.getInt("WithdrawalSteps").orElse(0), 0, 12); data.routAnnounced = tag.getBoolean("RoutAnnounced").orElse(false);
         data.automaticAdvance = tag.getBoolean("AutomaticAdvance").orElse(false);

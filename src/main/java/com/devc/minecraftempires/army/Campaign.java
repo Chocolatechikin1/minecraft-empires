@@ -16,21 +16,23 @@ import java.util.*;
 /**
  * Tracks a multi-battle military operation for one or more Armies.
  *
- * A Campaign is created automatically when an Army physically enters
- * non-friendly territory, or when a battle is triggered against an
- * invading enemy. It persists through multiple battles and sieges until
+ * A Campaign may be saved as an inactive plan, started by its owner, or
+ * created automatically on entry into non-friendly territory or a hostile
+ * battle. An active operation persists through multiple battles and sieges until
  * the player manually ends it — subject to an end-condition check.
  *
- * End conditions (both must pass):
- *  1. The player clicks "End Campaign" in the Army management screen.
- *  2. No enemy Army is within THREAT_RANGE_BLOCKS of any chunk conquered
- *     during this campaign.
+ * Ending requires the player's explicit action, no participating battle or
+ * retreat, and no hostile army or undeployed cohort within THREAT_RANGE_BLOCKS
+ * of participating armies, owned settlements, or still-owned conquered chunks.
  *
  * Ending a campaign clears only its status. Army wrappers must then be released separately.
  */
 public class Campaign {
     private static final org.slf4j.Logger LOGGER = com.mojang.logging.LogUtils.getLogger();
     public static final int THREAT_RANGE_BLOCKS = 150;
+    public static final int MAX_ARMIES = 128;
+    public static final int MAX_NAME = 80;
+    public static final int MAX_OBJECTIVE = 1024;
 
     private final UUID campaignId;
     private final UUID owningStateId;
@@ -38,6 +40,9 @@ public class Campaign {
     private final Set<UUID> armyIds = new HashSet<>(); //hash set of all army IDs in this campaign, used for O(1) membership checks when checking for enemy armies in checkEndConditions()
     private final Set<Long> conqueredChunkPositions = new HashSet<>(); //hash set of all chunks conquered in the campaign, gives O(1) search time when checking for enemy armies in checkEndConditions()
     private boolean isActive = true;
+    private boolean planned;
+    private String name = "Campaign", objective = "";
+    private BlockPos focusPosition;
 
     public Campaign(UUID campaignId, UUID owningStateId) {
         this.campaignId     = campaignId;
@@ -48,6 +53,31 @@ public class Campaign {
     public void removeArmy(UUID armyId) { armyIds.remove(armyId); }
     public Set<UUID> getArmyIds()       { return Collections.unmodifiableSet(armyIds); }
     public boolean isEmpty()            { return armyIds.isEmpty(); }
+
+    /** Plans reference armies without taking their active campaign lock. */
+    public static Campaign plan(UUID id, UUID owner) {
+        Campaign campaign = new Campaign(id, owner);
+        campaign.isActive = false;
+        campaign.planned = true;
+        return campaign;
+    }
+    public boolean isPlanned() { return planned; }
+    public String getName() { return name; }
+    public String getObjective() { return objective; }
+    public BlockPos getFocusPosition() { return focusPosition; }
+    public void describe(String name, String objective, BlockPos focus) {
+        this.name = clean(name, MAX_NAME).replace('\n', ' ').strip();
+        if (this.name.isEmpty()) this.name = "Campaign";
+        this.objective = clean(objective, MAX_OBJECTIVE);
+        focusPosition = focus == null ? null : focus.immutable();
+    }
+    private static String clean(String value, int maximum) {
+        if (value == null) return "";
+        String text = value.codePoints().filter(c -> c != 0xA7 && (!Character.isISOControl(c) || c == '\n'))
+                .collect(StringBuilder::new, StringBuilder::appendCodePoint, StringBuilder::append).toString();
+        return text.substring(0, Math.min(maximum, text.length()));
+    }
+    public void activate() { planned = false; isActive = true; }
 
     //chunk tracking
     public void trackConqueredChunk(long packedChunkPos) {
@@ -60,6 +90,7 @@ public class Campaign {
     }
 
     public boolean checkEndConditions(ArmyManager manager, ServerLevel level) {
+        if (!isActive) return false;
         StateManager states = StateManager.get(level);
         List<BlockPos> protectedPositions = new ArrayList<>();
         for (UUID id : armyIds) {
@@ -121,6 +152,10 @@ public class Campaign {
         tag.putString("CampaignId",    campaignId.toString());
         tag.putString("OwningStateId", owningStateId.toString());
         tag.putBoolean("IsActive",     isActive);
+        tag.putBoolean("Planned", planned);
+        tag.putString("Name", name);
+        tag.putString("Objective", objective);
+        if (focusPosition != null) tag.putLong("Focus", focusPosition.asLong());
 
         ListTag armyList = new ListTag();
         for (UUID id : armyIds) armyList.add(StringTag.valueOf(id.toString()));
@@ -142,6 +177,10 @@ public class Campaign {
         UUID sid    = UUID.fromString(tag.getString("OwningStateId").orElseThrow());
         Campaign c  = new Campaign(cid, sid);
         c.isActive  = tag.getBoolean("IsActive").orElse(true);
+        c.planned = tag.getBoolean("Planned").orElse(false);
+        if (c.planned) c.isActive = false;
+        c.describe(tag.getString("Name").orElse("Campaign"), tag.getString("Objective").orElse(""),
+                tag.getLong("Focus").map(BlockPos::of).orElse(null));
 
         tag.getList("Armies").ifPresent(list -> {
             for (int i = 0; i < list.size(); i++) {

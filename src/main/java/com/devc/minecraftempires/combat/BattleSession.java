@@ -22,6 +22,9 @@ public class BattleSession {
     private static final int INITIAL_GRACE_STEPS = 240;
     private static final int ABANDONMENT_GRACE_STEPS = 40;
     private static final int MELEE_INTERVAL = 8;
+    public static final double MELEE_TURN_DEGREES_PER_SECOND = 45;
+    // Initial balance: 90-degree front/rear sectors; flanks occupy the remaining two quarters.
+    private static final double FACING_SECTOR_COSINE = Math.sqrt(.5);
     public static final double FIELD_BOUND = 160;
     private final UUID battleId;
     private final UUID attackerArmyId;
@@ -69,6 +72,13 @@ public class BattleSession {
     private record PendingOrder(double x, double z, boolean clear) {}
     private final Map<UUID, Queue<PendingOrder>> pendingOrders = new HashMap<>();
     private final Map<UUID, Long> automaticRouteChecks = new HashMap<>();
+    private record PursuitRoute(Vector2d from, Vector2d goal) {}
+    private final Map<UUID, PursuitRoute> pursuitRoutes = new HashMap<>();
+    private final Map<UUID, Vector2d> pursuitGoals = new HashMap<>();
+    private final Map<UUID, Long> pursuitChecks = new HashMap<>();
+    private record RejectedApproaches(Vector2d target, long revision, Set<Integer> slots) {}
+    private final Map<UUID, RejectedApproaches> rejectedApproaches = new HashMap<>();
+    private long pursuitSteps;
     private long avoidanceDeadline;
     private final Set<UUID> legacyOrderIntents = new HashSet<>();
     public void attachTerrain(ServerLevel level) {
@@ -138,7 +148,11 @@ public class BattleSession {
     public void requestAutoResolve() { autoResolveRequested = true; idleSteps = 0; }
     public String getFormation(boolean attacker) { return formations[attacker ? 0 : 1].name(); }
     public String getDeploymentMessage() { return deploymentMessage; }
-    public List<Vector2d> getPendingObjectives(UUID cohort) { return pendingOrders.getOrDefault(cohort, new ArrayDeque<>()).stream().map(order -> new Vector2d(order.x, order.z)).toList(); }
+    public List<Vector2d> getPendingObjectives(UUID cohort) {
+        PursuitRoute pursuit = pursuitRoutes.get(cohort);
+        return pursuit == null ? pendingOrders.getOrDefault(cohort, new ArrayDeque<>()).stream().map(order -> new Vector2d(order.x, order.z)).toList()
+                : List.of(new Vector2d(pursuit.goal));
+    }
     public void resetIdleTicks() { idleSteps = 0; }
     public void tickIdle() { idleSteps++; }
 
@@ -305,6 +319,7 @@ public class BattleSession {
         if (!active) return;
         checkTerrain();
         if (!active) return;
+        initializeCombatFacing();
         if (phase != BattlePhase.ENGAGEMENT) {
             tickDeployment();
             return;
@@ -315,6 +330,8 @@ public class BattleSession {
         for (CohortData cohort : allBodies()) if (legacyOrderIntents.remove(cohort.getCohortId()))
             cohort.setAutomaticAdvance(isAttackerCohort(cohort.getCohortId()) ? advanceAttacker : advanceDefender);
         updateEngagements();
+        pursuitSteps++;
+        updateAttackOrders();
         if (advanceAttacker) advanceIdleUnits(attackerCohorts, defenderCohorts);
         if (advanceDefender) advanceIdleUnits(defenderCohorts, attackerCohorts);
         processNewRouts(attackerCohorts, true);
@@ -323,6 +340,8 @@ public class BattleSession {
         bodies.addAll(defenderCohorts);
         for (CohortData cohort : bodies) cohort.tickMovement(next -> resolveMovement(cohort, next, bodies));
         updateEngagements();
+        updateCombatFacing(attackerCohorts, defenderCohorts);
+        updateCombatFacing(defenderCohorts, attackerCohorts);
         if (++combatSteps >= MELEE_INTERVAL) {
             combatSteps = 0;
             processMelee();
@@ -472,7 +491,7 @@ public class BattleSession {
     }
     private void advanceIdleUnits(List<CohortData> allies, List<CohortData> enemies) {
         for (CohortData cohort : allies) {
-            if (!cohort.canTakeOrders() || cohort.isEngaged()
+            if (!cohort.canTakeOrders() || cohort.isEngaged() || cohort.getAttackTarget() != null
                     || pendingOrders.containsKey(cohort.getCohortId())
                     || !cohort.getMovementWaypoints().isEmpty() && !cohort.isAutomaticallyAdvancing()) continue;
             if (terrainLevel != null && !cohort.getMovementWaypoints().isEmpty() && cohort.getStalledMovementSteps() < 8) continue;
@@ -489,23 +508,176 @@ public class BattleSession {
     private void processMelee() {
         // One target per cohort avoids multiplying a unit's damage by every nearby enemy.
         Map<CohortData, Integer> hits = new HashMap<>();
-        collectHits(attackerCohorts, defenderCohorts, hits);
-        collectHits(defenderCohorts, attackerCohorts, hits);
-        hits.forEach((target, damage) -> target.applyDamage(damage, 2));
+        Map<CohortData, Integer> shocks = new HashMap<>();
+        collectHits(attackerCohorts, defenderCohorts, hits, shocks);
+        collectHits(defenderCohorts, attackerCohorts, hits, shocks);
+        // Preserve one morale pulse per damaged target, using its strongest incoming directional shock.
+        hits.forEach((target, damage) -> target.applyDamage(damage, shocks.getOrDefault(target, 2)));
     }
-    private void collectHits(List<CohortData> side, List<CohortData> opponents, Map<CohortData, Integer> hits) {
+    private void collectHits(List<CohortData> side, List<CohortData> opponents, Map<CohortData, Integer> hits, Map<CohortData, Integer> shocks) {
         for (CohortData cohort : side) {
             if (!cohort.canFight() || cohort.isWithdrawing()) continue;
             opponents.stream().filter(c -> c.isAlive() && !c.hasEscaped())
                     .filter(c -> contact(cohort, c))
-                    .min(Comparator.comparingDouble(c -> c.getPosition().distanceSquared(cohort.getPosition())))
+                    .min(Comparator.<CohortData>comparingInt(c -> targetPriority(cohort, c))
+                            .thenComparingDouble(c -> c.getPosition().distanceSquared(cohort.getPosition())).thenComparing(CohortData::getCohortId))
                     .ifPresent(target -> {
                         double strengthFraction = (double) cohort.getCurrentHealth() / cohort.getMaxHealth();
                         double resistance = 1.25 - Math.clamp(target.getEndurance(), 0, 100) / 200.0;
                         int damage = Math.max(1, (int) Math.round(cohort.getStrength() / 50.0 * 3 * strengthFraction * resistance));
                         hits.merge(target, damage, Integer::sum);
+                        shocks.merge(target, directionalMoraleShock(target, cohort), Math::max);
                     });
         }
+    }
+
+    //start of combat facing methods, sets the facing of the cohorts to face each other
+    // If a cohort is already facing an enemy, it keeps that facing until the enemy is gone.
+    private void initializeCombatFacing() {
+        for (List<CohortData> side : List.of(attackerCohorts, defenderCohorts)) {
+            Vector2d opposing = sideCenter(side == attackerCohorts ? defenderCohorts : attackerCohorts);
+            for (CohortData cohort : side) if (!cohort.hasCombatFacing()) {
+                double dx = opposing.x - cohort.getPosition().x, dz = opposing.y - cohort.getPosition().y;
+                if (Math.hypot(dx, dz) < 1.0e-8) cohort.faceCombat(0, side == attackerCohorts ? 1 : -1);
+                else cohort.faceCombat(dx, dz);
+            }
+        }
+    }
+
+    //cohort facing update method, updates the facing of the cohorts to face each other
+    private void updateCombatFacing(List<CohortData> side, List<CohortData> opponents) {
+        for (CohortData cohort : side) {
+            if (!cohort.canFight() || cohort.isWithdrawing() || !cohort.isEngaged()) { cohort.setPrimaryOpponent(null); continue; }
+            CohortData target = opponents.stream().filter(c -> c.isAlive() && !c.hasEscaped() && contact(cohort, c))
+                    .min(Comparator.<CohortData>comparingInt(c -> targetPriority(cohort, c))
+                            .thenComparingDouble(c -> c.getPosition().distanceSquared(cohort.getPosition())).thenComparing(CohortData::getCohortId)).orElse(null);
+            cohort.setPrimaryOpponent(target == null ? null : target.getCohortId());
+            if (target != null && !cohort.isColumn()) cohort.turnCombatToward(target.getPosition().x - cohort.getPosition().x,
+                    target.getPosition().y - cohort.getPosition().y, Math.toRadians(MELEE_TURN_DEGREES_PER_SECOND) * .25);
+        }
+    }
+
+    //combat facing shock method, returns the morale shock based on the facing of the cohorts
+    public static int directionalMoraleShock(CohortData defender, CohortData attacker) {
+        double dx = attacker.getPosition().x - defender.getPosition().x, dz = attacker.getPosition().y - defender.getPosition().y;
+        double distance = Math.hypot(dx, dz);
+        if (distance < 1.0e-8) return 2;
+        double dot = (dx * defender.getCombatFacingX() + dz * defender.getCombatFacingZ()) / distance;
+        return dot >= FACING_SECTOR_COSINE - 1.0e-8 ? 2 : dot <= -FACING_SECTOR_COSINE + 1.0e-8 ? 4 : 3;
+    }
+
+    //for enemy cohort targeting, returns the priority of the target based on the cohort's attack target and primary opponent
+    private static int targetPriority(CohortData cohort, CohortData candidate) {
+        return candidate.getCohortId().equals(cohort.getAttackTarget()) ? 0 : candidate.getCohortId().equals(cohort.getPrimaryOpponent()) ? 1 : 2;
+    }
+
+    /** An enemy identity is intent, never permission to cross friendly bodies or blocked terrain. */
+    public boolean issueAttackOrder(UUID cohortId, UUID targetId) {
+        CohortData cohort = getCohortById(cohortId).orElse(null), target = getCohortById(targetId).orElse(null);
+        if (!active || phase != BattlePhase.ENGAGEMENT || cohort == null || !cohort.canTakeOrders()
+                || target == null || !target.isAlive() || target.hasEscaped() || isAttackerCohort(cohortId) == isAttackerCohort(targetId)) return false;
+        pendingOrders.remove(cohortId); forgetPursuit(cohortId);
+        cohort.clearOrders();
+        cohort.setAttackTarget(targetId, freeAttackSlot(cohort, target));
+        cohort.setOrderStatus("Pursuing selected enemy");
+        return true;
+    }
+    private void forgetPursuit(UUID id) { pursuitRoutes.remove(id); pursuitGoals.remove(id); pursuitChecks.remove(id); rejectedApproaches.remove(id); }
+    private int freeAttackSlot(CohortData cohort, CohortData target) {
+        Set<Integer> used = new HashSet<>();
+        for (CohortData ally : isAttackerCohort(cohort.getCohortId()) ? attackerCohorts : defenderCohorts)
+            if (ally != cohort && ally.canTakeOrders() && target.getCohortId().equals(ally.getAttackTarget())) used.add(ally.getAttackSlot());
+        int first = 0, count = target.isColumn() ? 3 : 6;
+        while (first + count < 1024) {
+            int best = -1; double distance = Double.POSITIVE_INFINITY;
+            Set<Integer> rejected = rejectedApproaches.containsKey(cohort.getCohortId()) ? rejectedApproaches.get(cohort.getCohortId()).slots : Set.of();
+            for (int slot = first; slot < first + count; slot++) if (!used.contains(slot) && !rejected.contains(slot)) {
+                Vector2d point = attackApproach(cohort, target, slot);
+                if (Math.abs(point.x) > FIELD_BOUND || Math.abs(point.y) > FIELD_BOUND) continue;
+                double candidate = point.distanceSquared(cohort.getPosition());
+                if (candidate < distance) { best = slot; distance = candidate; }
+            }
+            if (best >= 0) return best;
+            first += count; count += target.isColumn() ? 3 : 6;
+        }
+        return cohort.getAttackSlot();
+    }
+    private static int attackRing(int slot, int base) {
+        int ring = 1;
+        while (slot >= base * ring) { slot -= base * ring; ring++; }
+        return ring;
+    }
+
+    //attack approach method, returns the position of the cohort based on the target and the slot
+    private static Vector2d attackApproach(CohortData cohort, CohortData target, int slot) {
+        int base = target.isColumn() ? 3 : 6, ring = attackRing(slot, base);
+        int first = base * ring * (ring - 1) / 2;
+        double angle = 2 * Math.PI * (slot - first) / (base * ring);
+        double radius = (target.isColumn() ? 6.75 : COHORT_SPACING + .25) + (COHORT_SPACING + .25) * (ring - 1);
+        Vector2d anchor = target.getPosition();
+        if (target.isColumn()) anchor = target.footprintAt(anchor.x, anchor.y).stream()
+                .min(Comparator.comparingDouble(p -> p.distanceSquared(cohort.getPosition()))).orElse(anchor);
+        return new Vector2d(anchor).add(Math.cos(angle) * radius, Math.sin(angle) * radius);
+    }
+    //update attack orders method, updates the attack orders of the cohorts
+    private void updateAttackOrders() {
+        for (CohortData cohort : allBodies()) {
+            UUID id = cohort.getCohortId(), targetId = cohort.getAttackTarget();
+            if (targetId == null) { forgetPursuit(id); continue; }
+            CohortData target = getCohortById(targetId).orElse(null);
+            if (!cohort.canTakeOrders() || target == null || !target.isAlive() || target.hasEscaped()
+                    || isAttackerCohort(id) == isAttackerCohort(targetId)) {
+                // Clear only pursuit orders; a withdrawal/rout may already have installed its own exit route.
+                if (cohort.canTakeOrders()) { cohort.clearOrders(); cohort.setOrderStatus("Target no longer available"); }
+                else cohort.setAttackTarget(null, 0);
+                forgetPursuit(id); continue;
+            }
+            if (cohort.isEngaged()) { pursuitRoutes.remove(id); cohort.setOrderStatus("Engaged; target retained"); continue; }
+            PursuitRoute request = pursuitRoutes.get(id);
+            if (request == null) { //while the request isn't null, it will keep the same request until the target moves or the route is blocked
+                if (pursuitSteps - pursuitChecks.getOrDefault(id, -4L) < 4) continue;
+                pursuitChecks.put(id, pursuitSteps);
+                var rejected = rejectedApproaches.get(id);
+                long revision = terrainLevel == null ? 0 : MapDataService.terrainRevision(terrainLevel);
+                if (rejected != null && (rejected.revision != revision || rejected.target.distanceSquared(target.getPosition()) >= 4)) {
+                    rejectedApproaches.remove(id); rejected = null;
+                }
+                int available = freeAttackSlot(cohort, target), base = target.isColumn() ? 3 : 6;
+                Vector2d current = attackApproach(cohort, target, cohort.getAttackSlot());
+                if (attackRing(available, base) < attackRing(cohort.getAttackSlot(), base) || Math.abs(current.x) > FIELD_BOUND || Math.abs(current.y) > FIELD_BOUND
+                        || rejected != null && rejected.slots.contains(cohort.getAttackSlot())) cohort.setAttackTarget(targetId, available);
+                Vector2d goal = attackApproach(cohort, target, cohort.getAttackSlot()), previous = pursuitGoals.get(id);
+                if (Math.abs(goal.x) > FIELD_BOUND || Math.abs(goal.y) > FIELD_BOUND) { cohort.setOrderStatus("Waiting for target approach space"); continue; }
+                if (previous != null && goal.distanceSquared(previous) < 4 && !cohort.getMovementWaypoints().isEmpty()) continue;
+                if (previous != null && goal.distanceSquared(previous) < .01 && cohort.getPosition().distanceSquared(goal) < .01) continue;
+                request = new PursuitRoute(new Vector2d(cohort.getPosition()), goal);
+                pursuitRoutes.put(id, request);
+            }
+            if (terrainLevel == null) {
+                acceptPursuitRoute(cohort, request, List.of(request.goal)); continue;
+            }
+            // Finish the same bounded search while the target moves; never restart it on every frame.
+            var route = cohort.isColumn() ? MapDataService.battleRoute(terrainLevel, world(request.from), world(request.goal), mapOriginX, mapOriginZ)
+                    : MapDataService.formationRoute(terrainLevel, world(request.from), world(request.goal), mapOriginX, mapOriginZ);
+            if (route.status() == MapDataService.Verification.VERIFIED) {
+                var turns = com.devc.minecraftempires.army.ArmyManager.routeTurns(route.points()).stream()
+                        .map(p -> new Vector2d(p.getX() + .5 - mapOriginX, p.getZ() + .5 - mapOriginZ)).toList();
+                acceptPursuitRoute(cohort, request, turns);
+            } else if (route.status() == MapDataService.Verification.BLOCKED || route.status() == MapDataService.Verification.LIMITED) {
+                // Try another unreserved approach instead of repeatedly aiming at an unusable shore/slot.
+                var rejected = rejectedApproaches.computeIfAbsent(id, ignored -> new RejectedApproaches(new Vector2d(target.getPosition()), MapDataService.terrainRevision(terrainLevel), new HashSet<>()));
+                rejected.slots.add(cohort.getAttackSlot());
+                pursuitRoutes.remove(id); pursuitChecks.put(id, pursuitSteps); cohort.setOrderStatus("No usable route to target");
+            } else cohort.setOrderStatus("Checking route to target");
+        }
+    }
+    private void acceptPursuitRoute(CohortData cohort, PursuitRoute request, List<Vector2d> turns) {
+        UUID id = cohort.getCohortId(); pursuitRoutes.remove(id); pursuitChecks.put(id, pursuitSteps);
+        if (turns.size() > 64) { cohort.setOrderStatus("Target route is too long"); return; }
+        cohort.clearRoute();
+        turns.forEach(p -> cohort.queueWaypoint(p.x, p.y));
+        if (!turns.isEmpty()) cohort.queueObjective(turns.getLast().x, turns.getLast().y);
+        pursuitGoals.put(id, new Vector2d(request.goal)); cohort.setOrderStatus("Pursuing selected enemy");
     }
     private void processMoraleAura(List<CohortData> side) {
         for (CohortData cohort : side) {
@@ -545,6 +717,7 @@ public class BattleSession {
             cohort.place(x, z);
         } else {
             if (cohort.isEngaged()) return false;
+            if (cohort.getAttackTarget() != null) { cohort.clearOrders(); forgetPursuit(cohortId); }
             if (terrainLevel != null) {
                 if (clear) { pendingOrders.remove(cohortId); cohort.clearOrders(); }
                 if (!pendingOrders.containsKey(cohortId) && routeOrder(cohort, x, z, clear)) return true;
