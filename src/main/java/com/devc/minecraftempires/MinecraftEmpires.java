@@ -173,6 +173,9 @@ public class MinecraftEmpires {
     //clears BattleManager state when the server shuts down
     @SubscribeEvent
     public void onServerStopping(ServerStoppingEvent event) {
+        StateManager.get(event.getServer().overworld()).getPlayerConflicts().close();
+        StateManager.get(event.getServer().overworld()).getAIWars().close();
+        StateManager.get(event.getServer().overworld()).getAIRegions().close();
         BattleManager.resolveAllOnShutdown(event.getServer());
         BattleManager.clearAll();
         ModNetworking.clearAll();
@@ -188,7 +191,10 @@ public class MinecraftEmpires {
     // Terrain has its own small work budget and does not change the army/battle tick interval.
     @SubscribeEvent
     public void onTerrainTick(ServerTickEvent.Post event) {
+        StateManager.get(event.getServer().overworld()).getPlayerConflicts().tick(event.getServer().overworld());
+        StateManager.get(event.getServer().overworld()).getAIWars().tick(event.getServer().overworld());
         MapDataService.tickTerrain(event.getServer().overworld());
+        StateManager.get(event.getServer().overworld()).getAIRegions().tick(event.getServer().overworld());
     }
 
     // Chunk load events only enqueue positions. Sampling waits for a server tick after promotion to FULL.

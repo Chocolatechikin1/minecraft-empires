@@ -34,6 +34,23 @@ public class Config {
             .comment("A list of items to log on common setup.")
             .defineListAllowEmpty("items", List.of("minecraft:iron_ingot"), () -> "", Config::validateItemName);
 
+    // Sprint 8 generation stays opt-in pending live gameplay, multiplayer and performance validation.
+    public static final ModConfigSpec.BooleanValue AI_GENERATION_ENABLED = BUILDER
+            .comment("Initialize abstract NPC nations around actual Overworld players. Opt-in during Sprint 8 validation; physical settlement generation remains deferred.")
+            .define("aiGenerationEnabled", false);
+    public static final ModConfigSpec.IntValue AI_NATION_DENSITY = BUILDER
+            .comment("NPC coverage target and hard ceiling as a percent of ALL estimated land per region, capped at 60 for new generation. Excluded biomes count as free land. Version 1 worlds retain the old district-density meaning. Saved on first activation.")
+            .defineInRange("aiNationDensity", 60, 0, 100);
+    public static final ModConfigSpec.IntValue AI_MAX_NATIONS = BUILDER
+            .comment("Resident generation identity limit including retired nations and independent-only districts; no origin-distance boundary. Existing records are retained if this is lowered.")
+            .defineInRange("aiMaxNations", 64, 1, 256);
+    public static final ModConfigSpec.IntValue AI_MAX_REGIONS = BUILDER
+            .comment("Resident strategic-region limit. Paging is not implemented yet; initialization defers at this limit.")
+            .defineInRange("aiMaxRegions", 8192, 256, 65536);
+    public static final ModConfigSpec.IntValue AI_GEOGRAPHY_SAMPLES_PER_TICK = BUILDER
+            .comment("Maximum coarse generator columns per tick. A shared one-millisecond cooperative budget also applies.")
+            .defineInRange("aiGeographySamplesPerTick", 4, 1, 16);
+
     static final ModConfigSpec SPEC = BUILDER.build();
 
     private static boolean validateItemName(final Object obj) {

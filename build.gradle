@@ -199,6 +199,7 @@ var preSprint7Regression = tasks.register('preSprint7Regression', JavaExec) {
     onlyIf { regressionSource.isFile() }
     classpath = sourceSets.test.runtimeClasspath
     mainClass = 'com.devc.minecraftempires.PreSprint7Regression'
+    if (providers.gradleProperty('sprint8Scale').isPresent()) args 'sprint8-scale'
     workingDir = layout.buildDirectory.dir('regression').get().asFile
     doFirst { workingDir.mkdirs() }
     javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
@@ -286,19 +287,40 @@ displayName="Isolated terrain verification"
     def fixtureDirectory = providers.gradleProperty('terrainFixtureDirectory').map { file(it) }.getOrElse(layout.buildDirectory.dir('terrain-harness/world').get().asFile)
     if (!fixtureDirectory.toPath().toAbsolutePath().normalize().startsWith(layout.buildDirectory.get().asFile.toPath().toAbsolutePath().normalize()))
         throw new GradleException('Terrain fixtures must use an isolated directory inside build/.')
-    neoForge.runs.gameTestServer { gameDirectory = fixtureDirectory }
+    neoForge.runs.gameTestServer {
+        gameDirectory = fixtureDirectory
+        systemProperty 'minecraftempires.coastFixtureOutput', layout.buildDirectory.file('coast-preview-render.dat').get().asFile.absolutePath
+    }
     if (providers.gradleProperty('terrainNaturalOnly').isPresent()) neoForge.runs.gameTestServer {
         systemProperty 'minecraftempires.naturalOnly', 'true'
     }
     if (providers.gradleProperty('terrainOrdersOnly').isPresent()) neoForge.runs.gameTestServer {
         systemProperty 'minecraftempires.ordersOnly', 'true'
     }
+    //for npc/ai states, they get their own loading criteria as to prevent server and memory lag
+    if (providers.gradleProperty('terrainAIOnly').isPresent()) neoForge.runs.gameTestServer {
+        systemProperty 'minecraftempires.aiOnly', 'true'
+    }
+    if (providers.gradleProperty('terrainMacroOnly').isPresent()) neoForge.runs.gameTestServer {
+        systemProperty 'minecraftempires.macroOnly', 'true'
+    }
+    if (providers.gradleProperty('terrainPlayerOnly').isPresent()) neoForge.runs.gameTestServer {
+        systemProperty 'minecraftempires.playerOnly', 'true'
+    }
+    if (providers.gradleProperty('terrainAcceptanceOnly').isPresent()) neoForge.runs.gameTestServer {
+        systemProperty 'minecraftempires.acceptanceOnly', 'true'
+    }
+    if (providers.gradleProperty('terrainCoastOnly').isPresent()) neoForge.runs.gameTestServer {
+        systemProperty 'minecraftempires.coastOnly', 'true'
+    }
     if (replayMode) neoForge.runs.server {
         gameDirectory = replayDirectory
         if (providers.gradleProperty('terrainStrategicReplay').isPresent()) systemProperty 'minecraftempires.strategicReplay', 'true'
+        providers.gradleProperty('sprint8Process').orNull?.with { mode -> systemProperty 'minecraftempires.sprint8Process', mode }
     }
     if (uiSmokeMode) neoForge.runs.client {
         gameDirectory = layout.buildDirectory.dir('terrain-harness/client').get().asFile
+        systemProperty 'minecraftempires.coastFixtureOutput', layout.buildDirectory.file('coast-preview-render.dat').get().asFile.absolutePath
         programArguments.addAll '--width', '1280', '--height', '900'
     }
 }
