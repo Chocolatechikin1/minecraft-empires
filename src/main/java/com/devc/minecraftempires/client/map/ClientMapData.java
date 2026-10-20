@@ -18,12 +18,14 @@ import java.util.Comparator;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -65,6 +67,8 @@ public final class ClientMapData {
     public static void accept(MapDataPayload payload) {
         if (!Objects.equals(snapshot.viewerStateId(), payload.viewerStateId())) setTerrainState(payload.viewerStateId());
         snapshot = Snapshot.from(payload, VERSION_COUNTER.incrementAndGet());
+        politicalRegions = payload.politicalRegions();
+        claimsTruncated = payload.claimsTruncated();
     }
 
     //terrain view toggle: these are local styles over the same server-surveyed pixels.
@@ -94,16 +98,66 @@ public final class ClientMapData {
     }
 
     //terrain cache for backend/server side: CPU samples and GPU textures have separate bounds, including a smaller fine-detail budget.
+    //including variables to house distant unexplored terrain
     private static final int MAX_TERRAIN_TILES = 768, MAX_FINE_TILES = 64;
     private static final Map<MapDataPayload.TerrainKey, MapDataPayload.TerrainTile> terrainTiles = new LinkedHashMap<>(128, .75f, true);
     private static final Map<TextureKey, Identifier> terrainTextures = new LinkedHashMap<>(128, .75f, true);
     private static final Map<MapDataPayload.TerrainKey, Long> terrainRequests = new LinkedHashMap<>();
     private static UUID terrainState;
     private static long nextTerrainRequest, textureSerial;
+    private static long nextOverviewRequest;
+    private static RequestMapDataPayload viewport = new RequestMapDataPayload();
+    public static RequestMapDataPayload viewport() { return viewport; }
+    private static final Map<MapDataPayload.CoastKey, MapDataPayload.CoastTile> coastTiles = new LinkedHashMap<>(64, .75f, true);
+    private static final Map<MapDataPayload.CoastKey, Identifier> coastTextures = new HashMap<>();
+    public static final int MAX_COAST_TILES = 192, COAST_PIXELS = 64;
+    public static final int OVERVIEW_LAND_COLOR = 0xFFAD916A, OVERVIEW_WATER_COLOR = 0xFFA6C6CF, OVERVIEW_COAST_COLOR = 0xFF574735;
+    private static List<MapDataPayload.CoastTile> coastLayers = List.of();
+    /** Interpolate the signed field, drawing its zero contour rather than the edges of sample squares. */
+    public static int[] coastPixels(MapDataPayload.CoastTile tile) {
+        short[] values = tile.heights(); int[] pixels = new int[COAST_PIXELS * COAST_PIXELS];
+        double unit = MapDataPayload.CoastKey.CELLS / (double) COAST_PIXELS;
+        for (int z = 0; z < COAST_PIXELS; z++) for (int x = 0; x < COAST_PIXELS; x++) {
+            double u = (x + .5) * unit, v = (z + .5) * unit, density = coastValue(values, u, v);
+            if (Double.isNaN(density)) continue;
+            double dx = coastValue(values, Math.min(16, u + unit / 2), v) - coastValue(values, Math.max(0, u - unit / 2), v);
+            double dz = coastValue(values, u, Math.min(16, v + unit / 2)) - coastValue(values, u, Math.max(0, v - unit / 2));
+            double width = Math.hypot(dx, dz) * .55;
+            pixels[z * COAST_PIXELS + x] = width > 0 && Math.abs(density) <= width ? OVERVIEW_COAST_COLOR : density > 0 ? OVERVIEW_LAND_COLOR : OVERVIEW_WATER_COLOR;
+        }
+        return pixels;
+    }
+    private static double coastValue(short[] values, double x, double z) {
+        int ix = Math.min(15, (int) x), iz = Math.min(15, (int) z), side = MapDataPayload.CoastKey.SIDE;
+        double fx = x - ix, fz = z - iz;
+        short a = values[iz * side + ix], b = values[iz * side + ix + 1], c = values[(iz + 1) * side + ix], d = values[(iz + 1) * side + ix + 1];
+        if (a == MapDataPayload.CoastTile.UNKNOWN || b == MapDataPayload.CoastTile.UNKNOWN || c == MapDataPayload.CoastTile.UNKNOWN || d == MapDataPayload.CoastTile.UNKNOWN) return Double.NaN;
+        return (a + (b - a) * fx) * (1 - fz) + (c + (d - c) * fx) * fz;
+    }
+    private static List<MapDataPayload.PoliticalRegion> politicalRegions = List.of();
+    private static boolean claimsTruncated;
+    private static boolean overviewUnsupported;
+    public static void acceptOverview(MapDataPayload.OverviewPayload payload) {
+        if (!Objects.equals(ClientManagementData.get().stateId(), payload.viewer())) return;
+        overviewUnsupported = payload.unsupported();
+        boolean changed = false;
+        for (var tile : payload.tiles()) {
+            var previous = coastTiles.get(tile.key());
+            if (previous != null && (previous.detailed() && !tile.detailed() || previous.version() > tile.version())) continue;
+            if (!tile.equals(previous)) { coastTiles.put(tile.key(), tile); releaseCoastTexture(tile.key()); changed = true; }
+        }
+        while (coastTiles.size() > MAX_COAST_TILES) { var key = coastTiles.keySet().iterator().next(); coastTiles.remove(key); releaseCoastTexture(key); changed = true; }
+        if (changed) {
+            // Sort only when facts change. Cached textures do the work on all subsequent rendered frames.
+            coastLayers = coastTiles.values().stream().sorted(Comparator.comparingInt((MapDataPayload.CoastTile tile) -> tile.key().step()).reversed()).toList();
+        }
+        politicalRegions = payload.regions();
+    }
 
     public static void setTerrainState(UUID stateId) {
         if (!Objects.equals(terrainState, stateId)) {
             clearTerrain(); terrainState = stateId;
+            if (!Objects.equals(snapshot.viewerStateId(), stateId)) snapshot = Snapshot.empty(VERSION_COUNTER.incrementAndGet());
         }
     }
     public static void clearTerrain() {
@@ -111,6 +165,11 @@ public final class ClientMapData {
         var manager = Minecraft.getInstance().getTextureManager();
         for (Identifier texture : terrainTextures.values()) manager.release(texture);
         terrainTextures.clear(); terrainTiles.clear(); terrainRequests.clear();
+        for (var texture : coastTextures.values()) manager.release(texture);
+        coastTextures.clear(); coastTiles.clear(); coastLayers = List.of(); politicalRegions = List.of(); nextOverviewRequest = 0;
+        claimsTruncated = false;
+        overviewUnsupported = false;
+        viewport = new RequestMapDataPayload();
         terrainState = null; nextTerrainRequest = 0;
     }
     public static void acceptTerrain(MapDataPayload.TerrainPayload payload) {
@@ -148,8 +207,27 @@ public final class ClientMapData {
             double centerX, double centerZ, double pixelsPerBlock, UUID battleId) {
         TerrainView view = terrainView(battleId != null);
         int step = pixelsPerBlock >= .75 ? 1 : pixelsPerBlock >= .09 ? 4 : 16;
-        int background = view == TerrainView.ATLAS ? 0xFFC6B99C : view == TerrainView.TOPOGRAPHIC ? 0xFF273431 : 0xFF202D35;
+        int background = battleId == null ? OVERVIEW_LAND_COLOR : view == TerrainView.ATLAS ? 0xFFC6B99C : view == TerrainView.TOPOGRAPHIC ? 0xFF273431 : 0xFF202D35;
         graphics.fill(x, y, x + width, y + height, background);
+        if (battleId == null) {
+            if (System.currentTimeMillis() >= nextOverviewRequest && ClientManagementData.get().stateId() != null && Minecraft.getInstance().getConnection() != null) {
+                nextOverviewRequest = System.currentTimeMillis() + 350;
+                int span = (int) Math.clamp(Math.max(width, height) / pixelsPerBlock, 256, 65536);
+                viewport = new RequestMapDataPayload((int) Math.clamp(centerX, -29_999_984, 29_999_984), (int) Math.clamp(centerZ, -29_999_984, 29_999_984), span);
+                net.neoforged.neoforge.client.network.ClientPacketDistributor.sendToServer(new RequestMapDataPayload.OverviewRequest(
+                        (int) Math.clamp(centerX, -29_999_984, 29_999_984), (int) Math.clamp(centerZ, -29_999_984, 29_999_984), span,
+                        coastTiles.values().stream().map(tile -> new MapDataPayload.CoastStamp(tile.key(), tile.version())).toList()));
+            }
+            int[] coastBudget = {2};
+            for (var tile : coastLayers) {
+                var key = tile.key();
+                int left = (int) Math.round(x + width / 2.0 + (key.x() - centerX) * pixelsPerBlock), top = (int) Math.round(y + height / 2.0 + (key.z() - centerZ) * pixelsPerBlock);
+                int right = (int) Math.round(x + width / 2.0 + (key.x() + key.blocks() - centerX) * pixelsPerBlock), bottom = (int) Math.round(y + height / 2.0 + (key.z() + key.blocks() - centerZ) * pixelsPerBlock);
+                if (right < x || left > x + width || bottom < y || top > y + height) continue;
+                Identifier texture = coastTexture(tile, coastBudget);
+                if (texture != null) graphics.blit(texture, left, top, right, bottom, 0, 1, 0, 1);
+            }
+        }
         trimTerrainTextures();
         double minX = centerX - width / (2.0 * pixelsPerBlock), maxX = centerX + width / (2.0 * pixelsPerBlock);
         double minZ = centerZ - height / (2.0 * pixelsPerBlock), maxZ = centerZ + height / (2.0 * pixelsPerBlock);
@@ -162,7 +240,7 @@ public final class ClientMapData {
             for (var key : visibleTerrainKeys(minX, maxX, minZ, maxZ, detail, centerX, centerZ)) {
                 var tile = terrainTiles.get(key);
                 if (tile == null) continue;
-                Identifier texture = terrainTexture(tile, view, textureBudget);
+                Identifier texture = terrainTexture(tile, view, textureBudget, battleId == null);
                 if (texture == null) continue;
                 int left = (int) Math.round(x + width / 2.0 + (key.tileX() * (double) key.blocks() - centerX) * pixelsPerBlock);
                 int top = (int) Math.round(y + height / 2.0 + (key.tileZ() * (double) key.blocks() - centerZ) * pixelsPerBlock);
@@ -228,16 +306,29 @@ public final class ClientMapData {
         }
     }
 
+    private static void releaseCoastTexture(MapDataPayload.CoastKey key) {
+        Identifier texture = coastTextures.remove(key); if (texture != null) Minecraft.getInstance().getTextureManager().release(texture);
+    }
+    private static Identifier coastTexture(MapDataPayload.CoastTile tile, int[] budget) {
+        Identifier existing = coastTextures.get(tile.key()); if (existing != null) return existing;
+        if (budget[0]-- <= 0) return null;
+        int[] pixels = coastPixels(tile); NativeImage image = new NativeImage(COAST_PIXELS, COAST_PIXELS, false);
+        for (int z = 0; z < COAST_PIXELS; z++) for (int x = 0; x < COAST_PIXELS; x++) image.setPixel(x, z, pixels[z * COAST_PIXELS + x]);
+        Identifier id = Identifier.fromNamespaceAndPath("minecraftempires", "coast/runtime_" + textureSerial++);
+        Minecraft.getInstance().getTextureManager().register(id, new DynamicTexture(() -> id.toString(), image));
+        coastTextures.put(tile.key(), id); return id;
+    }
+
     //for the stylized, topographic, and atlas views, generate a texture for the given tile and view, caching it for reuse. If the texture budget is exceeded, return null to avoid overloading the GPU.
-    private static Identifier terrainTexture(MapDataPayload.TerrainTile tile, TerrainView view, int[] budget) {
-        TextureKey key = new TextureKey(tile.key(), view);
+    private static Identifier terrainTexture(MapDataPayload.TerrainTile tile, TerrainView view, int[] budget, boolean overview) {
+        TextureKey key = new TextureKey(tile.key(), view, overview);
         Identifier existing = terrainTextures.get(key);
         if (existing != null) return existing;
         if (budget[0]-- <= 0) return null;
         int side = tile.key().side();
         NativeImage image = new NativeImage(side, side, false);
         for (int z = 0; z < side; z++) for (int x = 0; x < side; x++)
-            image.setPixel(x, z, terrainPixel(tile, view, x, z));
+            image.setPixel(x, z, overview && !tile.knownAt(z * side + x) ? 0 : terrainPixel(tile, view, x, z));
         Identifier id = Identifier.fromNamespaceAndPath("minecraftempires", "terrain/runtime_" + textureSerial++);
         DynamicTexture texture = new DynamicTexture(() -> id.toString(), image);
         Minecraft.getInstance().getTextureManager().register(id, texture);
@@ -326,7 +417,43 @@ public final class ClientMapData {
         }
         return null;
     }
-    private record TextureKey(MapDataPayload.TerrainKey tile, TerrainView view) {}
+    private record TextureKey(MapDataPayload.TerrainKey tile, TerrainView view, boolean overview) {}
+    public static void renderPolitics(GuiGraphicsExtractor g, Font font, int x, int y, int width, int height, double cx, double cz, double scale) {
+        Set<UUID> labeled = new java.util.HashSet<>();
+        Map<Long, MapDataPayload.PoliticalRegion> index = new HashMap<>(); politicalRegions.forEach(r -> index.put(r.key(), r));
+        for (var region : politicalRegions) {
+            if (region.owner() == null) continue;
+            ChunkPos pos = ChunkPos.unpack(region.key()); double wx = pos.x() * 1024.0, wz = pos.z() * 1024.0;
+            double left = x + width / 2.0 + (wx - cx) * scale, top = y + height / 2.0 + (wz - cz) * scale;
+            if (left + 1024 * scale < x || left > x + width || top + 1024 * scale < y || top > y + height) continue;
+            int color = region.owner().hashCode(); color = 0x30000000 | (color & 0x7F7F7F) | 0x606060;
+            java.util.BitSet land = java.util.BitSet.valueOf(region.land());
+            boolean[] occupiedCells = new boolean[64];
+            for (int row = 0; row < 8; row++) for (int col = 0; col < 8; col++) for (int dz = 0; dz < 8; dz++) {
+                int start = (row * 8 + dz) * 64 + col * 8, next = land.nextSetBit(start);
+                if (next >= start && next < start + 8) { occupiedCells[row * 8 + col] = true; break; }
+            }
+            for (int row = 0; row < 8; row++) for (int col = 0; col < 8; col++) {
+                if (!occupiedCells[row * 8 + col]) continue;
+                int l = (int) Math.floor(left + col * 128 * scale), t = (int) Math.floor(top + row * 128 * scale);
+                int r = (int) Math.ceil(left + (col + 1) * 128 * scale), b = (int) Math.ceil(top + (row + 1) * 128 * scale);
+                g.fill(l, t, r, b, color);
+                if (row > 0 ? !occupiedCells[(row - 1) * 8 + col] : !samePolity(index, pos.x(), pos.z() - 1, region.owner())) g.fill(l, t, r, t + 1, color | 0x99000000);
+                if (col > 0 ? !occupiedCells[row * 8 + col - 1] : !samePolity(index, pos.x() - 1, pos.z(), region.owner())) g.fill(l, t, l + 1, b, color | 0x99000000);
+                if (row < 7 ? !occupiedCells[(row + 1) * 8 + col] : !samePolity(index, pos.x(), pos.z() + 1, region.owner())) g.fill(l, b - 1, r, b, color | 0x99000000);
+                if (col < 7 ? !occupiedCells[row * 8 + col + 1] : !samePolity(index, pos.x() + 1, pos.z(), region.owner())) g.fill(r - 1, t, r, b, color | 0x99000000);
+            }
+            if (labeled.add(region.owner()) && font != null) {
+                var nation = snapshot.statesById().get(region.owner());
+                if (nation != null) g.text(font, Component.literal(nation.stateName()), (int) left + 3, (int) top + 3, 0xFFE9D9B8);
+            }
+        }
+        if (font != null && overviewUnsupported) g.text(font, Component.translatable("gui.minecraftempires.map.overview_unavailable"), x + 6, y + 6, 0xFFD9C6A3);
+        if (font != null && claimsTruncated) g.text(font, Component.translatable("gui.minecraftempires.map.zoom_details"), x + 6, y + 18, 0xFFFFCD77);
+    }
+    private static boolean samePolity(Map<Long, MapDataPayload.PoliticalRegion> regions, int x, int z, UUID owner) {
+        var neighbor = regions.get(new ChunkPos(x, z).pack()); return neighbor != null && owner.equals(neighbor.owner());
+    }
 
     public record ProvinceAnchor(
             String settlementId,
@@ -380,7 +507,7 @@ public final class ClientMapData {
 
         //handles client snapshot creation from a payload which has all the data for the map
         private static Snapshot from(MapDataPayload payload, int version) {
-            if (payload == null || payload.chunks().isEmpty()) {
+            if (payload == null) {
                 return new Snapshot(
                         version,
                         payload == null ? null : payload.viewerStateId(),
@@ -435,6 +562,15 @@ public final class ClientMapData {
             Map<UUID, MapDataPayload.StateSummary> states = indexStates(payload.states());
             Map<String, MapDataPayload.SettlementSummary> settlements = indexSettlements(payload.settlements());
             List<ProvinceAnchor> anchors = buildProvinceAnchors(chunks, settlements);
+            if (chunks.isEmpty()) {
+                minX = minZ = maxX = maxZ = 0;
+                if (!anchors.isEmpty()) {
+                    minX = (int) Math.floor(anchors.stream().mapToDouble(ProvinceAnchor::chunkX).min().orElse(0)); maxX = (int) Math.floor(anchors.stream().mapToDouble(ProvinceAnchor::chunkX).max().orElse(0));
+                    minZ = (int) Math.floor(anchors.stream().mapToDouble(ProvinceAnchor::chunkZ).min().orElse(0)); maxZ = (int) Math.floor(anchors.stream().mapToDouble(ProvinceAnchor::chunkZ).max().orElse(0));
+                } else if (!payload.politicalRegions().isEmpty()) {
+                    ChunkPos region = ChunkPos.unpack(payload.politicalRegions().getFirst().key()); minX = region.x() * 64; maxX = minX + 63; minZ = region.z() * 64; maxZ = minZ + 63;
+                }
+            }
 
             return new Snapshot(
                     version,
@@ -458,7 +594,7 @@ public final class ClientMapData {
         }
 
         public boolean hasData() {
-            return !chunksByPosition.isEmpty();
+            return viewerStateId != null || !chunksByPosition.isEmpty() || !settlementsById.isEmpty();
         }
 
         public MapDataPayload.MapChunkData getChunk(int chunkX, int chunkZ) {
@@ -595,6 +731,11 @@ public final class ClientMapData {
         }
 
         List<ProvinceAnchor> anchors = new ArrayList<>();
+        for (var settlement : settlements.values()) if (!groups.containsKey(settlement.settlementId())) {
+            ChunkPos center = ChunkPos.unpack(settlement.packedCenterChunk());
+            anchors.add(new ProvinceAnchor(settlement.settlementId(), settlement.settlementName(), settlement.stateId(), center.x() + .5, center.z() + .5,
+                    settlement.capital(), settlement.garrisoned(), true));
+        }
         for (Map.Entry<String, Accumulator> entry : groups.entrySet()) {
             String settlementId = entry.getKey();
             Accumulator group = entry.getValue();

@@ -23,6 +23,10 @@ public final class EmpireManagementScreen extends Screen {
     private UUID selected;
     private final MapScreen mapScreen;
     private ManagementList overview;
+    private com.devc.minecraftempires.state.WorldNews.Filter newsFilter = com.devc.minecraftempires.state.WorldNews.Filter.ALL;
+    private boolean ownNews;
+    private final Deque<Long> newsBack = new ArrayDeque<>();
+    private int newsVersion = -1;
     public EmpireManagementScreen() { this(new MapScreen()); }
     public EmpireManagementScreen(MapScreen mapScreen) {
         super(Component.literal("Empire Management"));
@@ -52,6 +56,8 @@ public final class EmpireManagementScreen extends Screen {
                 () -> { tab = 4; page = 0; overview = null; rebuild(); });
         button((tab == 5 ? "[" : "") + label("campaigns") + (tab == 5 ? "]" : ""), 20 + 2 * (tabWidth + 2), 96, tabWidth,
                 () -> { tab = 5; page = 0; overview = null; rebuild(); });
+        button((tab == 6 ? "[" : "") + label("news") + (tab == 6 ? "]" : ""), 20 + 3 * (tabWidth + 2), 96, tabWidth,
+                () -> { tab = 6; overview = null; refreshNews(); });
         button("Map", 20, height - 25, 70, () -> { mapScreen.setManagementReturn(this); minecraft.gui.setScreen(mapScreen); });
         button("Close", width - 90, height - 25, 70, this::onClose);
         if (data().stateId() == null) return;
@@ -82,6 +88,7 @@ public final class EmpireManagementScreen extends Screen {
             case 3 -> diplomacy();
             case 4 -> armies();
             case 5 -> campaigns();
+            case 6 -> news();
             default -> { }
         }
     }
@@ -101,10 +108,10 @@ public final class EmpireManagementScreen extends Screen {
         for (int i = page * rows(); i < Math.min(entries.size(), (page + 1) * rows()); i++) {
             var l = entries.get(i);
             var body = com.devc.minecraftempires.client.map.ClientArmyData.get().legionsById().get(l.id());
-            String location = body == null ? "Assigned / detached" : "Field body: " + net.minecraft.world.level.ChunkPos.unpack(body.packedChunkPos()).x() * 16
+            String location = l.pendingTerrain() ? "Awaiting terrain verification" : body == null ? "Assigned / detached" : "Field body: " + net.minecraft.world.level.ChunkPos.unpack(body.packedChunkPos()).x() * 16
                     + ", " + net.minecraft.world.level.ChunkPos.unpack(body.packedChunkPos()).z() * 16;
             button("Legion " + (i + 1) + " | " + l.soldiers() + " soldiers | " + location,
-                    20, 125 + (i % rows()) * 24, width - 40, () -> minecraft.gui.setScreen(new ComposeArmyScreen(l.id(), this, null)));
+                    20, 125 + (i % rows()) * 24, width - 40, () -> minecraft.gui.setScreen(new ComposeArmyScreen(l.id(), this, null))).active = !l.pendingTerrain();
         }
         var settlements = data().settlements();
         if (!settlements.isEmpty()) {
@@ -133,16 +140,67 @@ public final class EmpireManagementScreen extends Screen {
                     () -> stateAction(r.war() ? r.peaceOffered() ? "ACCEPT_PEACE" : "OFFER_PEACE" : "DECLARE_WAR", r.id(), ""));
             if (!r.war()) button(r.passageGranted() ? "Revoke passage" : "Grant passage", 26 + w, height - 77, w,
                     () -> stateAction(r.passageGranted() ? "REVOKE_PASSAGE" : "GRANT_PASSAGE", r.id(), ""));
+            if (r.war() && r.ai()) button(r.surrenderToken() == null ? "Demand surrender" : "Review surrender", 26 + w, height - 77, w, () -> {
+                if (r.surrenderToken() == null) stateAction("DEMAND_SURRENDER", r.id(), "");
+                else minecraft.gui.setScreen(new net.minecraft.client.gui.screens.ConfirmScreen(accepted -> {
+                    minecraft.gui.setScreen(this);
+                    if (accepted) stateAction("ACCEPT_SURRENDER", r.id(), r.surrenderToken().toString());
+                }, Component.literal("Accept national surrender?"), Component.literal(r.surrenderTerms())));
+            });
         });
         pagination(entries.size());
     }
     private void clampPage(int count) { page = Math.min(page, Math.max(0, (count - 1) / rows())); }
+    private void refreshNews() {
+        newsBack.clear(); loadNews(0, 0);
+    }
+    private void loadNews(long before, long through) {
+        if (ClientManagementData.news() == null || ClientManagementData.news().before() != before) overview = null;
+        ClientNetworking.requestNews(ClientManagementData.beginNews(before, through, newsFilter, ownNews)); rebuild();
+    }
+    private void news() {
+        newsVersion = ClientManagementData.newsVersion();
+        int w = (width - 46) / 2;
+        button(label("news_filter", label("news_filter_" + newsFilter.name().toLowerCase(Locale.ROOT))), 20, 125, w, () -> {
+            var filters = com.devc.minecraftempires.state.WorldNews.Filter.values(); newsFilter = filters[(newsFilter.ordinal() + 1) % filters.length];
+            overview = null; refreshNews();
+        });
+        button(label(ownNews ? "news_own" : "news_known"), 26 + w, 125, w, () -> { ownNews = !ownNews; overview = null; refreshNews(); });
+        double scroll = overview == null ? 0 : overview.scrollAmount();
+        overview = addRenderableWidget(new ManagementList(width, 151, height - 210));
+        var current = ClientManagementData.news(); boolean loading = ClientManagementData.newsLoading();
+        if (loading) overview.text(label("news_loading"));
+        if (current == null || current.entries().isEmpty()) {
+            if (!loading) overview.text(label("news_empty"));
+        } else for (var entry : current.entries()) {
+            overview.text(label("news_stamp", entry.time() / com.devc.minecraftempires.state.StateBalance.TICKS_PER_DAY + 1,
+                    label("news_kind_" + entry.kind().name().toLowerCase(Locale.ROOT))));
+            overview.text(entry.headline());
+            if (entry.location() != null) overview.action(label("news_focus"), () -> {
+                mapScreen.setManagementReturn(this); mapScreen.focusLocations(List.of(entry.location()), null); minecraft.gui.setScreen(mapScreen);
+            }, true, label("news_focus_hint"));
+        }
+        if (current != null && current.trimmed()) overview.text(label("news_trimmed"));
+        overview.text(label("news_knowledge")); overview.setScrollAmount(scroll);
+        button(label("news_newer"), 20, height - 51, 90, () -> loadNews(newsBack.pop(), current.through())).active = !loading && current != null && !newsBack.isEmpty();
+        button(label("news_older"), width / 2 - 45, height - 51, 90, () -> {
+            newsBack.push(current.before()); loadNews(current.nextBefore(), current.through());
+        }).active = !loading && current != null && current.hasOlder();
+        button(label("news_refresh"), width - 110, height - 51, 90, this::refreshNews);
+    }
     private void pagination(int count) {
         if (page > 0) button("Previous", 20, height - 51, 90, () -> { page--; rebuild(); });
         if ((page + 1) * rows() < count) button("Next", width - 110, height - 51, 90, () -> { page++; rebuild(); });
     }
     @Override public void tick() {
         if (++ticks % 20 == 0) ClientNetworking.requestMapData();
+        if (tab == 6 && data().stateId() != null) {
+            if (ClientManagementData.newsLoading()) {
+                if (ticks % 20 == 0) ClientNetworking.requestNews(ClientManagementData.newsRequest());
+            } else if (ClientManagementData.news() == null || ticks % 100 == 0 && newsBack.isEmpty()
+                    && ClientManagementData.news().before() == 0) refreshNews();
+            if (newsVersion != ClientManagementData.newsVersion()) rebuild();
+        }
         if (dataVersion != ClientManagementData.version()) rebuild();
     }
     @Override public void extractRenderState(GuiGraphicsExtractor g, int x, int y, float tick) {

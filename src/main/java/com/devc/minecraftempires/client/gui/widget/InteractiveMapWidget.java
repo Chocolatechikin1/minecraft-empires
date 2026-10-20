@@ -117,6 +117,7 @@ public final class InteractiveMapWidget {
 
         drawGrid(graphics);
         if (snapshot.hasData()) {
+            ClientMapData.renderPolitics(graphics, font, x, y, width, height, centerChunkX * 16, centerChunkZ * 16, zoom / 16);
             drawTerritory(graphics, snapshot);
             drawLogistics(graphics, font, snapshot);
             drawBreachAlerts(graphics, snapshot);
@@ -818,6 +819,13 @@ public final class InteractiveMapWidget {
                 return true;
             }
 
+            // Remembered settlement markers can be inspected without inventing a claimed map chunk.
+            for (var anchor : ClientMapData.get().provinceAnchors()) if (anchor.settlementMarker()
+                    && Math.abs(mouseX - chunkToScreenX(anchor.chunkX())) <= 7 && Math.abs(mouseY - chunkToScreenY(anchor.chunkZ())) <= 7) {
+                selectedChunk = new ChunkPos((int) Math.floor(anchor.chunkX()), (int) Math.floor(anchor.chunkZ())).pack();
+                return true;
+            }
+
             if (ClientMapData.get().getChunk(chunkX, chunkZ) != null) {
                 selectedChunk = new ChunkPos(chunkX, chunkZ).pack();
             } else {
@@ -935,7 +943,13 @@ public final class InteractiveMapWidget {
         if (selectedChunk == Long.MIN_VALUE) {
             return null;
         }
-        return ClientMapData.get().chunksByPosition().get(selectedChunk);
+        var snapshot = ClientMapData.get();
+        var actual = snapshot.chunksByPosition().get(selectedChunk);
+        if (actual != null) return actual;
+        // Presentation only: this result never enters the claim store or grants server-side ownership.
+        return snapshot.settlementsById().values().stream().filter(site -> site.packedCenterChunk() == selectedChunk)
+                .map(site -> new MapDataPayload.MapChunkData(selectedChunk, 1, site.stateId(), site.settlementId(), site.garrisoned(), site.tier(), false))
+                .findFirst().orElse(null);
     }
 
     //gets the currently selected chunk position, returning null if no chunk is selected

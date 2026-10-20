@@ -11,6 +11,8 @@ import java.util.UUID;
 public final class ClientNetworking {
     private ClientNetworking() {}
     public static void registerPayloadHandlers(RegisterClientPayloadHandlersEvent event) {
+        event.register(ManagementDataPayload.NewsPage.TYPE, (p, c) -> c.enqueueWork(() -> ClientManagementData.acceptNews(p)));
+        event.register(MapDataPayload.OverviewPayload.TYPE, (p, c) -> c.enqueueWork(() -> ClientMapData.acceptOverview(p)));
         event.register(StateActionPayload.BridgeStatus.TYPE, (p, c) -> c.enqueueWork(() -> ClientMapData.acceptBridgeStatus(p)));
         event.register(ArmyActionPayload.RoutePreview.TYPE, (p, c) -> c.enqueueWork(() -> {
             Minecraft mc = Minecraft.getInstance();
@@ -80,7 +82,10 @@ public final class ClientNetworking {
         ClientBattleData.clear();
     }
     public static void requestMapData() {
-        if (Minecraft.getInstance().getConnection() != null) ClientPacketDistributor.sendToServer(new RequestMapDataPayload());
+        if (Minecraft.getInstance().getConnection() != null) ClientPacketDistributor.sendToServer(ClientMapData.viewport());
+    }
+    public static void requestNews(ManagementDataPayload.NewsRequest request) {
+        if (request != null && Minecraft.getInstance().getConnection() != null) ClientPacketDistributor.sendToServer(request);
     }
     public static void requestTerrain(UUID battleId, java.util.List<RequestMapDataPayload.TerrainRequest> tiles) {
         if (Minecraft.getInstance().getConnection() != null && !tiles.isEmpty())

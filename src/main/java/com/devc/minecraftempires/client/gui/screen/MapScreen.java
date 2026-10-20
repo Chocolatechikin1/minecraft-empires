@@ -392,6 +392,9 @@ public final class MapScreen extends Screen {
             }
             y += 5;
             y = drawHeading(graphics, textX, y, "Map Legend");
+            y = drawLegendLine(graphics, textX, y, ClientMapData.OVERVIEW_LAND_COLOR, Component.translatable("gui.minecraftempires.map.unexplored_land").getString());
+            y = drawLegendLine(graphics, textX, y, ClientMapData.OVERVIEW_WATER_COLOR, Component.translatable("gui.minecraftempires.map.estimated_water").getString());
+            y = drawLegendLine(graphics, textX, y, ClientMapData.OVERVIEW_COAST_COLOR, Component.translatable("gui.minecraftempires.map.estimated_coast").getString());
             y = drawLegendLine(graphics, textX, y, 0xFFFFD45A, "Capital");
             y = drawLegendLine(graphics, textX, y, 0xFFF7F7F7, "Settlement");
             y = drawLegendLine(graphics, textX, y, 0xFF73E0FF, "Garrisoned");
@@ -434,8 +437,11 @@ public final class MapScreen extends Screen {
         if (settlement != null) {
             y += 5;
             y = drawHeading(graphics, textX, y, settlement.capital() ? "Capital Details" : "Settlement Details");
-            y = drawLine(graphics, textX, y, "Population", Integer.toString(settlement.population()));
-            y = drawLine(graphics, textX, y, "Garrison cap", Integer.toString(settlement.garrisonCapacity()));
+            boolean privateDetails = java.util.Objects.equals(snapshot.viewerStateId(), settlement.stateId());
+            y = drawLine(graphics, textX, y, "Population", privateDetails ? Integer.toString(settlement.population()) : "Unknown");
+            y = drawLine(graphics, textX, y, "Garrison cap", privateDetails ? Integer.toString(settlement.garrisonCapacity()) : "Unknown");
+            y = drawLine(graphics, textX, y, "Type", settlement.kind().label());
+            if (com.devc.minecraftempires.territory.SettlementData.INDEPENDENT_OWNER.equals(settlement.stateId())) y = drawLine(graphics, textX, y, "Affiliation", "Independent");
             //TODO future: allow selection of different icons
             //y = drawLine(graphics, textX, y, "Demarcation", settlement.capital() ? "Capital star" : "Settlement dot");
             var own = ClientManagementData.get().settlements().stream().filter(s -> s.id().toString().equals(settlement.settlementId())).findFirst().orElse(null);
