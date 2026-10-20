@@ -43,6 +43,16 @@ public class ArmyManager extends SavedData {
 
     private final Map<UUID, Legion> activeLegions = new LinkedHashMap<>();
     private final Map<UUID, List<UUID>> stateToLegionIndex = new HashMap<>();
+    // Aggregate legions are economic/military assets, never ordinary moving cohorts or tactical wrappers.
+    //essentially, for distant ai army movement, i wanted to not load full details to preserve server
+    //compute, hence these additonal methods
+    private final Map<UUID, StrategicForce> strategicForces = new LinkedHashMap<>();
+    private final Map<UUID, List<UUID>> stateToStrategicIndex = new HashMap<>();
+    private long macroSequence;
+    private long interactionSequence;
+    // Provenance is not a second military authority. Only the detailed legion ticks while present here.
+    private final Map<UUID, StrategicForce> detailedOrigins = new LinkedHashMap<>();
+    private final Set<UUID> aiInitializations = new HashSet<>();
     private final Map<UUID, Army> activeArmies = new LinkedHashMap<>();
     private final Map<UUID, List<UUID>> stateToArmyIndex = new HashMap<>();
     // Includes inactive plans; only active operations establish an Army.campaignId lock.
@@ -61,8 +71,356 @@ public class ArmyManager extends SavedData {
         return level.getServer().overworld().getDataStorage().computeIfAbsent(TYPE);
     }
 
-    /** Creates a whole legion; only the authorized recruitment handler charges or grants it. */
+    /** Initial compact roster; detailed promotion must preserve it and retire this authority first. */
+    //distant ai army stats, saved differently to preserve compute and avoid loading full details
+    //when a player gets near, the details from this class struct are pulled to make a full army
+    public static final class StrategicForce {
+        private final UUID id, owner, home;
+        private BlockPos position;
+        private int infantry = 500, cavalry = 50, morale = 50, experience;
+        private GearTier gear = GearTier.STONE;
+        private long supply = 550L * StateBalance.CARRIED_SUPPLY_DAYS * StateBalance.TICKS_PER_DAY;
+        private long militaryTime = -1, shortageTicks;
+        private int fatigue;
+        private UUID targetState, targetSettlement;
+        private List<Long> route = List.of(), supplyCorridor = List.of();
+        private boolean retreating, pendingDeclaration;
+        private boolean movedStrategically;
+        private CompoundTag detailedRoster;
+        public StrategicForce(UUID id, UUID owner, UUID home, BlockPos position) {
+            this.id = Objects.requireNonNull(id); this.owner = Objects.requireNonNull(owner);
+            this.home = Objects.requireNonNull(home); this.position = position.immutable();
+        }
+        public UUID id() { return id; }
+        public UUID owner() { return owner; }
+        public UUID home() { return home; }
+        public BlockPos position() { return position; }
+        public int infantry() { return infantry; }
+        public int cavalry() { return cavalry; }
+        public int soldiers() { return infantry + cavalry; }
+        public int morale() { return morale; }
+        public GearTier gear() { return gear; }
+        public int experience() { return experience; }
+        public long supply() { return supply; }
+        public long militaryTime() { return militaryTime; }
+        public int fatigue() { return fatigue; }
+        public UUID targetState() { return targetState; }
+        public UUID targetSettlement() { return targetSettlement; }
+        public List<Long> route() { return route; }
+        public List<Long> supplyCorridor() { return supplyCorridor; }
+        public boolean retreating() { return retreating; }
+        public boolean pendingDeclaration() { return pendingDeclaration; }
+        public boolean ready() { return soldiers() > Legion.AUTO_DISBAND_STRENGTH && morale >= 20 && supply > 0 && !retreating; }
+        public StrategicForce copy() { return fromNBT(toNBT()); }
+        public void order(UUID nation, UUID settlement, List<Long> path, boolean withdraw) {
+            if (path.size() > 16) throw new IllegalArgumentException("Oversized macro corridor");
+            targetState = nation; targetSettlement = settlement; route = List.copyOf(path); retreating = withdraw;
+            pendingDeclaration = false;
+        }
+        public void planWar(UUID nation, UUID settlement) { order(nation, settlement, List.of(), false); pendingDeclaration = true; }
+        public void clearOrder() { targetState = null; targetSettlement = null; route = List.of(); retreating = false; pendingDeclaration = false; }
+        public void moveStrategically(BlockPos next, List<Long> remaining) { position = next.immutable(); route = List.copyOf(remaining); movedStrategically = true; }
+        public void initializeMilitaryTime(long now) { if (militaryTime < 0 && now >= 0) militaryTime = now; }
+        public void deferMilitaryTime(long now) { if (now >= 0) militaryTime = Math.max(militaryTime, now); supplyCorridor = List.of(); }
+        public void completeMilitaryInterval(long interval) { militaryTime = Math.addExact(militaryTime, interval); }
+        public void advanceStrategicSupply(long elapsed, boolean connected, List<Long> corridor) {
+            supplyCorridor = List.copyOf(corridor);
+            long amount = Math.multiplyExact((long) soldiers(), elapsed);
+            supply = Math.min(supply, capacity());
+            supply = connected ? supply + Math.min(amount, capacity() - supply) : Math.max(0, supply - amount);
+            shortageTicks += elapsed;
+            if (shortageTicks >= StateBalance.TICKS_PER_DAY) {
+                shortageTicks -= StateBalance.TICKS_PER_DAY;
+                if (supply == 0) { morale = Math.max(0, morale - StateBalance.SUPPLY_MORALE_PENALTY); fatigue = Math.min(StateBalance.MAX_SUPPLY_FATIGUE, fatigue + StateBalance.SUPPLY_FATIGUE_PER_DAY); }
+                else if (connected) fatigue = Math.max(0, fatigue - StateBalance.SUPPLY_FATIGUE_RECOVERY);
+            }
+        }
+        public void sufferStrategicLosses(int losses, int moraleLoss, int earnedExperience) {
+            int total = soldiers(); losses = Math.clamp(losses, 0, total);
+            int horseLoss = total == 0 ? 0 : (int) ((long) cavalry * losses / total);
+            int footLoss = Math.min(infantry, losses - horseLoss);
+            infantry -= footLoss; cavalry -= losses - footLoss;
+            morale = Math.clamp(morale - moraleLoss, 0, 100);
+            experience = (int) Math.min(Integer.MAX_VALUE, (long) experience + Math.max(0, earnedExperience));
+            if (GearTier.fromXp(experience).ordinal() > gear.ordinal()) gear = GearTier.fromXp(experience);
+            supply = Math.min(supply, capacity());
+        }
+        private long capacity() { return (long) soldiers() * StateBalance.CARRIED_SUPPLY_DAYS * StateBalance.TICKS_PER_DAY; }
+        private void economicDay(boolean paid, int unpaidDays, boolean suppliedHome) {
+            if (!paid) {
+                morale = Math.max(0, morale - 10);
+                if (unpaidDays >= 7) { infantry = 0; cavalry = 0; }
+                else if (unpaidDays >= 3) {
+                    infantry -= (infantry + 9) / 10; cavalry -= (cavalry + 9) / 10;
+                }
+            } else if (suppliedHome) morale = Math.min(100, morale + 2);
+            supply = Math.min(supply, capacity());
+            // Once admitted to macro ticking, its saved military clock alone owns supply consumption.
+            if (militaryTime >= 0) return;
+            long day = (long) soldiers() * StateBalance.TICKS_PER_DAY;
+            if (suppliedHome) supply += Math.min(day, capacity() - supply);
+            else supply = Math.max(0, supply - day);
+        }
+        public CompoundTag toNBT() {
+            CompoundTag tag = new CompoundTag(); tag.putInt("Version", 1);
+            tag.putString("Id", id.toString()); tag.putString("Owner", owner.toString()); tag.putString("Home", home.toString());
+            tag.putLong("Position", position.asLong()); tag.putInt("Infantry", infantry); tag.putInt("Cavalry", cavalry);
+            tag.putInt("Morale", morale); tag.putInt("Experience", experience); tag.putString("Gear", gear.name()); tag.putLong("Supply", supply);
+            tag.putLong("MilitaryTime", militaryTime); tag.putLong("ShortageTicks", shortageTicks); tag.putInt("Fatigue", fatigue);
+            tag.putBoolean("Retreating", retreating);
+            tag.putBoolean("PendingDeclaration", pendingDeclaration);
+            tag.putBoolean("MovedStrategically", movedStrategically);
+            if (detailedRoster != null) tag.put("DetailedRoster", detailedRoster.copy());
+            if (targetState != null) tag.putString("TargetState", targetState.toString());
+            if (targetSettlement != null) tag.putString("TargetSettlement", targetSettlement.toString());
+            tag.putLongArray("Route", route.stream().mapToLong(Long::longValue).toArray());
+            tag.putLongArray("SupplyCorridor", supplyCorridor.stream().mapToLong(Long::longValue).toArray());
+            return tag;
+        }
+        public static StrategicForce fromNBT(CompoundTag tag) {
+            if (tag.getInt("Version").orElse(0) != 1) throw new IllegalArgumentException("Unsupported aggregate roster");
+            StrategicForce force = new StrategicForce(UUID.fromString(tag.getString("Id").orElseThrow()), UUID.fromString(tag.getString("Owner").orElseThrow()),
+                    UUID.fromString(tag.getString("Home").orElseThrow()), BlockPos.of(tag.getLong("Position").orElseThrow()));
+            force.infantry = Math.clamp(tag.getInt("Infantry").orElse(0), 0, 500); force.cavalry = Math.clamp(tag.getInt("Cavalry").orElse(0), 0, 50);
+            force.morale = Math.clamp(tag.getInt("Morale").orElse(0), 0, 100); force.experience = Math.max(0, tag.getInt("Experience").orElse(0));
+            force.gear = GearTier.valueOf(tag.getString("Gear").orElse("STONE"));
+            force.supply = Math.clamp(tag.getLong("Supply").orElse(0L), 0, force.capacity());
+            force.militaryTime = Math.max(-1, tag.getLong("MilitaryTime").orElse(-1L));
+            force.shortageTicks = Math.clamp(tag.getLong("ShortageTicks").orElse(0L), 0, StateBalance.TICKS_PER_DAY - 1);
+            force.fatigue = Math.clamp(tag.getInt("Fatigue").orElse(0), 0, StateBalance.MAX_SUPPLY_FATIGUE);
+            force.targetState = tag.getString("TargetState").map(UUID::fromString).orElse(null);
+            force.targetSettlement = tag.getString("TargetSettlement").map(UUID::fromString).orElse(null);
+            force.retreating = tag.getBoolean("Retreating").orElse(false);
+            force.pendingDeclaration = tag.getBoolean("PendingDeclaration").orElse(false);
+            // Legacy mobile rosters conservatively retain their saved position.
+            force.movedStrategically = tag.getBoolean("MovedStrategically").orElse(tag.getLong("MilitaryTime").orElse(-1L) >= 0);
+            force.detailedRoster = tag.getCompound("DetailedRoster").map(CompoundTag::copy).orElse(null);
+            long[] route = tag.getLongArray("Route").orElse(new long[0]), corridor = tag.getLongArray("SupplyCorridor").orElse(new long[0]);
+            if (route.length > 16 || corridor.length > 16) throw new IllegalArgumentException("Oversized saved macro corridor");
+            force.route = java.util.Arrays.stream(route).boxed().toList(); force.supplyCorridor = java.util.Arrays.stream(corridor).boxed().toList();
+            return force;
+        }
+    }
+    //end of abstract npc army, below are npc army details, which are only loaded when a player is near the army
+
+    //registers the distant army
+    public boolean registerStrategicForce(StrategicForce force) {
+        if (activeLegions.containsKey(force.id()) || strategicForces.putIfAbsent(force.id(), force) != null) return false;
+        stateToStrategicIndex.computeIfAbsent(force.owner(), ignored -> new ArrayList<>()).add(force.id());
+        setDirty(); return true;
+    }
+
+    //"promotes" the distant army to a full army
+    /** Both representations live in this SavedData, so one save installs exactly one authority. */
+    public boolean promoteForce(ServerLevel level, UUID id) {
+        StrategicForce force = strategicForces.get(id);
+        if (force == null || StateManager.get(level).getAIWars().blocks(force.owner())) return false;
+        StrategicForce candidate = force.copy(); SettlementData home = StateManager.get(level).getSettlement(force.home());
+        if (!force.movedStrategically && force.detailedRoster == null && home != null && home.isAbstractSettlement() && home.isCenterVerified()
+                && force.owner().equals(home.getOwningStateId()) && near(force.position(), home.getCenterAltarPos(), StateBalance.SETTLEMENT_RADIUS)) candidate.position = home.getCenterAltarPos();
+        BlockPos at = candidate.position();
+        if (MapDataService.deploymentFormationStatus(level, at.getX() + .5, at.getZ() + .5) != MapDataService.Verification.VERIFIED) return false;
+        Legion legion = detailedCandidate(candidate);
+        for (Cohort c : legion.allCohorts()) if (c.isAlive() && MapDataService.deploymentFormationStatus(level, c.getPreciseX(), c.getPreciseZ()) != MapDataService.Verification.VERIFIED) return false;
+        if (activeLegions.containsKey(id) || legion.allCohorts().stream().anyMatch(c -> cohortRegistry.containsKey(c.getCohortId()))) return false;
+        // No recruitment, payment, healing or supply refill occurs at this boundary.
+        removeStrategicForce(force); detailedOrigins.put(id, candidate); registerLegion(legion); setDirty(); return true;
+    }
+
+    /** Detached candidate only: publishing it still requires real terrain through promoteForce. */
+    public static Legion detailedCandidate(StrategicForce force) {
+        UUID id = force.id(); BlockPos at = force.position();
+        Legion legion;
+        if (force.detailedRoster != null) {
+            legion = Legion.fromNBT(force.detailedRoster);
+            int moraleDelta = force.morale() - legion.getAverageMorale();
+            int xpDelta = Math.max(0, force.experience() - legion.allCohorts().stream().mapToInt(Cohort::getXp).max().orElse(0));
+            CompoundTag updated = legion.toNBT();
+            for (String kind : List.of("InfantryCohorts", "CavalrySquadrons")) {
+                ListTag list = updated.getListOrEmpty(kind); int current = 0;
+                for (var value : list) current += ((CompoundTag) value).getInt("SoldierCount").orElse(0);
+                int remainingLoss = Math.max(0, current - (kind.equals("InfantryCohorts") ? force.infantry() : force.cavalry()));
+                for (var value : list) {
+                    CompoundTag tag = (CompoundTag) value; int soldiers = tag.getInt("SoldierCount").orElse(0);
+                    int loss = current == soldiers ? remainingLoss : current == 0 ? 0 : (int) ((long) remainingLoss * soldiers / current);
+                    tag.putInt("SoldierCount", soldiers - loss); remainingLoss -= loss; current -= soldiers;
+                    tag.putInt("Morale", Math.clamp(tag.getInt("Morale").orElse(0) + moraleDelta, 0, 100));
+                    tag.putInt("XP", (int) Math.min(Integer.MAX_VALUE, (long) tag.getInt("XP").orElse(0) + xpDelta));
+                    if (xpDelta > 0) tag.putString("GearTier", force.gear().name());
+                }
+            }
+            legion = Legion.fromNBT(updated);
+            long stored = legion.allCohorts().stream().mapToLong(Cohort::getCarriedSupplySoldierTicks).sum();
+            if (stored != force.supply()) {
+                long stock = force.supply(); int people = legion.getTotalSoldiers();
+                for (Cohort c : legion.allCohorts()) { long share = people == c.getSoldierCount() ? stock : people == 0 ? 0 : stock * c.getSoldierCount() / people;
+                    c.setCarriedSupplySoldierTicks(share); stock -= share; people -= c.getSoldierCount(); }
+            }
+            int fatigueDelta = force.fatigue() - legion.allCohorts().stream().mapToInt(Cohort::getLogisticsFatigue).max().orElse(0);
+            for (Cohort c : legion.allCohorts()) c.setLogisticsFatigue(c.getLogisticsFatigue() + fatigueDelta);
+            if (!legion.getStoredPosition().equals(at)) {
+                legion.setStoredPosition(at); legion.allCohorts().forEach(c -> c.setStoredPosition(at));
+            }
+        }
+        else {
+            legion = new Legion(force.id(), force.owner(), at);
+            int foot = force.infantry(), horse = force.cavalry(), index = 0;
+            long stock = force.supply(); int soldiers = force.soldiers();
+            while (foot > 0 || horse > 0) {
+                boolean cavalry = foot == 0;
+                int count = Math.min(cavalry ? 10 : 50, cavalry ? horse : foot);
+                Cohort cohort = new Cohort(UUID.nameUUIDFromBytes((id + ":" + index++).getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+                        cavalry ? CohortType.CAVALRY : CohortType.INFANTRY, "plains");
+                CompoundTag tag = cohort.toNBT(); tag.putInt("SoldierCount", count); tag.putInt("Morale", force.morale());
+                tag.putInt("XP", force.experience()); tag.putString("GearTier", force.gear().name());
+                tag.putInt("LogisticsFatigue", force.fatigue()); tag.putInt("LogisticsVersion", 1);
+                long share = soldiers == count ? stock : stock * count / soldiers;
+                tag.putLong("CarriedSupplySoldierTicks", share); cohort = Cohort.fromNBT(tag); cohort.setStoredPosition(at);
+                stock -= share; soldiers -= count;
+                if (cavalry) { horse -= count; legion.addCavalrySquadron(cohort); }
+                else { foot -= count; legion.addInfantryCohort(cohort); }
+            }
+        }
+        return legion;
+    }
+
+    public boolean isPromoted(UUID id) { return detailedOrigins.containsKey(id); }
+    /** Server-side AI orders use the same terrain and border rules as player movement. */
+    public boolean orderArmy(ServerLevel level, UUID owner, UUID id, BlockPos target) {
+        Army army = getArmy(id); StateManager states = StateManager.get(level);
+        if (army == null || !owner.equals(army.getOwningStateId()) || army.isEngaged() || army.isRetreating() || states.getAIWars().blocks(owner)) return false;
+        UUID destination = ClaimManager.get(level).getStrategicOwner(ChunkPos.containing(target));
+        if (destination != null && !destination.equals(owner) && !states.hasPassage(owner, destination)
+                && !states.mayInitiateHostility(level, owner, destination)) return false;
+        var route = MapDataService.route(level, army.getStoredPosition(), target, 128);
+        if (route.status() != MapDataService.Verification.VERIFIED) return false;
+        army.clearWaypoints(); routeTurns(route.points()).forEach(army::addWaypoint); setDirty(); return true;
+    }
+    public boolean demoteForce(UUID id, long now) {
+        Legion legion = getLegion(id); StrategicForce origin = detailedOrigins.get(id);
+        if (legion == null || origin == null || !canDissolveLegion(legion) || !legion.getWaypoints().isEmpty() || legion.getAuxiliaries().stream().anyMatch(Cohort::isAlive)
+                || legion.allCohorts().stream().anyMatch(c -> c.isGarrisoned() || c.isRetreating() || !c.getWaypoints().isEmpty()
+                || c.getMarchState().contains("CrossingStart") || c.isDetached() || !near(legion.getStoredPosition(), c.getStoredPosition(), ASSEMBLY_RANGE))) return false;
+        StrategicForce force = origin.copy(); force.position = legion.getStoredPosition(); force.clearOrder();
+        force.infantry = legion.getInfantryCohorts().stream().mapToInt(Cohort::getSoldierCount).sum();
+        force.cavalry = legion.getCavalrySquadrons().stream().mapToInt(Cohort::getSoldierCount).sum();
+        force.morale = legion.getAverageMorale(); force.experience = legion.allCohorts().stream().mapToInt(Cohort::getXp).max().orElse(0);
+        force.gear = legion.allCohorts().stream().map(Cohort::getGearTier).max(Comparator.naturalOrder()).orElse(GearTier.STONE);
+        force.supply = legion.allCohorts().stream().mapToLong(Cohort::getCarriedSupplySoldierTicks).sum();
+        force.fatigue = legion.allCohorts().stream().mapToInt(Cohort::getLogisticsFatigue).max().orElse(0);
+        force.militaryTime = now; force.detailedRoster = legion.toNBT();
+        disbandLegion(id); detailedOrigins.remove(id); if (force.soldiers() > 0) registerStrategicForce(force); setDirty(); return true;
+    }
+    public void releaseForDemotion(UUID id) {
+        Legion legion = getLegion(id); if (legion == null) return;
+        for (Cohort c : legion.allCohorts()) if (!c.isDeployed() && !c.isGarrisoned() && !c.isRetreating() && c.getWaypoints().isEmpty()
+                && near(legion.getStoredPosition(), c.getStoredPosition(), ASSEMBLY_RANGE)) c.setDetached(false);
+    }
+
+    public boolean interactionStable(UUID owner) {
+        return getArmiesForState(owner).stream().noneMatch(a -> a.isEngaged() || a.isRetreating())
+                && getLegionsForState(owner).stream().flatMap(l -> l.allCohorts().stream()).noneMatch(c -> c.isRetreating() || c.getMarchState().contains("CrossingStart"));
+    }
+    public void endDonorOrders(UUID owner) {
+        activeCampaigns.values().removeIf(c -> owner.equals(c.getOwningStateId()));
+        for (Army army : getArmiesForState(owner)) { army.setCampaignId(null); army.clearWaypoints(); }
+        for (Legion legion : getLegionsForState(owner)) { legion.clearWaypoints(); legion.allCohorts().forEach(Cohort::clearWaypoints); }
+        setDirty();
+    }
+    public long getInteractionSequence() { return interactionSequence; }
+    public CompoundTag interactionSnapshot(Set<UUID> owners) {
+        CompoundTag all = toTag(), result = new CompoundTag();
+        for (String key : List.of("Legions", "Armies", "Campaigns", "StrategicForces", "DetailedOrigins")) {
+            ListTag list = new ListTag(); String field = key.equals("StrategicForces") || key.equals("DetailedOrigins") ? "Owner" : "OwningStateId";
+            for (var value : all.getListOrEmpty(key)) { CompoundTag tag = (CompoundTag) value;
+                if (owners.contains(UUID.fromString(tag.getString(field).orElseThrow()))) list.add(tag.copy()); }
+            result.put(key, list);
+        }
+        return result;
+    }
+    /** Replay uses the frozen participant snapshot, preserving losses from before a split save. */
+    public void applySurrender(long sequence, UUID donor, UUID recipient, CompoundTag snapshot) {
+        if (interactionSequence >= sequence) return;
+        Set<UUID> owners = Set.of(donor, recipient);
+        for (UUID owner : owners) {
+            for (Army army : getArmiesForState(owner)) { activeArmies.remove(army.getArmyId()); removeIndex(stateToArmyIndex, owner, army.getArmyId()); }
+            for (Legion legion : getLegionsForState(owner)) disbandLegion(legion.getLegionId());
+            for (StrategicForce force : getStrategicForcesForState(owner)) removeStrategicForce(force);
+        }
+        activeCampaigns.values().removeIf(c -> owners.contains(c.getOwningStateId()));
+        detailedOrigins.values().removeIf(f -> owners.contains(f.owner()));
+        CompoundTag restored = snapshot.copy();
+        for (String key : List.of("Legions", "Armies", "Campaigns", "StrategicForces", "DetailedOrigins")) {
+            String field = key.equals("StrategicForces") || key.equals("DetailedOrigins") ? "Owner" : "OwningStateId";
+            ListTag list = new ListTag();
+            for (var value : restored.getListOrEmpty(key)) {
+                CompoundTag tag = ((CompoundTag) value).copy(); boolean transferred = donor.toString().equals(tag.getString(field).orElse(""));
+                if (transferred && key.equals("Campaigns")) continue;
+                if (transferred) {
+                    tag.putString(field, recipient.toString());
+                    tag.remove("Waypoints"); tag.remove("CampaignId"); tag.remove("TargetState"); tag.remove("TargetSettlement"); tag.remove("Route"); tag.remove("SupplyCorridor");
+                    tag.putBoolean("PendingDeclaration", false);
+                    if (key.equals("Legions")) for (String cohorts : List.of("InfantryCohorts", "CavalrySquadrons", "Auxiliaries"))
+                        for (var c : tag.getListOrEmpty(cohorts)) ((CompoundTag) c).remove("Waypoints");
+                    tag.getCompound("DetailedRoster").ifPresent(roster -> roster.putString("OwningStateId", recipient.toString()));
+                }
+                list.add(tag);
+            }
+            restored.put(key, list);
+        }
+        ArmyManager rebuilt = fromTag(restored);
+        rebuilt.activeLegions.values().forEach(this::registerLegion); rebuilt.strategicForces.values().forEach(this::registerStrategicForce);
+        rebuilt.activeArmies.values().forEach(this::registerArmy); activeCampaigns.putAll(rebuilt.activeCampaigns); detailedOrigins.putAll(rebuilt.detailedOrigins);
+        interactionSequence = sequence; setDirty();
+    }
+    public Collection<StrategicForce> getStrategicForces() { return Collections.unmodifiableCollection(strategicForces.values()); }
+    public List<StrategicForce> getStrategicForcesForState(UUID owner) {
+        return stateToStrategicIndex.getOrDefault(owner, List.of()).stream().map(strategicForces::get).filter(Objects::nonNull).toList();
+    }
+    private void removeStrategicForce(StrategicForce force) {
+        strategicForces.remove(force.id()); removeIndex(stateToStrategicIndex, force.owner(), force.id()); setDirty();
+    }
+    public boolean hasAIInitialization(UUID id) { return aiInitializations.contains(id); }
+    public long getMacroSequence() { return macroSequence; }
+    /** Whole participant snapshots make a prepared outcome recoverable even from a prior financial snapshot. */
+    public void applyMacroForces(long sequence, Set<UUID> owners, List<StrategicForce> after) {
+        if (macroSequence >= sequence) return;
+        for (UUID owner : owners) if (!getLegionsForState(owner).isEmpty() || !getArmiesForState(owner).isEmpty()) throw new IllegalStateException("Detailed force requires handoff");
+        for (StrategicForce force : after) {
+            StrategicForce existing = strategicForces.get(force.id());
+            if (!owners.contains(force.owner()) || activeLegions.containsKey(force.id()) || existing != null && !owners.contains(existing.owner()))
+                throw new IllegalStateException("Macro roster identity conflict");
+        }
+        for (UUID owner : owners) for (StrategicForce force : getStrategicForcesForState(owner)) removeStrategicForce(force);
+        after.forEach(this::registerStrategicForce); macroSequence = sequence; setDirty();
+    }
+    public void recordAIInitialization(UUID id) { if (aiInitializations.add(id)) setDirty(); }
+    public long getTotalSoldiersForState(UUID owner) {
+        return getLegionsForState(owner).stream().mapToLong(Legion::getTotalSoldiers).sum()
+                + getStrategicForcesForState(owner).stream().mapToLong(StrategicForce::soldiers).sum();
+    }
+    public void applyStrategicEconomy(StateData state, StateManager states, boolean paid) {
+        if (state.isInitializationPending()) return;
+        for (StrategicForce force : getStrategicForcesForState(state.getStateId())) {
+            SettlementData home = states.getSettlement(force.home());
+            boolean supplied = home != null && state.getStateId().equals(home.getOwningStateId()) && home.isSupplyReady();
+            if (force.militaryTime() >= 0) supplied = !force.supplyCorridor().isEmpty();
+            force.economicDay(paid, state.getUnpaidDays(), supplied);
+            // Keep the initialization receipt after destruction; retries cannot recreate expended starting troops.
+            if (force.soldiers() == 0) removeStrategicForce(force);
+        }
+        setDirty();
+    }
+
+    /*
+    
+    END OF ALL DISTANT AI/NPC ARMY METHODS
+    
+    */
+    /** Creates a whole legion; the shared recruitment operation charges or grants authorized purchases. */
     public Optional<Legion> raiseLegion(StateData state, BlockPos position) {
+        if (state.isInitializationPending()) return Optional.empty();
+        if (state.hasSurrenderOverflow()) return Optional.empty();
         if (getLegionCountForState(state.getStateId()) >= state.getCurrentTier().getMaxLegions()) return Optional.empty();
         Legion legion = new Legion(UUID.randomUUID(), state.getStateId(), position);
         for (int i = 0; i < Legion.MAX_INFANTRY_COHORTS; i++) legion.addInfantryCohort(Cohort.createInfantry());
@@ -71,7 +429,42 @@ public class ArmyManager extends SavedData {
         return Optional.of(legion);
     }
 
+    public record RecruitmentResult(UUID legion, boolean free, String error) {
+        public boolean succeeded() { return legion != null; }
+    }
+
+    /** Shared paid recruitment; the player grant remains restricted to the registered human founder. */
+    public RecruitmentResult recruitLegion(ServerLevel level, UUID owner, UUID site, UUID founder) {
+        StateManager states = StateManager.get(level);
+        StateData state = states.getState(owner);
+        SettlementData settlement = states.getSettlement(site);
+        boolean free = founder != null && state != null && state == states.getStateByPlayer(founder)
+                && states.canClaimFreeLegion(founder);
+        String error = recruitmentProblem(state, settlement, getLegionCountForState(owner), free,
+                settlement != null && hasHostilePresence(owner, settlement.getCenterAltarPos(), level));
+        if (!error.isEmpty()) return new RecruitmentResult(null, false, error);
+        Optional<Legion> raised = raiseLegion(state, settlement.getCenterAltarPos());
+        if (raised.isEmpty()) return new RecruitmentResult(null, false, "Your state's legion limit has been reached.");
+        if (free) states.claimFirstLegionGrant(founder);
+        else state.deductFunds(LEGION_RECRUIT_COST);
+        states.setDirty();
+        return new RecruitmentResult(raised.get().getLegionId(), free, "");
+    }
+
+    /** Pure eligibility is also used by the AI scorer; the committing operation repeats these checks. */
+    public static String recruitmentProblem(StateData state, SettlementData settlement, int legions, boolean free, boolean threatened) {
+        if (state == null || settlement == null || !state.getStateId().equals(settlement.getOwningStateId())) return "Settlement not owned by your state.";
+        if (state.isInitializationPending()) return "This nation is still being initialized.";
+        if (state.hasSurrenderOverflow()) return "Qualify for your inherited territory and forces before recruiting more.";
+        if (!settlement.isCenterVerified()) return "This settlement's operational center has not been verified.";
+        if (threatened) return "Cannot recruit while hostile forces threaten this settlement.";
+        if (legions >= state.getCurrentTier().getMaxLegions()) return "Your state's legion limit has been reached.";
+        if ((!free || state.isAI()) && state.getTreasuryBalance() < LEGION_RECRUIT_COST) return "A legion costs 5,000 emeralds.";
+        return "";
+    }
+
     public void registerLegion(Legion legion) {
+        if (strategicForces.containsKey(legion.getLegionId())) return;
         if (activeLegions.putIfAbsent(legion.getLegionId(), legion) != null) return;
         stateToLegionIndex.computeIfAbsent(legion.getOwningStateId(), ignored -> new ArrayList<>()).add(legion.getLegionId());
         for (Cohort cohort : legion.allCohorts()) {
@@ -94,6 +487,7 @@ public class ArmyManager extends SavedData {
     public boolean disbandLegion(UUID legionId) {
         Legion legion = activeLegions.remove(legionId);
         if (legion == null) return false;
+        detailedOrigins.remove(legionId);
         for (Cohort cohort : legion.allCohorts()) {
             Army army = getArmy(cohort.getAssignedArmyId());
             if (army != null) army.removeCohortId(cohort.getCohortId());
@@ -427,13 +821,19 @@ public class ArmyManager extends SavedData {
     }
 
     public void runGarbageCollection() {
-        for (Legion legion : new ArrayList<>(activeLegions.values())) {
+        collectForces(new ArrayList<>(activeLegions.values()), new ArrayList<>(activeArmies.values()));
+    }
+    public void runGarbageCollectionForState(UUID owner) {
+        collectForces(getLegionsForState(owner), getArmiesForState(owner));
+    }
+    private void collectForces(List<Legion> legions, List<Army> armies) {
+        for (Legion legion : legions) {
             boolean inBattle = legion.allCohorts().stream().map(Cohort::getAssignedArmyId).map(this::getArmy)
                     .filter(Objects::nonNull).anyMatch(Army::isEngaged);
             if (!legion.isViable() && !inBattle) disbandLegion(legion.getLegionId());
             else legion.syncMainPosition();
         }
-        for (Army army : new ArrayList<>(activeArmies.values())) {
+        for (Army army : armies) {
             boolean requiresRelease = army.hasParticipatedInCampaign()
                     && army.getParticipatingLegionIds().stream().anyMatch(activeLegions::containsKey);
             if (!army.isViable(this) && !army.isEngaged() && !requiresRelease) disbandArmy(army.getArmyId(), true);
@@ -448,10 +848,13 @@ public class ArmyManager extends SavedData {
         tickMoveProposals(level);
         for (Cohort cohort : new ArrayList<>(cohortRegistry.values())) {
             Army army = getArmy(cohort.getAssignedArmyId());
+            Legion parent = getParentLegion(cohort.getCohortId());
+            if (parent != null && StateManager.get(level).getAIWars().blocks(parent.getOwningStateId())) continue;
             if (cohort.isAlive() && (army == null || !army.isEngaged())) recoverCohortCrossing(level, cohort);
         }
         boolean changed = false;
         for (Army army : new ArrayList<>(activeArmies.values())) {
+            if (StateManager.get(level).getAIWars().blocks(army.getOwningStateId())) continue;
             if (army.isEngaged() || !army.isViable(this)) continue;
             boolean retreating = army.isRetreating();
             if (retreating && army.getWaypoints().isEmpty()) army.addWaypoint(army.getRetreatTarget());
@@ -475,6 +878,7 @@ public class ArmyManager extends SavedData {
             }
         }
         for (Legion legion : new ArrayList<>(activeLegions.values())) {
+            if (StateManager.get(level).getAIWars().blocks(legion.getOwningStateId())) continue;
             Cohort main = legion.getFieldCohort();
             if (main == null || main.isDeployed() || main.isGarrisoned() || main.isRetreating() || legion.getWaypoints().isEmpty()) continue;
             legion.syncMainPosition(); // Detaching the previous anchor must not move the remaining field body.
@@ -487,6 +891,8 @@ public class ArmyManager extends SavedData {
         }
         // Regrouping physically moves each detached cohort; it never teleports to its parent.
         for (Cohort cohort : new ArrayList<>(cohortRegistry.values())) {
+            Legion lockedParent = getParentLegion(cohort.getCohortId());
+            if (lockedParent != null && StateManager.get(level).getAIWars().blocks(lockedParent.getOwningStateId())) continue;
             if (!cohort.isAlive() || cohort.isDeployed() || cohort.isGarrisoned() || !cohort.isDetached()) continue;
             boolean retreating = cohort.isRetreating();
             if (retreating && cohort.getWaypoints().isEmpty()) cohort.addWaypoint(cohort.getRetreatTarget());
@@ -518,6 +924,7 @@ public class ArmyManager extends SavedData {
         if (level.getGameTime() - lastEngagementCheck >= 20 || level.getGameTime() < lastEngagementCheck) {
             lastEngagementCheck = level.getGameTime();
             for (Army army : new ArrayList<>(activeArmies.values())) {
+                if (StateManager.get(level).getAIWars().blocks(army.getOwningStateId())) continue;
                 if (army.isEngaged() || !army.isViable(this)) continue;
                 if (army.isOnCampaign() && !army.isRetreating()) {
                     Campaign campaign = getCampaign(army.getCampaignId());
@@ -551,7 +958,10 @@ public class ArmyManager extends SavedData {
     private void moveBody(ServerLevel level, UUID owner, List<Cohort> body, Queue<BlockPos> orders, boolean retreating) {
         if (body.isEmpty()) return;
         if (body.stream().allMatch(c -> c.getWaypoints().isEmpty()) && !orders.isEmpty()) for (Cohort cohort : body) cohort.getWaypoints().addAll(orders);
-        for (Cohort cohort : body) moveCohort(level, owner, cohort, retreating);
+        for (Cohort cohort : body) {
+            moveCohort(level, owner, cohort, retreating);
+            if (cohort.isRetreating() && cohort.getWaypoints().isEmpty()) cohort.finishRetreat();
+        }
         orders.clear();
         body.stream().filter(c -> !c.getWaypoints().isEmpty()).findFirst().ifPresent(c -> orders.addAll(c.getWaypoints()));
     }
@@ -559,7 +969,19 @@ public class ArmyManager extends SavedData {
     //cohort movement function: moves the given cohort along its waypoints, if it is not deployed or garrisoned
     private void moveCohort(ServerLevel level, UUID owner, Cohort cohort, boolean autonomous) {
         if (cohort.getWaypoints().isEmpty()) return;
-        if (autonomous) rerouteAutonomous(level, cohort);
+        StateManager states = StateManager.get(level); StateData nation = states.getState(owner);
+        UUID targetOwner = ClaimManager.get(level).getStrategicOwner(ChunkPos.containing(List.copyOf(cohort.getWaypoints()).getLast()));
+        if (nation != null && nation.isAI() && !cohort.isRetreating() && cohort.getMarchState().contains("CrossingStart")
+                && targetOwner != null && !owner.equals(targetOwner) && !states.hasPassage(owner, targetOwner) && !states.mayInitiateHostility(level, owner, targetOwner)) {
+            BlockPos first = BlockPos.of(cohort.getMarchState().getLong("CrossingStart").orElseThrow());
+            BlockPos last = BlockPos.of(cohort.getMarchState().getLong("CrossingEnd").orElseThrow());
+            // Complete mandatory safety recovery on actual ground; this is never a follow-on capture order.
+            BlockPos bank = java.util.stream.Stream.of(first, last).filter(p -> MapDataService.surface(level, p).usable())
+                    .min(Comparator.comparingInt((BlockPos p) -> owner.equals(ClaimManager.get(level).getStrategicOwner(ChunkPos.containing(p))) ? 0 : 1)
+                            .thenComparingDouble(p -> p.distSqr(cohort.getStoredPosition()))).orElse(null);
+            if (bank != null) cohort.beginRetreat(bank, null);
+        }
+        if (autonomous || cohort.isRetreating()) rerouteAutonomous(level, cohort);
         CohortData shape = CohortData.fromCohort(cohort, cohort.getPreciseX(), cohort.getPreciseZ());
         CompoundTag originalShape = shape.marchState();
         boolean[] moved = {false};
@@ -630,23 +1052,22 @@ public class ArmyManager extends SavedData {
 
     //campaign needs check: determines if a campaign is needed for the given state and position
     private boolean needsCampaign(UUID stateId, BlockPos position, ServerLevel level) {
-        ChunkData claim = ClaimManager.get(level).getClaim(new ChunkPos(position.getX() >> 4, position.getZ() >> 4));
-        return claim == null || (!stateId.equals(claim.getOwnerUUID()) && !StateManager.get(level).hasPassage(stateId, claim.getOwnerUUID()));
+        UUID owner = ClaimManager.get(level).getStrategicOwner(ChunkPos.containing(position));
+        return owner == null || (!stateId.equals(owner) && !StateManager.get(level).hasPassage(stateId, owner));
     }
 
     //territory crossing function: checks if the army is entering a foreign territory and declares war if necessary, then creates a campaign for the army
     private void enterTerritory(Army army, ServerLevel level) {
         BlockPos position = army.getStoredPosition();
-        ChunkData claim = ClaimManager.get(level).getClaim(new ChunkPos(position.getX() >> 4, position.getZ() >> 4));
+        UUID owner = ClaimManager.get(level).getStrategicOwner(ChunkPos.containing(position));
         StateManager states = StateManager.get(level);
-        if (claim != null && !army.getOwningStateId().equals(claim.getOwnerUUID())) {
-            if (states.hasPassage(army.getOwningStateId(), claim.getOwnerUUID())) return;
-            if (!states.areAtWar(army.getOwningStateId(), claim.getOwnerUUID())) {
-                states.declareWar(army.getOwningStateId(), claim.getOwnerUUID());
+        if (owner != null && !army.getOwningStateId().equals(owner)) {
+            if (states.hasPassage(army.getOwningStateId(), owner) || !states.mayInitiateHostility(level, army.getOwningStateId(), owner)) return;
+            if (!states.areAtWar(army.getOwningStateId(), owner)) {
+                states.declareWar(level, army.getOwningStateId(), owner);
                 states.notifyState(level, army.getOwningStateId(), "Your army crossed a foreign border without passage. War has begun.");
-                states.notifyState(level, claim.getOwnerUUID(), "A foreign army crossed your border without passage. War has begun.");
             }
-        } else if (claim != null) return;
+        } else if (owner != null) return;
         createCampaign(army.getOwningStateId(), army.getArmyId());
     }
 
@@ -660,7 +1081,7 @@ public class ArmyManager extends SavedData {
     }
 
     //campaign ending check 2: hostile presence check, if there is a hostile army within engagement range of the army, the campaign cannot end
-    private boolean hasHostilePresence(UUID stateId, BlockPos position, ServerLevel level) {
+    public boolean hasHostilePresence(UUID stateId, BlockPos position, ServerLevel level) {
         StateManager states = StateManager.get(level);
         // An ongoing battle is still a threat and must not permit instant recruitment beside it.
         return activeArmies.values().stream().anyMatch(a -> a.isViable(this)
@@ -690,6 +1111,7 @@ public class ArmyManager extends SavedData {
         StateManager states = StateManager.get(level);
         for (Army other : new ArrayList<>(activeArmies.values())) {
             if (other.isEngaged() || !other.isViable(this) || !states.areAtWar(army.getOwningStateId(), other.getOwningStateId())) continue;
+            if (!states.mayBeginEncounter(level, army.getOwningStateId(), army.getStoredPosition(), other.getOwningStateId(), other.getStoredPosition())) continue;
             if (!canEngage(army, other)) continue;
             if (near(army.getStoredPosition(), other.getStoredPosition(), ENGAGEMENT_RANGE)
                     && canReachEnemy(level, army.getStoredPosition(), other.getStoredPosition())) {
@@ -702,6 +1124,7 @@ public class ArmyManager extends SavedData {
         for (Legion legion : new ArrayList<>(activeLegions.values())) {
             if (!states.areAtWar(army.getOwningStateId(), legion.getOwningStateId())) continue;
             for (Cohort cohort : legion.allCohorts()) {
+                if (!states.mayBeginEncounter(level, army.getOwningStateId(), army.getStoredPosition(), legion.getOwningStateId(), cohort.getStoredPosition())) continue;
                 if (cohort.isAlive() && !cohort.isDeployed() && !cohort.isDisengagingFrom(army.getArmyId())
                         && near(army.getStoredPosition(), cohort.getStoredPosition(), ENGAGEMENT_RANGE)
                         && canReachEnemy(level, army.getStoredPosition(), cohort.getStoredPosition())) {
@@ -742,6 +1165,12 @@ public class ArmyManager extends SavedData {
                     != com.devc.minecraftempires.network.MapDataService.Verification.VERIFIED) return;
         }
         double amount = Math.min(distance, speed);
+        if (!retreating) {
+            UUID destinationOwner = ClaimManager.get(level).getStrategicOwner(ChunkPos.containing(BlockPos.containing(x + dx / distance * amount, 0, z + dz / distance * amount)));
+            StateManager states = StateManager.get(level);
+            if (destinationOwner != null && !owner.equals(destinationOwner) && !states.hasPassage(owner, destinationOwner)
+                    && !states.mayInitiateHostility(level, owner, destinationOwner)) return;
+        }
         if (setter.test(distance == 0 ? x : x + dx / distance * amount, distance == 0 ? z : z + dz / distance * amount) && distance <= speed) waypoints.poll();
     }
 
@@ -854,9 +1283,9 @@ public class ArmyManager extends SavedData {
                     BlockPos point = BlockPos.containing(from.getX() + .5 + (end.getX() - from.getX()) * (double) i / steps, 0, from.getZ() + .5 + (end.getZ() - from.getZ()) * (double) i / steps);
                     if (MapDataService.canPreviewTerrain(level, proposal.owner, point)) {
                         run.add(point); total++;
-                        ChunkData claim = ClaimManager.get(level).getClaim(ChunkPos.containing(point));
-                        if (claim != null && !proposal.owner.equals(claim.getOwnerUUID())) {
-                            StateData state = StateManager.get(level).getState(claim.getOwnerUUID());
+                        UUID owner = ClaimManager.get(level).getStrategicOwner(ChunkPos.containing(point));
+                        if (owner != null && !proposal.owner.equals(owner)) {
+                            StateData state = StateManager.get(level).getState(owner);
                             if (state != null) borders.add(state.getStateName() + (StateManager.get(level).hasPassage(proposal.owner, state.getStateId()) ? " (passage)" : " (entry may start hostilities)"));
                         }
                     } else if (!run.isEmpty()) { runs.add(List.copyOf(run)); run.clear(); }
@@ -986,6 +1415,7 @@ public class ArmyManager extends SavedData {
     private static boolean controls(ServerPlayer player, UUID stateId) {
         StateData state = StateManager.get(player.level()).getStateByPlayer(player.getUUID());
         return player.level().dimension() == Level.OVERWORLD && state != null && state.getStateId().equals(stateId)
+                && !StateManager.get(player.level()).getAIWars().blocks(stateId)
                 && player.getUUID().equals(state.getLeaderId());
     }
 
@@ -1145,22 +1575,11 @@ public class ArmyManager extends SavedData {
                     if (proposal != null && proposal.id.equals(payload.targetId())) manager.discardMove(proposal);
                 }
                 case "RECRUIT_LEGION" -> {
-                    SettlementData settlement = states.getSettlement(payload.targetId());
-                    if (settlement == null || !state.getStateId().equals(settlement.getOwningStateId())) return;
-                    if (manager.hasHostilePresence(state.getStateId(), settlement.getCenterAltarPos(), player.level())) {
-                        tell(player, "Cannot recruit while hostile forces threaten this settlement.");
-                        return;
-                    }
-                    boolean free = states.canClaimFreeLegion(player.getUUID());
-                    if (!free && state.getTreasuryBalance() < LEGION_RECRUIT_COST) { tell(player, "A legion costs 5,000 emeralds."); return; }
-                    Optional<Legion> legion = manager.raiseLegion(state, settlement.getCenterAltarPos());
-                    if (legion.isEmpty()) { tell(player, "Your state's legion limit has been reached."); return; }
-                    if (free) states.claimFirstLegionGrant(player.getUUID());
-                    else state.deductFunds(LEGION_RECRUIT_COST);
-                    states.setDirty();
-                    tell(player, free ? "First Legion Free!" : "Legion recruited.");
+                    RecruitmentResult result = manager.recruitLegion(player.level(), state.getStateId(), payload.targetId(), player.getUUID());
+                    tell(player, result.succeeded() ? result.free() ? "First Legion Free!" : "Legion recruited." : result.error());
                 }
                 case "RECRUIT_AUXILIARY" -> {
+                    if (state.hasSurrenderOverflow()) { tell(player, "Qualify for your inherited territory and forces before recruiting more."); return; }
                     Legion legion = manager.getLegion(payload.targetId());
                     if (legion == null || !state.getStateId().equals(legion.getOwningStateId())) return;
                     Cohort main = legion.getMainCohort();
@@ -1198,6 +1617,7 @@ public class ArmyManager extends SavedData {
         if (manager.getArmiesForState(stateId).stream().anyMatch(a -> a.isEngaged() || a.isOnCampaign())) return false;
         for (Army army : manager.getArmiesForState(stateId)) manager.disbandArmy(army.getArmyId(), false);
         for (Legion legion : manager.getLegionsForState(stateId)) manager.disbandLegion(legion.getLegionId());
+        for (StrategicForce force : manager.getStrategicForcesForState(stateId)) manager.removeStrategicForce(force);
         manager.activeCampaigns.values().removeIf(campaign -> stateId.equals(campaign.getOwningStateId()));
         manager.setDirty();
         manager.refreshGarrisons(level);
@@ -1263,7 +1683,7 @@ public class ArmyManager extends SavedData {
     public List<Army> getArmiesForState(UUID stateId) {
         return stateToArmyIndex.getOrDefault(stateId, List.of()).stream().map(activeArmies::get).filter(Objects::nonNull).toList();
     }
-    public int getLegionCountForState(UUID stateId) { return stateToLegionIndex.getOrDefault(stateId, List.of()).size(); }
+    public int getLegionCountForState(UUID stateId) { return stateToLegionIndex.getOrDefault(stateId, List.of()).size() + getStrategicForcesForState(stateId).size(); }
 
     private static void removeIndex(Map<UUID, List<UUID>> index, UUID owner, UUID id) {
         List<UUID> ids = index.get(owner);
@@ -1279,12 +1699,24 @@ public class ArmyManager extends SavedData {
         activeCampaigns.values().forEach(c -> campaigns.add(c.toNBT()));
         cohortRegistry.values().stream().filter(c -> !cohortParents.containsKey(c.getCohortId())).forEach(c -> standalone.add(c.toNBT()));
         root.put("Legions", legions); root.put("Armies", armies); root.put("Campaigns", campaigns); root.put("StandaloneCohorts", standalone);
+        ListTag strategic = new ListTag(), receipts = new ListTag(); strategicForces.values().forEach(force -> strategic.add(force.toNBT()));
+        aiInitializations.forEach(id -> receipts.add(net.minecraft.nbt.StringTag.valueOf(id.toString())));
+        root.put("StrategicForces", strategic); root.put("AIInitializations", receipts);
+        root.putLong("MacroSequence", macroSequence);
+        root.putLong("InteractionSequence", interactionSequence);
+        ListTag origins = new ListTag(); detailedOrigins.values().forEach(f -> origins.add(f.toNBT())); root.put("DetailedOrigins", origins);
         return root;
     }
 
     public static ArmyManager fromTag(CompoundTag root) {
         ArmyManager manager = new ArmyManager();
+        manager.macroSequence = Math.max(0, root.getLong("MacroSequence").orElse(0L));
+        manager.interactionSequence = Math.max(0, root.getLong("InteractionSequence").orElse(0L));
+        readTags(root, "DetailedOrigins", tag -> { StrategicForce f = StrategicForce.fromNBT(tag); manager.detailedOrigins.put(f.id(), f); });
         readTags(root, "Legions", tag -> manager.registerLegion(Legion.fromNBT(tag)));
+        readTags(root, "StrategicForces", tag -> manager.registerStrategicForce(StrategicForce.fromNBT(tag)));
+        for (var value : root.getListOrEmpty("AIInitializations")) try { value.asString().map(UUID::fromString).ifPresent(manager.aiInitializations::add); }
+        catch (IllegalArgumentException malformed) { /* Ignore an invalid optional initialization receipt only. */ }
         readTags(root, "StandaloneCohorts", tag -> manager.registerCohort(Cohort.fromNBT(tag)));
         readTags(root, "Armies", tag -> {
             Army army = Army.fromNBT(tag);

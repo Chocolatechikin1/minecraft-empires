@@ -175,8 +175,8 @@ public final class LogisticsManager extends SavedData {
         boolean water = false;
         for (BlockPos center : bridge.points()) for (int side = -1; side <= 1; side++) {
             BlockPos point = center.offset(sx * side, 0, sz * side);
-            ChunkData claim = claims.getClaim(ChunkPos.containing(point));
-            if (!level.getWorldBorder().isWithinBounds(point) || claim != null && !state.getStateId().equals(claim.getOwnerUUID()))
+            UUID owner = claims.getStrategicOwner(ChunkPos.containing(point));
+            if (!level.getWorldBorder().isWithinBounds(point) || owner != null && !state.getStateId().equals(owner))
                 return bridgeFailure("The deck and both approaches cannot occupy another state's territory.");
             if (bridgeAt(point.getX(), point.getZ()) != null) return bridgeFailure("A bridge already occupies part of this crossing.");
             var ground = inspection.baseSurface(level, point);
@@ -296,7 +296,7 @@ public final class LogisticsManager extends SavedData {
             ChunkData first = claims.getClaim(ChunkPos.containing(bridge.start)), last = claims.getClaim(ChunkPos.containing(bridge.end));
             if (first == null || last == null || !Objects.equals(first.getOwnerUUID(), last.getOwnerUUID())) continue;
             UUID owner = first.getOwnerUUID();
-            if (!states.areAtWar(owner, bridge.ownerId)) continue;
+            if (!states.areAtWar(owner, bridge.ownerId) || !states.mayInitiateHostility(level, owner, bridge.ownerId)) continue;
             var forces = armies.getArmiesForState(owner).stream().filter(a -> a.isViable(armies) && !a.isEngaged() && !a.isRetreating()).toList();
             if (forces.stream().noneMatch(a -> ArmyManager.near(a.getStoredPosition(), bridge.start, 16))
                     || forces.stream().noneMatch(a -> ArmyManager.near(a.getStoredPosition(), bridge.end, 16))
@@ -354,6 +354,33 @@ public final class LogisticsManager extends SavedData {
 
     public Collection<Road> getRoads() { return Collections.unmodifiableCollection(roads.values()); }
     public Collection<Camp> getCamps() { return Collections.unmodifiableCollection(camps.values()); }
+    private long interactionSequence;
+    public long getInteractionSequence() { return interactionSequence; }
+    public CompoundTag interactionSnapshot(Set<UUID> owners) {
+        CompoundTag all = toTag(), result = new CompoundTag();
+        for (String key : List.of("Roads", "Camps", "Bridges")) {
+            ListTag list = new ListTag();
+            for (var value : all.getListOrEmpty(key)) { CompoundTag tag = (CompoundTag) value;
+                if (owners.contains(UUID.fromString(tag.getString("Owner").orElseThrow()))) list.add(tag.copy()); }
+            result.put(key, list);
+        }
+        return result;
+    }
+    public void applySurrender(long sequence, UUID donor, UUID recipient, CompoundTag snapshot) {
+        if (interactionSequence >= sequence) return;
+        Set<UUID> owners = Set.of(donor, recipient); CompoundTag restored = snapshot.copy();
+        for (String key : List.of("Roads", "Camps", "Bridges")) for (var value : restored.getListOrEmpty(key)) {
+            CompoundTag tag = (CompoundTag) value;
+            if (donor.toString().equals(tag.getString("Owner").orElse(""))) tag.putString("Owner", recipient.toString());
+        }
+        LogisticsManager source = fromTag(restored);
+        roads.values().removeIf(r -> owners.contains(r.ownerId())); camps.values().removeIf(c -> owners.contains(c.ownerId()));
+        bridges.values().removeIf(b -> owners.contains(b.ownerId()));
+        roads.putAll(source.roads); camps.putAll(source.camps); bridges.putAll(source.bridges);
+        bridgePlans.values().removeIf(p -> owners.contains(p.owner));
+        networks.clear(); invalidateTerrainDelivery(); rebuildRoadCells(); rebuildBridgeColumns();
+        interactionSequence = sequence; infrastructureChanged(); setDirty();
+    }
     public static void clearPlayer(UUID playerId) { SELECTIONS.remove(playerId); }
     public static void clearAllSelections() { SELECTIONS.clear(); }
 
@@ -413,8 +440,8 @@ public final class LogisticsManager extends SavedData {
         catch (IllegalArgumentException invalid) { return invalid.getMessage(); }
         ClaimManager claims = ClaimManager.get(level);
         for (BlockPos point : path) {
-            ChunkData claim = claims.getClaim(ChunkPos.containing(point));
-            if (!level.getWorldBorder().isWithinBounds(point) || claim == null || !state.getStateId().equals(claim.getOwnerUUID()))
+            UUID owner = claims.getStrategicOwner(ChunkPos.containing(point));
+            if (!level.getWorldBorder().isWithinBounds(point) || !state.getStateId().equals(owner))
                 return "Error. The entire road selection must lie in your current territory.";
             if (!remove && !MapDataService.surface(level, point).usable())
                 return "The road needs verified usable ground or a crossing. Inspect the route and retry.";
@@ -480,8 +507,8 @@ public final class LogisticsManager extends SavedData {
         if (army == null || !state.getStateId().equals(army.getOwningStateId()) || army.isEngaged() || army.isRetreating() || !army.isViable(armies))
             return "Select a living, unengaged army to establish a camp at its position.";
         BlockPos position = army.getStoredPosition();
-        ChunkData claim = ClaimManager.get(level).getClaim(ChunkPos.containing(position));
-        if (claim == null || !state.getStateId().equals(claim.getOwnerUUID()) || !level.getWorldBorder().isWithinBounds(position))
+        UUID owner = ClaimManager.get(level).getStrategicOwner(ChunkPos.containing(position));
+        if (!state.getStateId().equals(owner) || !level.getWorldBorder().isWithinBounds(position))
             return "Error. Establish camps inside your own territory.";
         if (!MapDataService.surface(level, position).dry()) return "A camp needs verified dry ground. Inspect the site and retry.";
         if (StateManager.get(level).getAllSettlements().stream().anyMatch(s -> !state.getStateId().equals(s.getOwningStateId())
@@ -512,7 +539,7 @@ public final class LogisticsManager extends SavedData {
         return "Camp dismantled";
     }
 
-    /** Called by the existing once-per-second cadence. No wall-clock catch-up and no offline supply effects. */
+    /** Called once per second. No wall-clock catch-up; human supply pauses offline, explicit AI supply does not. */
     public void tick(ServerLevel level) {
         tickBridgePlans(level);
         captureBridges(level);
@@ -529,9 +556,10 @@ public final class LogisticsManager extends SavedData {
         }
         long deadline = System.nanoTime() + 250_000L;
         for (StateData state : states.getAllStates()) {
+            if (state.isInitializationPending() || states.getAIWars().blocks(state.getStateId())) continue;
             Network network = ensureNetwork(state.getStateId(), level);
             advanceNetwork(network, state.getStateId(), level, deadline);
-            if (!online.contains(state.getStateId()) || elapsed <= 0) continue;
+            if ((!state.isAI() && !online.contains(state.getStateId())) || elapsed <= 0) continue;
             UUID stateId = state.getStateId();
             long oldClock = activeClocks.getOrDefault(stateId, 0L);
             activeClocks.put(stateId, oldClock + elapsed);
@@ -616,9 +644,9 @@ public final class LogisticsManager extends SavedData {
         ArmyManager armies = ArmyManager.get(level);
         boolean changed = camps.values().removeIf(c -> states.getState(c.ownerId()) == null);
         for (Camp camp : camps.values()) {
-            ChunkData claim = ClaimManager.get(level).getClaim(ChunkPos.containing(camp.position()));
-            if (claim == null || claim.getOwnerUUID().equals(camp.ownerId()) || !states.areAtWar(camp.ownerId(), claim.getOwnerUUID())) continue;
-            UUID attacker = claim.getOwnerUUID();
+            UUID attacker = ClaimManager.get(level).getStrategicOwner(ChunkPos.containing(camp.position()));
+            if (attacker == null || attacker.equals(camp.ownerId()) || !states.areAtWar(camp.ownerId(), attacker)) continue;
+            if (!states.mayInitiateHostility(level, attacker, camp.ownerId())) continue;
             boolean present = armies.getArmiesForState(attacker).stream().anyMatch(a -> !a.isEngaged() && !a.isRetreating() && a.isViable(armies)
                     && ArmyManager.near(a.getStoredPosition(), camp.position(), StateBalance.CAMP_OPERATION_RANGE));
             if (present && !hostileWithin(level, attacker, camp.position(), ArmyManager.ENGAGEMENT_RANGE)) {
@@ -634,8 +662,7 @@ public final class LogisticsManager extends SavedData {
         return ownedCampChunk(camp, ClaimManager.get(level));
     }
     private static boolean ownedCampChunk(Camp camp, ClaimManager claims) {
-        ChunkData claim = claims.getClaim(ChunkPos.containing(camp.position()));
-        return claim != null && camp.ownerId().equals(claim.getOwnerUUID());
+        return camp.ownerId().equals(claims.getStrategicOwner(ChunkPos.containing(camp.position())));
     }
     private static double distance(BlockPos first, BlockPos second) {
         return Math.hypot((double) first.getX() - second.getX(), (double) first.getZ() - second.getZ());
@@ -673,8 +700,8 @@ public final class LogisticsManager extends SavedData {
         return accessible(stateId, packed, ClaimManager.get(level), StateManager.get(level));
     }
     private static boolean accessible(UUID stateId, long packed, ClaimManager claims, StateManager states) {
-        ChunkData claim = claims.getClaim(ChunkPos.unpack(packed));
-        return claim != null && (stateId.equals(claim.getOwnerUUID()) || states.hasPassage(stateId, claim.getOwnerUUID()));
+        UUID owner = claims.getStrategicOwner(ChunkPos.unpack(packed));
+        return owner != null && (stateId.equals(owner) || states.hasPassage(stateId, owner));
     }
 
     //network management function - helper method
@@ -698,7 +725,7 @@ public final class LogisticsManager extends SavedData {
                 currentBuckets.computeIfAbsent(ChunkPos.pack(x + ox, z + oz), ignored -> new ArrayList<>()).add(enemy);
         }
         long stamp = revision;
-        for (SettlementData settlement : states.getAllSettlements()) if (owner.equals(settlement.getOwningStateId()) && settlement.isSupplyReady())
+        for (SettlementData settlement : states.getAllSettlements()) if (owner.equals(settlement.getOwningStateId()) && settlement.isCenterVerified() && settlement.isSupplyReady())
             stamp = stamp * 31 + settlement.getSettlementId().hashCode();
         stamp = stamp * 31 + enemies.hashCode();
         // An in-flight build keeps its queue, but all result validation uses live hostile positions.
@@ -711,7 +738,7 @@ public final class LogisticsManager extends SavedData {
             next.previous = !sameContext ? null : current.complete ? current : current.previous;
             if (next.previous != null) next.previous.previous = null;
             next.enemyBuckets = currentBuckets;
-            for (SettlementData settlement : states.getAllSettlements()) if (owner.equals(settlement.getOwningStateId()) && settlement.isSupplyReady()) {
+            for (SettlementData settlement : states.getAllSettlements()) if (owner.equals(settlement.getOwningStateId()) && settlement.isCenterVerified() && settlement.isSupplyReady()) {
                 long cell = ChunkPos.containing(settlement.getCenterAltarPos()).pack();
                 if (accessible(owner, cell, claims, states) && !blocked(next, cell)) {
                     Node root = new Node(cell, 0, settlement.getSettlementId(), settlement.getSettlementName(), null);
@@ -825,7 +852,7 @@ public final class LogisticsManager extends SavedData {
     /** Shared, iterative relay discovery avoids recursive camp cycles and repeats for each cohort. */
     private SupplySources connectedSources(UUID owner, ServerLevel level) {
         List<SupplySource> sources = new ArrayList<>(); Set<UUID> reachedCamps = new HashSet<>(); boolean pending = false; int attempts = 0;
-        for (SettlementData root : StateManager.get(level).getAllSettlements()) if (owner.equals(root.getOwningStateId()) && root.isSupplyReady()
+        for (SettlementData root : StateManager.get(level).getAllSettlements()) if (owner.equals(root.getOwningStateId()) && root.isCenterVerified() && root.isSupplyReady()
                 && accessible(owner, ChunkPos.containing(root.getCenterAltarPos()).pack(), level))
             sources.add(new SupplySource(root.getSettlementId(), root.getSettlementName(), root.getCenterAltarPos(), List.of(), false));
         for (int cursor = 0; cursor < sources.size(); cursor++) {
@@ -978,7 +1005,7 @@ public final class LogisticsManager extends SavedData {
             }
             if (current.previous() == null) {
                 SettlementData root = states.getSettlement(current.sourceId());
-                return root != null && stateId.equals(root.getOwningStateId()) && root.isSupplyReady();
+                return root != null && stateId.equals(root.getOwningStateId()) && root.isCenterVerified() && root.isSupplyReady();
             }
         }
         return false;
@@ -1071,6 +1098,7 @@ public final class LogisticsManager extends SavedData {
     /** Only durable data is serialized; searches and player selections always rebuild safely. */
     public CompoundTag toTag() {
         CompoundTag root = new CompoundTag(); root.putInt("Version", 1); root.putLong("LastGameTime", lastGameTime);
+        root.putLong("InteractionSequence", interactionSequence);
         ListTag roadTags = new ListTag();
         for (Road road : roads.values()) {
             CompoundTag tag = new CompoundTag(); tag.putString("Id", road.id().toString()); tag.putString("Owner", road.ownerId().toString());
@@ -1109,6 +1137,7 @@ public final class LogisticsManager extends SavedData {
     }
     public static LogisticsManager fromTag(CompoundTag root) {
         LogisticsManager manager = new LogisticsManager(); manager.lastGameTime = root.getLong("LastGameTime").orElse(-1L);
+        manager.interactionSequence = Math.max(0, root.getLong("InteractionSequence").orElse(0L));
         root.getList("Roads").ifPresent(list -> {
             for (int i = 0; i < list.size(); i++) list.getCompound(i).ifPresent(tag -> {
                 try {
