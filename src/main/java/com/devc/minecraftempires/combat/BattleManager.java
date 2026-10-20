@@ -44,6 +44,8 @@ public final class BattleManager extends SavedData {
     public static void clearAll() { BattleSession.clearDeploymentPreviews(); }
 
     public BattleSession startBattle(Army attacker, Army defender, ServerLevel level) {
+        if (!StateManager.get(level).mayBeginEncounter(level, attacker.getOwningStateId(), attacker.getStoredPosition(),
+                defender.getOwningStateId(), defender.getStoredPosition())) return null;
         if (attacker.isEngaged()) return getBattle(attacker.getCurrentBattleId());
         if (defender.isEngaged()) return getBattle(defender.getCurrentBattleId());
         if (attacker.getArmyId().equals(defender.getArmyId())) return null;
@@ -165,8 +167,30 @@ public final class BattleManager extends SavedData {
     private void finalizeBattle(BattleSession session, ServerLevel level) {
         ArmyManager manager = ArmyManager.get(level);
         if (!completedResults.containsKey(session.getBattleId())) {
+            Army attacker = manager.getArmy(session.getAttackerArmyId()), defender = manager.getArmy(session.getDefenderArmyId());
+            UUID actor = attacker == null ? null : attacker.getOwningStateId(), target = defender == null ? null : defender.getOwningStateId();
+            Map<UUID, Long> strengths = new HashMap<>();
+            for (UUID id : List.of(session.getAttackerArmyId(), session.getDefenderArmyId())) {
+                Army army = manager.getArmy(id); if (army != null) strengths.put(army.getOwningStateId(), manager.getTotalSoldiersForState(army.getOwningStateId()));
+            }
             commitSide(session, true, manager);
             commitSide(session, false, manager);
+            StateManager states = StateManager.get(level);
+            StateData from = states.getState(actor), to = states.getState(target);
+            // Publish only the committed encounter, never a deployment that failed before combat.
+            if (from != null && to != null && session.getResult() != BattleSession.BattleResult.INTERRUPTED) {
+                states.observeNation(actor, target, level.getGameTime(), StateManager.KnowledgeSource.DIRECT_EVENT);
+                states.observeNation(target, actor, level.getGameTime(), StateManager.KnowledgeSource.DIRECT_EVENT);
+                states.getNews().publish(UUID.nameUUIDFromBytes(("battle:" + session.getBattleId()).getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+                        level.getGameTime(), com.devc.minecraftempires.state.WorldNews.Kind.BATTLE, actor, from.getStateName(), target, to.getStateName(), null, "", 0);
+            }
+            for (var entry : strengths.entrySet()) {
+                StateData nation = states.getState(entry.getKey()); long surviving = manager.getTotalSoldiersForState(entry.getKey());
+                if (nation != null && nation.isAI() && (surviving <= com.devc.minecraftempires.army.Legion.AUTO_DISBAND_STRENGTH || surviving * 2 <= entry.getValue())) {
+                    UUID enemy = strengths.keySet().stream().filter(id -> !id.equals(entry.getKey())).findFirst().orElse(null);
+                    nation.recordMajorDefeat(level.getGameTime(), enemy); states.setDirty();
+                }
+            }
             completedResults.put(session.getBattleId(), session.getResult().name());
             while (completedResults.size() > 128) completedResults.remove(completedResults.keySet().iterator().next());
         }

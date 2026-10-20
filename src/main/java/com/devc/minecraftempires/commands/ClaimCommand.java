@@ -30,11 +30,11 @@ public class ClaimCommand {
         ClaimManager claims = ClaimManager.get(player.level());
         ChunkData data = claims.getClaim(player.chunkPosition());
         if (claim) {
-            if (data != null || !states.canAcquireChunks(state, claims.getClaimCountForState(state.getStateId()), 1)) return 0;
+            if (claims.isClaimed(player.chunkPosition()) || !states.canAcquireChunks(state, claims.getClaimCountForState(state.getStateId()), 1)) return 0;
             claims.setClaim(player.chunkPosition(), state.getStateId(), "", false, 0);
         } else {
-            if (data == null || !state.getStateId().equals(data.getOwnerUUID())) return 0;
-            if (data.getSettlementID() != null && !data.getSettlementID().isBlank()) {
+            if (!state.getStateId().equals(claims.getStrategicOwner(player.chunkPosition()))) return 0;
+            if (data != null && data.getSettlementID() != null && !data.getSettlementID().isBlank()) {
                 source.sendFailure(Component.literal("Abandon the settlement in its management screen to release this land."));
                 return 0;
             }
