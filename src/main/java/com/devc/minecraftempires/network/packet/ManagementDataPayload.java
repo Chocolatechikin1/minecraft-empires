@@ -1,6 +1,9 @@
 package com.devc.minecraftempires.network.packet;
 
+import com.devc.minecraftempires.territory.SettlementData;
+
 import com.devc.minecraftempires.MinecraftEmpires;
+import com.devc.minecraftempires.state.WorldNews;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
@@ -100,17 +103,21 @@ public record ManagementDataPayload(UUID stateId, String stateName, String tier,
         }
     }
     public record SettlementEntry(UUID id, String name, BlockPos position, int tier, int population, int capacity,
-            boolean martialLaw, long supplyPreparationTicks) {
+            boolean martialLaw, long supplyPreparationTicks, SettlementData.Kind kind) {
+        public SettlementEntry(UUID id, String name, BlockPos position, int tier, int population, int capacity, boolean martialLaw, long supplyPreparationTicks) {
+            this(id, name, position, tier, population, capacity, martialLaw, supplyPreparationTicks, tier >= 2 ? SettlementData.Kind.CITY : SettlementData.Kind.TOWN);
+        }
         public SettlementEntry(UUID id, String name, BlockPos position, int tier, int population, int capacity, boolean martialLaw) {
             this(id, name, position, tier, population, capacity, martialLaw, 0L);
         }
-        SettlementEntry(RegistryFriendlyByteBuf b) { this(b.readUUID(), b.readUtf(80), b.readBlockPos(), b.readVarInt(), b.readVarInt(), b.readVarInt(), b.readBoolean(), b.readVarLong()); }
-        void write(RegistryFriendlyByteBuf b) { b.writeUUID(id); b.writeUtf(name, 80); b.writeBlockPos(position); b.writeVarInt(tier); b.writeVarInt(population); b.writeVarInt(capacity); b.writeBoolean(martialLaw); b.writeVarLong(supplyPreparationTicks); }
-        public String tierLabel() { return tier >= 2 ? "City" : "Town"; }
+        SettlementEntry(RegistryFriendlyByteBuf b) { this(b.readUUID(), b.readUtf(80), b.readBlockPos(), b.readVarInt(), b.readVarInt(), b.readVarInt(), b.readBoolean(), b.readVarLong(), b.readEnum(SettlementData.Kind.class)); }
+        void write(RegistryFriendlyByteBuf b) { b.writeUUID(id); b.writeUtf(name, 80); b.writeBlockPos(position); b.writeVarInt(tier); b.writeVarInt(population); b.writeVarInt(capacity); b.writeBoolean(martialLaw); b.writeVarLong(supplyPreparationTicks); b.writeEnum(kind); }
+        public String tierLabel() { return kind.label(); }
     }
-    public record LegionEntry(UUID id, BlockPos position, int soldiers) {
-        LegionEntry(RegistryFriendlyByteBuf b) { this(b.readUUID(), b.readBlockPos(), b.readVarInt()); }
-        void write(RegistryFriendlyByteBuf b) { b.writeUUID(id); b.writeBlockPos(position); b.writeVarInt(soldiers); }
+    public record LegionEntry(UUID id, BlockPos position, int soldiers, boolean pendingTerrain) {
+        public LegionEntry(UUID id, BlockPos position, int soldiers) { this(id, position, soldiers, false); }
+        LegionEntry(RegistryFriendlyByteBuf b) { this(b.readUUID(), b.readBlockPos(), b.readVarInt(), b.readBoolean()); }
+        void write(RegistryFriendlyByteBuf b) { b.writeUUID(id); b.writeBlockPos(position); b.writeVarInt(soldiers); b.writeBoolean(pendingTerrain); }
     }
     public record CohortEntry(UUID id, UUID legionId, String label, String type, BlockPos position,
             int soldiers, int maximum, int health, int morale, int endurance, int strength, int speed, int xp,
@@ -128,9 +135,11 @@ public record ManagementDataPayload(UUID stateId, String stateName, String tier,
         }
         public boolean available() { return soldiers > 0 && armyId == null && settlementId == null; }
     }
-    public record RelationEntry(UUID id, String name, boolean war, boolean passageGranted, boolean passageReceived, boolean peaceOffered) {
-        RelationEntry(RegistryFriendlyByteBuf b) { this(b.readUUID(), b.readUtf(80), b.readBoolean(), b.readBoolean(), b.readBoolean(), b.readBoolean()); }
-        void write(RegistryFriendlyByteBuf b) { b.writeUUID(id); b.writeUtf(name, 80); b.writeBoolean(war); b.writeBoolean(passageGranted); b.writeBoolean(passageReceived); b.writeBoolean(peaceOffered); }
+    public record RelationEntry(UUID id, String name, boolean war, boolean passageGranted, boolean passageReceived, boolean peaceOffered,
+                                boolean ai, UUID surrenderToken, String surrenderTerms) {
+        public RelationEntry(UUID id, String name, boolean war, boolean granted, boolean received, boolean peace) { this(id, name, war, granted, received, peace, false, null, ""); }
+        RelationEntry(RegistryFriendlyByteBuf b) { this(b.readUUID(), b.readUtf(80), b.readBoolean(), b.readBoolean(), b.readBoolean(), b.readBoolean(), b.readBoolean(), readId(b), b.readUtf(1024)); }
+        void write(RegistryFriendlyByteBuf b) { b.writeUUID(id); b.writeUtf(name, 80); b.writeBoolean(war); b.writeBoolean(passageGranted); b.writeBoolean(passageReceived); b.writeBoolean(peaceOffered); b.writeBoolean(ai); writeId(b, surrenderToken); b.writeUtf(surrenderTerms, 1024); }
     }
     /** Cohort-owned reserves/fatigue are private; base endurance remains in CohortEntry. */
     public record CohortSupplyEntry(UUID cohortId, String status, String reason, String sourceName,
@@ -173,6 +182,60 @@ public record ManagementDataPayload(UUID stateId, String stateName, String tier,
             writeId(b, targetId); b.writeVarInt(points.size()); points.forEach(b::writeBlockPos); b.writeBoolean(truncated);
         }
         public static SelectedSupplyRoute empty() { return new SelectedSupplyRoute(null, List.of(), false); }
+    }
+    /** News travels on demand, independently of the recurring management/army snapshot. */
+    public record NewsRequest(long requestId, long before, long through, WorldNews.Filter filter, boolean ownOnly) implements CustomPacketPayload {
+        public static final Type<NewsRequest> TYPE = new Type<>(Identifier.fromNamespaceAndPath(MinecraftEmpires.MODID, "request_news"));
+        public static final StreamCodec<RegistryFriendlyByteBuf, NewsRequest> STREAM_CODEC = StreamCodec.ofMember(NewsRequest::write, NewsRequest::new);
+        public NewsRequest {
+            if (requestId < 1 || before < 0 || through < 0 || filter == null || before != 0 && (through == 0 || before > through))
+                throw new IllegalArgumentException("Invalid news cursor");
+        }
+        public NewsRequest(RegistryFriendlyByteBuf b) { this(b.readLong(), b.readLong(), b.readLong(), b.readEnum(WorldNews.Filter.class), b.readBoolean()); }
+        private void write(RegistryFriendlyByteBuf b) { b.writeLong(requestId); b.writeLong(before); b.writeLong(through); b.writeEnum(filter); b.writeBoolean(ownOnly); }
+        @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
+    }
+    public record NewsEntry(UUID id, long sequence, long time, WorldNews.Kind kind, String headline, UUID settlement, BlockPos location) {
+        public NewsEntry {
+            if (id == null || sequence < 1 || time < 0 || kind == null || headline == null || headline.length() > 512 || (settlement == null) != (location == null))
+                throw new IllegalArgumentException("Invalid news entry");
+        }
+        private NewsEntry(RegistryFriendlyByteBuf b) {
+            this(b.readUUID(), b.readLong(), b.readLong(), b.readEnum(WorldNews.Kind.class), b.readUtf(512), readId(b), b.readBoolean() ? b.readBlockPos() : null);
+        }
+        private void write(RegistryFriendlyByteBuf b) {
+            b.writeUUID(id); b.writeLong(sequence); b.writeLong(time); b.writeEnum(kind); b.writeUtf(headline, 512);
+            writeId(b, settlement); b.writeBoolean(location != null); if (location != null) b.writeBlockPos(location);
+        }
+    }
+    public record NewsPage(long requestId, UUID viewer, long before, long through, WorldNews.Filter filter, boolean ownOnly,
+                           boolean hasOlder, boolean trimmed, long gameTime, List<NewsEntry> entries) implements CustomPacketPayload {
+        public static final Type<NewsPage> TYPE = new Type<>(Identifier.fromNamespaceAndPath(MinecraftEmpires.MODID, "news_page"));
+        public static final StreamCodec<RegistryFriendlyByteBuf, NewsPage> STREAM_CODEC = StreamCodec.ofMember(NewsPage::write, NewsPage::new);
+        public NewsPage {
+            entries = List.copyOf(entries);
+            if (requestId < 1 || before < 0 || through < 0 || gameTime < 0 || filter == null || entries.size() > WorldNews.MAX_PAGE || viewer == null && !entries.isEmpty())
+                throw new IllegalArgumentException("Invalid news page");
+            long previous = before == 0 ? Long.MAX_VALUE : before;
+            for (var entry : entries) {
+                if (entry.sequence() >= previous || entry.sequence() > through) throw new IllegalArgumentException("Unordered news page");
+                previous = entry.sequence();
+            }
+            if (hasOlder && entries.isEmpty()) throw new IllegalArgumentException("Empty older news cursor");
+        }
+        public NewsPage(RegistryFriendlyByteBuf b) {
+            this(b.readLong(), readId(b), b.readLong(), b.readLong(), b.readEnum(WorldNews.Filter.class), b.readBoolean(), b.readBoolean(), b.readBoolean(), b.readLong(), readNews(b));
+        }
+        private static List<NewsEntry> readNews(RegistryFriendlyByteBuf b) {
+            int count = b.readVarInt(); if (count < 0 || count > WorldNews.MAX_PAGE) throw new IllegalArgumentException("Invalid news page size");
+            List<NewsEntry> entries = new ArrayList<>(count); for (int i = 0; i < count; i++) entries.add(new NewsEntry(b)); return entries;
+        }
+        private void write(RegistryFriendlyByteBuf b) {
+            b.writeLong(requestId); writeId(b, viewer); b.writeLong(before); b.writeLong(through); b.writeEnum(filter); b.writeBoolean(ownOnly);
+            b.writeBoolean(hasOlder); b.writeBoolean(trimmed); b.writeLong(gameTime); b.writeVarInt(entries.size()); entries.forEach(e -> e.write(b));
+        }
+        public long nextBefore() { return entries.isEmpty() ? 0 : entries.getLast().sequence(); }
+        @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
     }
     private static UUID readId(RegistryFriendlyByteBuf b) { return b.readBoolean() ? b.readUUID() : null; }
     private static void writeId(RegistryFriendlyByteBuf b, UUID id) { b.writeBoolean(id != null); if (id != null) b.writeUUID(id); }

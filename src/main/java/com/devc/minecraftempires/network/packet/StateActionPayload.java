@@ -96,6 +96,7 @@ public record StateActionPayload(String action, UUID targetId, BlockPos position
                 player.sendSystemMessage(Component.literal("Only the state leader may change these settings."));
                 return;
             }
+            if (manager.getAIWars().blocks(state.getStateId())) { player.sendSystemMessage(Component.literal("Your nation's handover is being reconciled. Retry shortly.")); return; }
             String result = switch (payload.action) {
                 case "RENAME" -> rename(manager, state, payload.targetId, payload.text);
                 case "UPGRADE" -> manager.upgradeSettlement(player.level(), state, payload.targetId);
@@ -104,6 +105,11 @@ public record StateActionPayload(String action, UUID targetId, BlockPos position
                         payload.action.equals("CHOOSE_REPUBLIC") ? StateTier.REPUBLIC : StateTier.EMPIRE)
                         ? "Government chosen permanently." : "Your state has not met the requirements for this choice.";
                 case "DECLARE_WAR", "GRANT_PASSAGE", "REVOKE_PASSAGE", "OFFER_PEACE", "ACCEPT_PEACE" -> diplomacy(player, manager, state, payload);
+                case "DEMAND_SURRENDER" -> manager.getPlayerConflicts().demand(player.level(), state.getStateId(), payload.targetId);
+                case "ACCEPT_SURRENDER" -> {
+                    try { yield manager.getPlayerConflicts().accept(player.level(), state.getStateId(), payload.targetId, UUID.fromString(payload.text)); }
+                    catch (IllegalArgumentException invalid) { yield "Invalid surrender token."; }
+                }
                 case "BUILD_ROAD", "REMOVE_ROAD", "CREATE_CAMP", "DISMANTLE_CAMP", "CHECK_BRIDGE", "BUILD_BRIDGE", "CANCEL_BRIDGE", "REMOVE_BRIDGE" ->
                         LogisticsManager.get(player.level()).handleAction(payload.action, player, state, payload.targetId, payload.routePoints);
                 default -> "Unknown state action.";
@@ -151,10 +157,12 @@ public record StateActionPayload(String action, UUID targetId, BlockPos position
         UUID own = state.getStateId(), otherId = payload.targetId;
         StateData other = manager.getState(otherId);
         if (other == null || otherId.equals(own)) return "Choose another existing state.";
+        if (!manager.knowsNation(own, otherId)) return "This nation has not been discovered.";
+        if (other.isInitializationPending()) return "This nation is still being initialized.";
+        if (manager.getAIWars().blocks(other.getStateId())) return "This nation's military outcome is being reconciled. Retry shortly.";
         switch (payload.action) {
             case "DECLARE_WAR" -> {
-                if (!manager.declareWar(own, otherId)) return "You are already at war.";
-                manager.notifyState(player.level(), otherId, state.getStateName() + " has declared war on your state.");
+                if (!manager.declareWar(player.level(), own, otherId)) return "You are already at war.";
                 return "War declared against " + other.getStateName() + ".";
             }
             case "GRANT_PASSAGE" -> {
@@ -171,8 +179,7 @@ public record StateActionPayload(String action, UUID targetId, BlockPos position
                 return "Peace offered to " + other.getStateName() + ".";
             }
             case "ACCEPT_PEACE" -> {
-                if (!manager.acceptPeace(own, otherId)) return "There is no peace offer from this state.";
-                manager.notifyState(player.level(), otherId, state.getStateName() + " accepted your peace offer.");
+                if (!manager.acceptPeace(player.level(), own, otherId)) return "There is no peace offer from this state.";
                 return "Peace agreed with " + other.getStateName() + ".";
             }
             default -> { return "Unknown diplomatic action."; }

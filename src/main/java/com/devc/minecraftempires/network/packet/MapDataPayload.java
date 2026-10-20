@@ -1,5 +1,7 @@
 package com.devc.minecraftempires.network.packet;
 
+import com.devc.minecraftempires.territory.SettlementData;
+
 import com.devc.minecraftempires.MinecraftEmpires;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.RegistryFriendlyByteBuf;
@@ -21,8 +23,50 @@ public record MapDataPayload( //weird ai formatting, i like it tho
         List<BreachAlert> breachAlerts,
         List<RoadSummary> roads,
         List<CampSummary> camps,
-        boolean logisticsTruncated
+        boolean logisticsTruncated,
+        List<PoliticalRegion> politicalRegions,
+        boolean claimsTruncated
 ) implements CustomPacketPayload {
+    public static final int MAX_MAP_BYTES = 900_000; // Leave framing headroom below a one-MiB custom payload.
+    /** Trim only already-filtered presentation. Ownership and remembered domain facts remain untouched. */
+    public MapDataPayload bounded(net.minecraft.core.RegistryAccess registries) {
+        var buffer = new RegistryFriendlyByteBuf(io.netty.buffer.Unpooled.buffer(), registries);
+        MapDataPayload result = this;
+        try {
+            while (true) {
+                buffer.clear(); result.write(buffer); int bytes = buffer.readableBytes();
+                if (bytes <= MAX_MAP_BYTES) return result;
+                int[] weights = {
+                    listBytes(buffer, result.chunks(), MapChunkData::write), listBytes(buffer, result.states(), StateSummary::write),
+                    listBytes(buffer, result.settlements(), SettlementSummary::write), listBytes(buffer, result.breachAlerts(), BreachAlert::write),
+                    listBytes(buffer, result.roads(), RoadSummary::write), listBytes(buffer, result.camps(), CampSummary::write),
+                    listBytes(buffer, result.politicalRegions(), PoliticalRegion::write)
+                };
+                List<?>[] lists = {result.chunks(), result.states(), result.settlements(), result.breachAlerts(), result.roads(), result.camps(), result.politicalRegions()};
+                int largest = -1;
+                for (int i = 0; i < lists.length; i++) if (lists[i].size() > 1 && (largest < 0 || weights[i] > weights[largest])) largest = i;
+                if (largest < 0) throw new IllegalArgumentException("Single map details exceed the supported byte limit");
+                int keep = Math.max(1, (int) (lists[largest].size() * .85 * MAX_MAP_BYTES / bytes));
+                var chunks = result.chunks(); var states = result.states(); var settlements = result.settlements(); var alerts = result.breachAlerts();
+                var roads = result.roads(); var camps = result.camps(); var regions = result.politicalRegions();
+                switch (largest) {
+                    case 0 -> chunks = chunks.subList(0, keep);
+                    case 1 -> states = states.stream().sorted(java.util.Comparator.comparing(StateSummary::viewerState).reversed()).limit(keep).toList();
+                    case 2 -> settlements = settlements.subList(0, keep);
+                    case 3 -> alerts = alerts.subList(0, keep);
+                    case 4 -> roads = roads.subList(0, keep);
+                    case 5 -> camps = camps.subList(0, keep);
+                    case 6 -> regions = regions.subList(0, keep);
+                    default -> throw new IllegalStateException("Invalid map detail group");
+                }
+                result = new MapDataPayload(viewerStateId, viewerStateName, chunks, states, settlements, alerts, roads, camps,
+                        result.logisticsTruncated() || largest == 4 || largest == 5, regions, true);
+            }
+        } finally { buffer.release(); }
+    }
+    private static <T> int listBytes(RegistryFriendlyByteBuf buffer, List<T> values, Writer<T> writer) {
+        buffer.clear(); writeList(buffer, values, writer); return buffer.readableBytes();
+    }
     //method to register the packet type with the network system
     public static final Type<MapDataPayload> TYPE = new Type<>(
             Identifier.fromNamespaceAndPath(MinecraftEmpires.MODID, "map_data")
@@ -43,12 +87,22 @@ public record MapDataPayload( //weird ai formatting, i like it tho
         breachAlerts = List.copyOf(breachAlerts);
         roads = List.copyOf(roads);
         camps = List.copyOf(camps);
+        politicalRegions = List.copyOf(politicalRegions);
+        if (politicalRegions.size() > 256) throw new IllegalArgumentException("Too many political regions");
         if (roads.size() > MAX_ROAD_POINTS || camps.size() > MAX_VISIBLE_CAMPS
                 || roads.stream().mapToInt(road -> road.points().size()).sum() > MAX_ROAD_POINTS)
             throw new IllegalArgumentException("Too much map infrastructure geometry");
     }
 
     // Existing snapshots/tests can omit infrastructure while the extended codec stays versioned.
+    public MapDataPayload(UUID viewerStateId, String viewerStateName, List<MapChunkData> chunks, List<StateSummary> states,
+            List<SettlementSummary> settlements, List<BreachAlert> alerts, List<RoadSummary> roads, List<CampSummary> camps, boolean truncated) {
+        this(viewerStateId, viewerStateName, chunks, states, settlements, alerts, roads, camps, truncated, List.of());
+    }
+    public MapDataPayload(UUID viewerStateId, String viewerStateName, List<MapChunkData> chunks, List<StateSummary> states,
+            List<SettlementSummary> settlements, List<BreachAlert> alerts, List<RoadSummary> roads, List<CampSummary> camps, boolean truncated, List<PoliticalRegion> regions) {
+        this(viewerStateId, viewerStateName, chunks, states, settlements, alerts, roads, camps, truncated, regions, false);
+    }
     public MapDataPayload(UUID viewerStateId, String viewerStateName, List<MapChunkData> chunks,
             List<StateSummary> states, List<SettlementSummary> settlements, List<BreachAlert> breachAlerts) {
         this(viewerStateId, viewerStateName, chunks, states, settlements, breachAlerts, List.of(), List.of(), false);
@@ -65,6 +119,8 @@ public record MapDataPayload( //weird ai formatting, i like it tho
                 readList(buffer, BreachAlert::new),
                 readRoads(buffer),
                 readBoundedList(buffer, CampSummary::new, MAX_VISIBLE_CAMPS),
+                buffer.readBoolean(),
+                readBoundedList(buffer, PoliticalRegion::new, 256),
                 buffer.readBoolean()
         );
     }
@@ -80,6 +136,8 @@ public record MapDataPayload( //weird ai formatting, i like it tho
         writeList(buffer, roads, RoadSummary::write);
         writeList(buffer, camps, CampSummary::write);
         buffer.writeBoolean(logisticsTruncated);
+        writeList(buffer, politicalRegions, PoliticalRegion::write);
+        buffer.writeBoolean(claimsTruncated);
     }
 
     //method for getting the packet type
@@ -91,6 +149,59 @@ public record MapDataPayload( //weird ai formatting, i like it tho
     //method for creating an empty packet
     public static MapDataPayload empty() {
         return new MapDataPayload(null, "", List.of(), List.of(), List.of(), List.of());
+    }
+    public record PoliticalRegion(long key, UUID owner, long[] land, long observedAt) {
+        public PoliticalRegion { land = land.clone(); if (land.length > 64) throw new IllegalArgumentException("Oversized political mask"); }
+        public PoliticalRegion(RegistryFriendlyByteBuf b) { this(b.readLong(), readNullableUuid(b), readMask(b), b.readLong()); }
+        private static long[] readMask(RegistryFriendlyByteBuf b) { int n = b.readVarInt(); if (n < 0 || n > 64) throw new IllegalArgumentException("Invalid mask"); long[] result = new long[n]; for (int i = 0; i < n; i++) result[i] = b.readLong(); return result; }
+        private void write(RegistryFriendlyByteBuf b) { b.writeLong(key); writeNullableUuid(b, owner); b.writeVarInt(land.length); for (long word : land) b.writeLong(word); b.writeLong(observedAt); }
+    }
+    /** Rendering estimates are deliberately outside terrain/navigation packets. */
+    public record CoastKey(int tileX, int tileZ, int step) {
+        public static final int CELLS = 16, SIDE = CELLS + 1, SAMPLES = SIDE * SIDE;
+        public CoastKey {
+            if (step < 4 || step > 2048 || (step & (step - 1)) != 0
+                    || Math.abs((long) tileX * step * CELLS) > 30_000_000L + step * CELLS
+                    || Math.abs((long) tileZ * step * CELLS) > 30_000_000L + step * CELLS) throw new IllegalArgumentException("Invalid coast tile");
+        }
+        public int blocks() { return step * CELLS; }
+        public int x() { return tileX * blocks(); }
+        public int z() { return tileZ * blocks(); }
+        CoastKey(RegistryFriendlyByteBuf b) { this(b.readInt(), b.readInt(), b.readVarInt()); }
+        void write(RegistryFriendlyByteBuf b) { b.writeInt(tileX); b.writeInt(tileZ); b.writeVarInt(step); }
+    }
+    public record CoastStamp(CoastKey key, long version) {
+        public CoastStamp { if (version < 1) throw new IllegalArgumentException("Invalid coast revision"); }
+        CoastStamp(RegistryFriendlyByteBuf b) { this(new CoastKey(b), b.readVarLong()); }
+        void write(RegistryFriendlyByteBuf b) { key.write(b); b.writeVarLong(version); }
+    }
+    /** Signed seed-density samples. Unknown corners stay transparent; this is never surveyed terrain. */
+    public record CoastTile(CoastKey key, long version, boolean detailed, short[] heights) {
+        public static final short UNKNOWN = Short.MIN_VALUE;
+        public CoastTile {
+            if (version < 1 || heights.length != CoastKey.SAMPLES) throw new IllegalArgumentException("Invalid coast samples");
+            heights = heights.clone();
+        }
+        @Override public short[] heights() { return heights.clone(); }
+        public short heightAt(int index) { return heights[index]; }
+        public boolean coastal() {
+            short low = Short.MAX_VALUE, high = Short.MIN_VALUE;
+            for (short value : heights) if (value != UNKNOWN) { low = (short) Math.min(low, value); high = (short) Math.max(high, value); }
+            return low <= 0 && high > 0;
+        }
+        @Override public boolean equals(Object other) { return other instanceof CoastTile tile && key.equals(tile.key) && version == tile.version && detailed == tile.detailed && java.util.Arrays.equals(heights, tile.heights); }
+        @Override public int hashCode() { return java.util.Objects.hash(key, version, detailed, java.util.Arrays.hashCode(heights)); }
+        CoastTile(RegistryFriendlyByteBuf b) { this(new CoastKey(b), b.readVarLong(), b.readBoolean(), readHeights(b)); }
+        private static short[] readHeights(RegistryFriendlyByteBuf b) { short[] values = new short[CoastKey.SAMPLES]; for (int i = 0; i < values.length; i++) values[i] = b.readShort(); return values; }
+        void write(RegistryFriendlyByteBuf b) { key.write(b); b.writeVarLong(version); b.writeBoolean(detailed); for (short value : heights) b.writeShort(value); }
+    }
+    public record OverviewPayload(UUID viewer, List<CoastTile> tiles, List<PoliticalRegion> regions, boolean unsupported) implements CustomPacketPayload {
+        public static final Type<OverviewPayload> TYPE = new Type<>(Identifier.fromNamespaceAndPath(MinecraftEmpires.MODID, "overview"));
+        public static final StreamCodec<RegistryFriendlyByteBuf, OverviewPayload> STREAM_CODEC = StreamCodec.ofMember(OverviewPayload::write, OverviewPayload::new);
+        public OverviewPayload { tiles = List.copyOf(tiles); regions = List.copyOf(regions); if (tiles.size() > 12 || regions.size() > 256) throw new IllegalArgumentException("Oversized overview"); }
+        public OverviewPayload(RegistryFriendlyByteBuf b) { this(b.readUUID(), readBoundedList(b, CoastTile::new, 12), readBoundedList(b, PoliticalRegion::new, 256), b.readBoolean()); }
+        void write(RegistryFriendlyByteBuf b) { b.writeUUID(viewer); writeList(b, tiles, CoastTile::write); writeList(b, regions, PoliticalRegion::write); b.writeBoolean(unsupported); }
+        @Override public Type<? extends CustomPacketPayload> type() { return TYPE; }
     }
 
     //method for creating a packet with only the viewer state information
@@ -183,8 +294,12 @@ public record MapDataPayload( //weird ai formatting, i like it tho
             int population,
             int garrisonCapacity,
             boolean capital,
-            boolean garrisoned
+            boolean garrisoned,
+            SettlementData.Kind kind
     ) {
+        public SettlementSummary(String settlementId, UUID stateId, String settlementName, long packedCenterChunk, int tier, int population, int garrisonCapacity, boolean capital, boolean garrisoned) {
+            this(settlementId, stateId, settlementName, packedCenterChunk, tier, population, garrisonCapacity, capital, garrisoned, tier >= 2 ? SettlementData.Kind.CITY : SettlementData.Kind.TOWN);
+        }
         public SettlementSummary {
             settlementId = settlementId == null ? "" : settlementId;
             settlementName = settlementName == null ? "Unnamed Province" : settlementName;
@@ -200,7 +315,8 @@ public record MapDataPayload( //weird ai formatting, i like it tho
                     buffer.readVarInt(),
                     buffer.readVarInt(),
                     buffer.readBoolean(),
-                    buffer.readBoolean()
+                    buffer.readBoolean(),
+                    buffer.readEnum(SettlementData.Kind.class)
             );
         }
 
@@ -214,6 +330,7 @@ public record MapDataPayload( //weird ai formatting, i like it tho
             buffer.writeVarInt(garrisonCapacity);
             buffer.writeBoolean(capital);
             buffer.writeBoolean(garrisoned);
+            buffer.writeEnum(kind);
         }
     }
 

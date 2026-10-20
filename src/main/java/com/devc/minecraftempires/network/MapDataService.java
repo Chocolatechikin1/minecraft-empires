@@ -85,6 +85,12 @@ public final class MapDataService {
     };
 
     private MapDataService() {}
+    private static final Map<UUID, RequestMapDataPayload> VIEWPORTS = new HashMap<>();
+    public static void recordViewport(UUID player, RequestMapDataPayload viewport) { VIEWPORTS.put(player, viewport); }
+    public static void clearViewport(UUID player) {
+        VIEWPORTS.remove(player);
+        for (var runtime : TERRAIN_RUNTIMES.values()) runtime.geography.forgetPreview(player);
+    }
 
     //builds the map data payload for a given player, applying fog-of-war
     public static MapDataPayload buildPayload(ServerPlayer player) {
@@ -95,12 +101,22 @@ public final class MapDataService {
         StateData viewerState = stateManager.getStateByPlayer(player.getUUID());
 
         if (viewerState == null) return MapDataPayload.empty();
+        var viewport = VIEWPORTS.getOrDefault(player.getUUID(), new RequestMapDataPayload());
+        int cameraX = viewport.span() == 0 ? player.blockPosition().getX() : viewport.centerX();
+        int cameraZ = viewport.span() == 0 ? player.blockPosition().getZ() : viewport.centerZ();
+        int radius = viewport.span() == 0 ? 4096 : viewport.span() / 2 + 1024;
+        java.util.function.Predicate<BlockPos> inViewport = p -> Math.abs((long) p.getX() - cameraX) <= radius && Math.abs((long) p.getZ() - cameraZ) <= radius;
 
         //get the viewer's state ID and all claims, then determine which states are visible due to war or scouting
         UUID viewerStateId = viewerState.getStateId();
         Map<ChunkPos, ChunkData> allClaims = claimManager.getClaimsView();
         Set<UUID> warVisibleStateIds = getWarVisibleStateIds(viewerState);
-        ScoutingResult scouting = findScoutedForeignChunks(allClaims, viewerStateId);
+        Map<ChunkPos, ChunkData> viewportClaims = new LinkedHashMap<>();
+        boolean claimsTruncated = false;
+        for (var entry : allClaims.entrySet()) if (inViewport.test(new BlockPos(entry.getKey().x() * 16, 0, entry.getKey().z() * 16))) {
+            if (viewportClaims.size() < 32768) viewportClaims.put(entry.getKey(), entry.getValue()); else claimsTruncated = true;
+        }
+        ScoutingResult scouting = findScoutedForeignChunks(viewportClaims, viewerStateId);
         Set<Long> scouted = new HashSet<>(scouting.scoutedForeignChunks());
         Set<UUID> encountered = new HashSet<>(scouting.borderingStateIds());
         for (BlockPos origin : scoutingOrigins(ArmyManager.get(level), viewerStateId)) {
@@ -129,7 +145,7 @@ public final class MapDataService {
         Map<String, Integer> settlementTiers = new HashMap<>();
         Set<Long> visibleChunkPositions = new HashSet<>();
 
-        for (Map.Entry<ChunkPos, ChunkData> entry : allClaims.entrySet()) { //while iterating through all claims, check if the chunk is visible to the player based on ownership, war visibility, or scouting
+        for (Map.Entry<ChunkPos, ChunkData> entry : viewportClaims.entrySet()) { //while iterating through all claims, check if the chunk is visible to the player based on ownership, war visibility, or scouting
             ChunkPos position = entry.getKey();
             ChunkData data = entry.getValue();
             UUID ownerStateId = data.getOwnerUUID();
@@ -149,6 +165,11 @@ public final class MapDataService {
         }
 
         visibleChunks = compressHorizontalRuns(visibleChunks);
+        visibleChunks.sort(Comparator.comparingDouble(chunk -> {
+            ChunkPos pos = ChunkPos.unpack(chunk.packedChunkPos());
+            double dx = pos.x() + chunk.runLength() / 2.0 - cameraX / 16.0, dz = pos.z() + .5 - cameraZ / 16.0;
+            return dx * dx + dz * dz;
+        }));
 
         List<MapDataPayload.StateSummary> stateSummaries = new ArrayList<>();
         for (UUID visibleStateId : visibleStateIds) {
@@ -164,6 +185,13 @@ public final class MapDataService {
         }
         stateSummaries.sort(Comparator.comparing(MapDataPayload.StateSummary::stateName,
                 String.CASE_INSENSITIVE_ORDER));
+        for (UUID id : visibleStateIds) stateManager.observeNation(viewerStateId, id, level.getGameTime());
+        Set<UUID> summarizedStates = new HashSet<>(); stateSummaries.forEach(s -> summarizedStates.add(s.stateId()));
+        Set<UUID> rememberedOwners = new HashSet<>();
+        for (var r : stateManager.getKnownRegions(viewerStateId)) { ChunkPos p = ChunkPos.unpack(r.key()); if (inViewport.test(new BlockPos(p.x() * 1024 + 512, 0, p.z() * 1024 + 512))) rememberedOwners.add(r.owner()); }
+        for (var s : stateManager.getKnownSettlements(viewerStateId)) if (inViewport.test(s.position())) rememberedOwners.add(s.owner());
+        for (var known : stateManager.getKnownNations(viewerStateId)) if (rememberedOwners.contains(known.id()) && summarizedStates.add(known.id()))
+            stateSummaries.add(new MapDataPayload.StateSummary(known.id(), known.name(), known.tier().name(), 0, 0, 0, false, false));
 
         Collection<SettlementData> allSettlements = stateManager.getAllSettlements();
         Map<UUID, UUID> capitalSettlementByState = new HashMap<>();
@@ -175,6 +203,7 @@ public final class MapDataService {
         Set<String> summarizedSettlementIds = new HashSet<>();
 
         for (SettlementData settlement : allSettlements) {
+            if (!inViewport.test(settlement.getCenterAltarPos()) || settlementSummaries.size() >= 8192) continue;
             UUID owningStateId = settlement.getOwningStateId();
             if (!visibleStateIds.contains(owningStateId)) continue;
 
@@ -191,9 +220,12 @@ public final class MapDataService {
                     isViewer ? settlement.getLocalPopulation() : 0,
                     isViewer ? settlement.getGarrisonCapacity() : 0,
                     settlement.getSettlementId().equals(capitalSettlementByState.get(owningStateId)),
-                    settlementGarrisonStatus.getOrDefault(settlementId, false)));
+                    settlementGarrisonStatus.getOrDefault(settlementId, false), settlement.getKind()));
             summarizedSettlementIds.add(settlementId);
+            stateManager.observeSettlement(viewerStateId, settlement.getSettlementId(), level.getGameTime());
         }
+        for (var known : stateManager.getKnownSettlements(viewerStateId)) if (settlementSummaries.size() < 8192 && inViewport.test(known.position()) && summarizedSettlementIds.add(known.id().toString()))
+            settlementSummaries.add(new MapDataPayload.SettlementSummary(known.id().toString(), known.owner(), known.name(), ChunkPos.containing(known.position()).pack(), known.tier(), 0, 0, false, false, known.kind()));
 
         // Phase 1 legacy: fallback for settlements without full SettlementData
         for (Map.Entry<String, ChunkPos> centerEntry : claimManager.getSettlementCentersView().entrySet()) {
@@ -268,7 +300,25 @@ public final class MapDataService {
         return new MapDataPayload(viewerStateId, viewerState.getStateName(), visibleChunks,
                 stateSummaries, settlementSummaries,
                 BreachAlertService.getVisibleRecentAlerts(level, viewerStateId, visibleChunkPositions),
-                roads, camps, logisticsTruncated);
+                roads, camps, logisticsTruncated, stateManager.getKnownRegions(viewerStateId).stream()
+                    .filter(r -> { ChunkPos p = ChunkPos.unpack(r.key()); return inViewport.test(new BlockPos(p.x() * 1024 + 512, 0, p.z() * 1024 + 512)); })
+                    .sorted(Comparator.comparingLong(StateManager.KnownRegion::observedAt).reversed()).limit(256)
+                    .map(r -> new MapDataPayload.PoliticalRegion(r.key(), r.owner(), r.land(), r.observedAt())).toList(), claimsTruncated).bounded(level.registryAccess());
+    }
+
+    public static MapDataPayload.OverviewPayload buildOverview(ServerPlayer player, RequestMapDataPayload.OverviewRequest request) {
+        ServerLevel level = player.level().getServer().overworld(); StateManager states = StateManager.get(level);
+        StateData viewer = states.getStateByPlayer(player.getUUID()); if (viewer == null) return null;
+        TerrainRuntime runtime = terrainRuntime(level); GeographyPreviewService geography = runtime.geography;
+        // Input handling only queues the viewport; one tick worker samples all players fairly.
+        var tiles = geography.preview(player.getUUID(), level.getGameTime(), request);
+        int radius = request.span() / 2 + 1024;
+        List<MapDataPayload.PoliticalRegion> regions = states.getKnownRegions(viewer.getStateId()).stream().filter(r -> {
+            ChunkPos p = ChunkPos.unpack(r.key()); return Math.abs((long) p.x() * 1024 + 512 - request.centerX()) <= radius
+                    && Math.abs((long) p.z() * 1024 + 512 - request.centerZ()) <= radius;
+        }).sorted(Comparator.comparingLong(StateManager.KnownRegion::observedAt).reversed()).limit(256)
+                .map(r -> new MapDataPayload.PoliticalRegion(r.key(), r.owner(), r.land(), r.observedAt())).toList();
+        return new MapDataPayload.OverviewPayload(viewer.getStateId(), tiles, regions, geography.isUnsupported());
     }
 
     //chunk function for compressing horizontal runs of chunks with the same metadata into a single entry with a run length, improving network efficiency
@@ -1444,7 +1494,7 @@ public final class MapDataService {
         }
     }
 
-    public static void clearTerrainRuntime() { TERRAIN_RUNTIMES.clear(); }
+    public static void clearTerrainRuntime() { TERRAIN_RUNTIMES.clear(); VIEWPORTS.clear(); }
 
     /** Reuse existing state-surveyed surface flags; unknown land never forces chunk loading/generation. */
     public static boolean isKnownWaterOrLava(ServerLevel level, UUID stateId, BlockPos position) {
@@ -1460,6 +1510,7 @@ public final class MapDataService {
 
     public static void tickTerrain(ServerLevel level) {
         TerrainRuntime runtime = TERRAIN_RUNTIMES.computeIfAbsent(level, ignored -> new TerrainRuntime());
+        runtime.geography.tickPreview(level);
         long time = level.getGameTime();
         runtime.navigationTick = time;
         long deadline = System.nanoTime() + 2_000_000L;
@@ -1756,6 +1807,7 @@ public final class MapDataService {
         }
     }
     private static final class TerrainRuntime {
+        private final GeographyPreviewService geography = new GeographyPreviewService();
         private final Map<Long, NavigationChunk> navigation = new LinkedHashMap<>(256, .75f, true);
         private final Map<Long, Long> navigationTimes = new HashMap<>();
         private final Map<ComponentKey, LocalComponents> components = new HashMap<>();

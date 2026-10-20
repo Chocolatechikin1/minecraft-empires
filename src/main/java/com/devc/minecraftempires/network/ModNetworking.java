@@ -39,11 +39,28 @@ public final class ModNetworking {
     private static final Map<UUID, Long> mapRequestCooldowns = new HashMap<>();
     private static final long MAP_REQUEST_COOLDOWN_MS = 2000L; // 2 seconds between map refreshes
     private static final Map<UUID, Long> terrainRequestCooldowns = new HashMap<>();
+    private static final Map<UUID, Long> overviewCooldowns = new HashMap<>();
+    private static final Map<UUID, Long> newsCooldowns = new HashMap<>();
     private static final Map<UUID, Long> supplySelectionCooldowns = new HashMap<>();
     private static final long SUPPLY_SELECTION_COOLDOWN_MS = 200L;
 
     public static void registerPayloads(RegisterPayloadHandlersEvent event) {
-        PayloadRegistrar registrar = event.registrar("11");
+        PayloadRegistrar registrar = event.registrar("15");
+        registrar.playToClient(ManagementDataPayload.NewsPage.TYPE, ManagementDataPayload.NewsPage.STREAM_CODEC);
+        registrar.playToServer(ManagementDataPayload.NewsRequest.TYPE, ManagementDataPayload.NewsRequest.STREAM_CODEC, (p, c) -> c.enqueueWork(() -> {
+            if (!(c.player() instanceof ServerPlayer player)) return;
+            long now = System.currentTimeMillis(); Long previous = newsCooldowns.get(player.getUUID());
+            if (previous != null && now >= previous && now - previous < 200) return;
+            newsCooldowns.put(player.getUUID(), now);
+            PacketDistributor.sendToPlayer(player, ManagementDataService.buildNews(player, p));
+        }));
+        registrar.playToClient(MapDataPayload.OverviewPayload.TYPE, MapDataPayload.OverviewPayload.STREAM_CODEC);
+        registrar.playToServer(RequestMapDataPayload.OverviewRequest.TYPE, RequestMapDataPayload.OverviewRequest.STREAM_CODEC, (p, c) -> c.enqueueWork(() -> {
+            if (!(c.player() instanceof ServerPlayer player)) return;
+            long now = System.currentTimeMillis(); Long previous = overviewCooldowns.get(player.getUUID());
+            if (previous != null && now - previous < 300) return; overviewCooldowns.put(player.getUUID(), now);
+            var response = MapDataService.buildOverview(player, p); if (response != null) PacketDistributor.sendToPlayer(player, response);
+        }));
         registrar.playToServer(ArmyActionPayload.CampaignAction.TYPE, ArmyActionPayload.CampaignAction.STREAM_CODEC, ArmyManager::handleCampaignAction);
         registrar.playToClient(ArmyActionPayload.RoutePreview.TYPE, ArmyActionPayload.RoutePreview.STREAM_CODEC);
         registrar.playToClient(StateActionPayload.BridgeStatus.TYPE, StateActionPayload.BridgeStatus.STREAM_CODEC);
@@ -132,6 +149,7 @@ public final class ModNetworking {
             return; // still within cooldown — silently drop the request
         }
         mapRequestCooldowns.put(player.getUUID(), now);
+        MapDataService.recordViewport(player.getUUID(), payload);
 
         sendSnapshots(player);
     }
@@ -161,9 +179,14 @@ public final class ModNetworking {
         });
     }
     public static void clearPlayer(UUID id) {
+        MapDataService.clearViewport(id);
         mapRequestCooldowns.remove(id); terrainRequestCooldowns.remove(id); supplySelectionCooldowns.remove(id); LogisticsManager.clearPlayer(id);
+        overviewCooldowns.remove(id);
+        newsCooldowns.remove(id);
     }
     public static void clearAll() {
         mapRequestCooldowns.clear(); terrainRequestCooldowns.clear(); supplySelectionCooldowns.clear(); LogisticsManager.clearAllSelections();
+        overviewCooldowns.clear();
+        newsCooldowns.clear();
     }
 }

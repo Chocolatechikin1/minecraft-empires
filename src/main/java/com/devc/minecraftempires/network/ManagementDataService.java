@@ -11,6 +11,18 @@ import java.util.*;
 //network handler for building and sending settlement management data to the client
 public final class ManagementDataService {
     private ManagementDataService() {}
+    public static ManagementDataPayload.NewsPage buildNews(ServerPlayer player, ManagementDataPayload.NewsRequest request) {
+        var level = player.level().getServer().overworld(); var states = StateManager.get(level);
+        var state = states.getStateByPlayer(player.getUUID()); UUID viewer = state == null ? null : state.getStateId();
+        var page = states.getNews().browse(viewer, states, request.before(), request.through(), WorldNews.MAX_PAGE, request.filter(), request.ownOnly());
+        var entries = page.reports().stream().map(report -> {
+            var place = states.getKnownSettlement(viewer, report.settlement());
+            return new ManagementDataPayload.NewsEntry(report.id(), report.sequence(), report.time(), report.kind(), report.headline(),
+                    place == null ? null : place.id(), place == null ? null : place.position());
+        }).toList();
+        return new ManagementDataPayload.NewsPage(request.requestId(), viewer, request.before(), page.through(), request.filter(), request.ownOnly(),
+                page.hasOlder(), page.trimmed(), level.getGameTime(), entries);
+    }
     public static ManagementDataPayload build(ServerPlayer player) {
         var level = player.level().getServer().overworld();
         var states = StateManager.get(level);
@@ -22,7 +34,7 @@ public final class ManagementDataService {
                 .sorted(Comparator.comparing(s -> s.getSettlementName().toLowerCase(Locale.ROOT)))
                 .map(s -> new ManagementDataPayload.SettlementEntry(s.getSettlementId(), s.getSettlementName(),
                         s.getCenterAltarPos(), s.getSettlementTier(), s.getLocalPopulation(), s.getGarrisonCapacity(),
-                        s.isMartialLaw(), s.getSupplyPreparationTicks())).toList();
+                        s.isMartialLaw(), s.getSupplyPreparationTicks(), s.getKind())).toList();
         var legions = new ArrayList<ManagementDataPayload.LegionEntry>();
         var cohorts = new ArrayList<ManagementDataPayload.CohortEntry>();
         var supplies = new ArrayList<ManagementDataPayload.CohortSupplyEntry>();
@@ -56,10 +68,15 @@ public final class ManagementDataService {
             }
         }
         UUID own = state.getStateId();
-        var relations = states.getAllStates().stream().filter(s -> !s.getStateId().equals(own))
-                .sorted(Comparator.comparing(StateData::getStateName, String.CASE_INSENSITIVE_ORDER))
-                .map(s -> new ManagementDataPayload.RelationEntry(s.getStateId(), s.getStateName(), states.areAtWar(own, s.getStateId()),
-                        states.hasPassage(s.getStateId(), own), states.hasPassage(own, s.getStateId()), states.hasPeaceOffer(s.getStateId(), own))).toList();
+        var relations = states.getKnownNations(own).stream()
+                .sorted(Comparator.comparing(StateManager.KnownNation::name, String.CASE_INSENSITIVE_ORDER))
+                .map(s -> {
+                    var offer = states.getPlayerConflicts().terms(own, s.id(), level.getGameTime());
+                    return new ManagementDataPayload.RelationEntry(s.id(), s.name(), states.areAtWar(own, s.id()),
+                        states.hasPassage(s.id(), own), states.hasPassage(own, s.id()), states.hasPeaceOffer(s.id(), own), s.ai(),
+                        offer == null ? null : offer.token(), offer == null ? "" : offer.summary());
+                }).toList();
+        for (var force : armies.getStrategicForcesForState(own)) legions.add(new ManagementDataPayload.LegionEntry(force.id(), force.position(), force.soldiers(), true));
         // Only the owning state receives camp stock and rooted-connection details.
         var camps = logistics.getCamps().stream().filter(c -> own.equals(c.ownerId()))
                 .sorted(Comparator.comparing(LogisticsManager.Camp::id))
