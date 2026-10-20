@@ -175,7 +175,7 @@ public class MinecraftEmpires {
     public void onServerStopping(ServerStoppingEvent event) {
         StateManager.get(event.getServer().overworld()).getPlayerConflicts().close();
         StateManager.get(event.getServer().overworld()).getAIWars().close();
-        StateManager.get(event.getServer().overworld()).getAIRegions().close();
+        StateManager.get(event.getServer().overworld()).getRegionInfo().close();
         BattleManager.resolveAllOnShutdown(event.getServer());
         BattleManager.clearAll();
         ModNetworking.clearAll();
@@ -194,7 +194,7 @@ public class MinecraftEmpires {
         StateManager.get(event.getServer().overworld()).getPlayerConflicts().tick(event.getServer().overworld());
         StateManager.get(event.getServer().overworld()).getAIWars().tick(event.getServer().overworld());
         MapDataService.tickTerrain(event.getServer().overworld());
-        StateManager.get(event.getServer().overworld()).getAIRegions().tick(event.getServer().overworld());
+        StateManager.get(event.getServer().overworld()).getRegionInfo().tick(event.getServer().overworld());
     }
 
     // Chunk load events only enqueue positions. Sampling waits for a server tick after promotion to FULL.

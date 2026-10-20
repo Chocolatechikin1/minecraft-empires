@@ -21,12 +21,12 @@ import java.util.concurrent.CompletionException;
 
 /** Seeded planning plus bounded initialization journals. Existing managers remain the live domain owners. */
 /*
-This class handles the AI region information.
-It manages the generation of AI-controlled states, their settlements, and strategic regions based on a seeded random generation system. 
+This class handles regional generation information.
+It manages NPC-controlled states, independent settlements, and strategic regions based on a seeded random generation system. 
 The class includes methods for creating and managing AI states, ensuring that they adhere to specific rules regarding spacing, biome restrictions, and progression requirements.
 These regions are initialized in a way that allows for consistent and reproducible world generation, while also providing mechanisms for recovery and management of AI states.
 */
-public final class AIRegionInfo {
+public final class RegionInfo {
     public static final int VERSION = 2, REGION_BLOCKS = ClaimManager.STRATEGIC_REGION_CHUNKS * 16;
     public static final int MAX_PENDING = 8, MAX_JOURNALS = 256;
     private static final long JOURNAL_BYTES = 2 * 1024 * 1024, DOMAIN_BYTES = 64 * 1024 * 1024;
@@ -145,7 +145,7 @@ public final class AIRegionInfo {
     private boolean started, closed, checkedDisabled;
     private int playerCursor;
 
-    public AIRegionInfo(StateManager states) { this.states = Objects.requireNonNull(states); }
+    public RegionInfo(StateManager states) { this.states = Objects.requireNonNull(states); }
     public Manifest manifest() { return manifest; }
     public int initializedDistricts() { return sealed.size(); }
     public int queuedDistricts() { return pending.size(); }
@@ -628,7 +628,7 @@ public final class AIRegionInfo {
     }
     private void fail(RuntimeException error) {
         failure = error.getCause() == null ? error.toString() : error.getCause().toString(); phase = "BLOCKED";
-        System.getLogger(AIRegionInfo.class.getName()).log(System.Logger.Level.ERROR, "AI initialization stopped safely: " + failure);
+        System.getLogger(RegionInfo.class.getName()).log(System.Logger.Level.ERROR, "AI initialization stopped safely: " + failure);
     }
     /** Futures contain immutable tags/plans only, so late completion cannot mutate a closed world. */
     public void close() {

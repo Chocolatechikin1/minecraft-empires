@@ -90,7 +90,7 @@ public class StateManager extends SavedData {
     private final WorldNews news = new WorldNews(this::setDirty);
     private final AIStateController aiController = new AIStateController();
     private final Set<UUID> aiInitializations = new HashSet<>();
-    private final AIRegionInfo aiRegions = new AIRegionInfo(this);
+    private final RegionInfo regionInfo = new RegionInfo(this);
     private final AIWarManager aiWars = new AIWarManager(this);
     private final PlayerConflictManager playerConflicts = new PlayerConflictManager(this);
     private long interactionSequence;
@@ -127,7 +127,7 @@ public class StateManager extends SavedData {
         return true;
     }
     public AIStateController getAIController() { return aiController; }
-    public AIRegionInfo getAIRegions() { return aiRegions; }
+    public RegionInfo getRegionInfo() { return regionInfo; }
     public AIWarManager getAIWars() { return aiWars; }
     public PlayerConflictManager getPlayerConflicts() { return playerConflicts; }
     public long getInteractionSequence() { return interactionSequence; }

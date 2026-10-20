@@ -37,7 +37,7 @@ public class StateCommand {
                     StateManager manager = StateManager.get(context.getSource().getLevel());
                     context.getSource().sendSuccess(() -> Component.literal("AI generation "
                             + (com.devc.minecraftempires.Config.AI_GENERATION_ENABLED.get() ? "enabled: " : "disabled: ")
-                            + manager.getAIRegions().status() + "; macro wars " + manager.getAIWars().status() + "; player handover " + manager.getPlayerConflicts().status()), false);
+                            + manager.getRegionInfo().status() + "; macro wars " + manager.getAIWars().status() + "; player handover " + manager.getPlayerConflicts().status()), false);
                     return 1;
                 })
             )
