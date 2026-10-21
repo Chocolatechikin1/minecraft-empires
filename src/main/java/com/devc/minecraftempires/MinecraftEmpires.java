@@ -68,6 +68,13 @@ public class MinecraftEmpires {
     public static final DeferredRegister.Items ITEMS = DeferredRegister.createItems(MODID);
     // Create a Deferred Register to hold CreativeModeTabs which will all be registered under the "minecraftempires" namespace
     public static final DeferredRegister<CreativeModeTab> CREATIVE_MODE_TABS = DeferredRegister.create(Registries.CREATIVE_MODE_TAB, MODID);
+    // Construction receipts are saved with their chunk's blocks, independently of settlement ownership saves.
+    public static final DeferredRegister<net.neoforged.neoforge.attachment.AttachmentType<?>> CONSTRUCTION_ATTACHMENTS =
+            DeferredRegister.create(net.neoforged.neoforge.registries.NeoForgeRegistries.ATTACHMENT_TYPES, MODID);
+    public static final DeferredHolder<net.neoforged.neoforge.attachment.AttachmentType<?>, net.neoforged.neoforge.attachment.AttachmentType<net.minecraft.nbt.CompoundTag>> CONSTRUCTION_CHUNK =
+            CONSTRUCTION_ATTACHMENTS.register("construction_chunk", () -> net.neoforged.neoforge.attachment.AttachmentType.builder(() -> new net.minecraft.nbt.CompoundTag())
+                    // Chunk snapshots must not retain references to subsequently advancing live receipts.
+                    .serialize(net.minecraft.nbt.CompoundTag.CODEC.xmap(net.minecraft.nbt.CompoundTag::copy, net.minecraft.nbt.CompoundTag::copy).fieldOf("data")).build());
 
     // Creates a new Block with the id "minecraftempires:example_block", combining the namespace and path
     public static final DeferredBlock<Block> EXAMPLE_BLOCK = BLOCKS.registerSimpleBlock("example_block", p -> p.mapColor(MapColor.STONE));
@@ -110,6 +117,7 @@ public class MinecraftEmpires {
         ITEMS.register(modEventBus);
         // Register the Deferred Register to the mod event bus so tabs get registered
         CREATIVE_MODE_TABS.register(modEventBus);
+        CONSTRUCTION_ATTACHMENTS.register(modEventBus);
 
         // Register ourselves for server and other game events we are interested in.
         // Note that this is necessary if and only if we want *this* class (MinecraftEmpires) to respond directly to events.
@@ -176,6 +184,7 @@ public class MinecraftEmpires {
         StateManager.get(event.getServer().overworld()).getPlayerConflicts().close();
         StateManager.get(event.getServer().overworld()).getAIWars().close();
         StateManager.get(event.getServer().overworld()).getRegionInfo().close();
+        StateManager.get(event.getServer().overworld()).getConstruction().close();
         BattleManager.resolveAllOnShutdown(event.getServer());
         BattleManager.clearAll();
         ModNetworking.clearAll();
@@ -185,6 +194,7 @@ public class MinecraftEmpires {
 
     @SubscribeEvent
     public void onPlayerLogout(net.neoforged.neoforge.event.entity.player.PlayerEvent.PlayerLoggedOutEvent event) {
+        if(event.getEntity().level() instanceof net.minecraft.server.level.ServerLevel level)StateManager.get(level).getProvinces().clearPlayer(event.getEntity().getUUID());
         ModNetworking.clearPlayer(event.getEntity().getUUID());
     }
 
@@ -195,13 +205,19 @@ public class MinecraftEmpires {
         StateManager.get(event.getServer().overworld()).getAIWars().tick(event.getServer().overworld());
         MapDataService.tickTerrain(event.getServer().overworld());
         StateManager.get(event.getServer().overworld()).getRegionInfo().tick(event.getServer().overworld());
+        StateManager.get(event.getServer().overworld()).getProvinces().tick(event.getServer().overworld());
+        StateManager.get(event.getServer().overworld()).getConstruction().tick(event.getServer().overworld());
     }
 
     // Chunk load events only enqueue positions. Sampling waits for a server tick after promotion to FULL.
     @SubscribeEvent
     public void onTerrainChunkLoad(ChunkEvent.Load event) {
         if (event.getLevel() instanceof net.minecraft.server.level.ServerLevel level)
-            level.getServer().execute(() -> MapDataService.watchTerrainChunk(level, event.getChunk().getPos()));
+            level.getServer().execute(() -> {
+                MapDataService.watchTerrainChunk(level, event.getChunk().getPos());
+                if(level==level.getServer().overworld() && event.isNewChunk())
+                    com.devc.minecraftempires.state.SettlementConstruction.markFresh(event.getChunk());
+            });
     }
 
     @SubscribeEvent
@@ -214,6 +230,16 @@ public class MinecraftEmpires {
     public void onTerrainPlace(net.neoforged.neoforge.event.level.BlockEvent.EntityPlaceEvent event) {
         if (event.getLevel() instanceof net.minecraft.server.level.ServerLevel level)
             level.getServer().execute(() -> MapDataService.invalidateTerrain(level, event.getPos()));
+    }
+    @SubscribeEvent(priority=net.neoforged.bus.api.EventPriority.LOWEST)
+    public void onConstructionPlace(net.neoforged.neoforge.event.level.BlockEvent.EntityPlaceEvent event) {
+        if(event.getEntity() instanceof net.minecraft.world.entity.player.Player && event.getLevel() instanceof net.minecraft.server.level.ServerLevel level)
+            com.devc.minecraftempires.state.SettlementConstruction.recordEdit(level,event.getPos());
+    }
+    @SubscribeEvent(priority=net.neoforged.bus.api.EventPriority.LOWEST)
+    public void onConstructionBreak(BreakBlockEvent event) {
+        if(event.getLevel() instanceof net.minecraft.server.level.ServerLevel level)
+            com.devc.minecraftempires.state.SettlementConstruction.recordEdit(level,event.getPos());
     }
     @SubscribeEvent
     public void onTerrainNeighbors(net.neoforged.neoforge.event.level.BlockEvent.NeighborNotifyEvent event) {

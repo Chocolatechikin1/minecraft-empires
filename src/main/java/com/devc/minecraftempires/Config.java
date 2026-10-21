@@ -36,7 +36,7 @@ public class Config {
 
     // Sprint 8 generation stays opt-in pending live gameplay, multiplayer and performance validation.
     public static final ModConfigSpec.BooleanValue AI_GENERATION_ENABLED = BUILDER
-            .comment("Initialize abstract NPC nations around actual Overworld players. Opt-in during Sprint 8 validation; physical settlement generation remains deferred.")
+            .comment("Initialize abstract NPC nations around actual Overworld players. Opt-in pending gameplay validation; physical construction has its own switch.")
             .define("aiGenerationEnabled", false);
     public static final ModConfigSpec.IntValue AI_NATION_DENSITY = BUILDER
             .comment("NPC coverage target and hard ceiling as a percent of ALL estimated land per region, capped at 60 for new generation. Excluded biomes count as free land. Version 1 worlds retain the old district-density meaning. Saved on first activation.")
@@ -50,6 +50,28 @@ public class Config {
     public static final ModConfigSpec.IntValue AI_GEOGRAPHY_SAMPLES_PER_TICK = BUILDER
             .comment("Maximum coarse generator columns per tick. A shared one-millisecond cooperative budget also applies.")
             .defineInRange("aiGeographySamplesPerTick", 4, 1, 16);
+    public static final ModConfigSpec.IntValue AI_MAX_SETTLEMENTS = BUILDER
+            .comment("Resident settlement admission limit for new version-3 districts. Existing settlements are preserved when capacity is reached.")
+            .defineInRange("aiMaxSettlements", 16384, 4096, 16384);
+
+    public static final ModConfigSpec.BooleanValue PHYSICAL_CONSTRUCTION_ENABLED = BUILDER
+            .comment("Materialize state-owned generated settlements near real players in already loaded, newly generated terrain. Existing player builds and vanilla villages are not adopted by this switch.")
+            .define("physicalConstructionEnabled", true);
+    public static final ModConfigSpec.IntValue CONSTRUCTION_RANGE = BUILDER
+            .comment("Player proximity required to inspect/place construction. This never grants chunk tickets or generates missing chunks.")
+            .defineInRange("constructionRange", 160, 80, 256);
+    public static final ModConfigSpec.IntValue CONSTRUCTION_BLOCKS_PER_TICK = BUILDER
+            .comment("Shared construction inspection/placement work limit per tick, also subject to a cooperative two-millisecond deadline.")
+            .defineInRange("constructionBlocksPerTick", 256, 16, 1024);
+    public static final ModConfigSpec.IntValue CONSTRUCTION_HEIGHT_RANGE = BUILDER
+            .comment("Maximum natural ground-height range across a complete new settlement footprint. Only our generated construction uses this rule.")
+            .defineInRange("constructionHeightRange", 10, 0, 16);
+    public static final ModConfigSpec.IntValue CONSTRUCTION_LOCAL_SLOPE = BUILDER
+            .comment("Maximum adjacent natural ground-height difference on exterior construction approaches. Interiors use bounded level foundations; finished gate ramps require one-block steps.")
+            .defineInRange("constructionLocalSlope", 2, 1, 4);
+    public static final ModConfigSpec.IntValue CONSTRUCTION_SEARCH_RADIUS = BUILDER
+            .comment("Nearby search radius for entirely unbuilt settlements. Search starts at chunk intervals, then refines promising positions; missing chunks are never loaded by this search.")
+            .defineInRange("constructionSearchRadius", 96, 0, 128);
 
     static final ModConfigSpec SPEC = BUILDER.build();
 
