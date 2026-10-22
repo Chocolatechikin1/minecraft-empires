@@ -217,6 +217,7 @@ if (providers.gradleProperty('terrainWorldFixtures').isPresent()) {
     def replayPath = providers.gradleProperty('terrainReplayWorld').orNull
     def replayMode = replayPath != null
     def uiSmokeMode = providers.gradleProperty('terrainUiSmoke').isPresent()
+    def networkMode = providers.gradleProperty('terrainNetwork').isPresent()
     def replayDirectory = replayMode ? file(replayPath) : null
     if (replayMode && !replayDirectory.toPath().toAbsolutePath().normalize().startsWith(layout.buildDirectory.get().asFile.toPath().toAbsolutePath().normalize()))
         throw new GradleException('Replay fixtures must use an isolated directory inside build/.')
@@ -224,6 +225,7 @@ if (providers.gradleProperty('terrainWorldFixtures').isPresent()) {
         outputs.dir fixtureRoot
         inputs.property('replayMode', replayMode)
         inputs.property('uiSmokeMode', uiSmokeMode)
+        inputs.property('networkMode', networkMode)
         doLast {
             def javaFile = new File(fixtureRoot, 'java/terrainharness/Harness.java')
             javaFile.parentFile.mkdirs()
@@ -232,10 +234,13 @@ if (providers.gradleProperty('terrainWorldFixtures').isPresent()) {
 public final class Harness {
     private static final boolean REPLAY = REPLAY_MODE;
     private static final boolean UI = UI_MODE;
+    private static final boolean NETWORK = NETWORK_MODE;
     public Harness(net.neoforged.bus.api.IEventBus bus) {
+        if (NETWORK && net.neoforged.fml.loading.FMLEnvironment.getDist().isClient()) { ClientOnly.registerNetwork(); return; }
         if (UI) { ClientOnly.register(); return; }
         net.neoforged.neoforge.common.NeoForge.EVENT_BUS.addListener((net.neoforged.neoforge.event.server.ServerStartedEvent event) -> {
             try {
+                if (NETWORK) { com.devc.minecraftempires.PreSprint7Regression.startSprint9Network(event.getServer()); return; }
                 if (REPLAY) { com.devc.minecraftempires.PreSprint7Regression.startTerrainReplay(event.getServer()); return; }
                 com.devc.minecraftempires.PreSprint7Regression.terrainSurfaceFixtures();
                 com.devc.minecraftempires.PreSprint7Regression.terrainWorldFixtures(event.getServer().overworld());
@@ -244,6 +249,7 @@ public final class Harness {
             } catch (Throwable failure) { failure.printStackTrace(); if (REPLAY) Runtime.getRuntime().halt(1); else System.exit(1); }
         });
         net.neoforged.neoforge.common.NeoForge.EVENT_BUS.addListener((net.neoforged.neoforge.event.tick.ServerTickEvent.Post event) -> {
+            if (NETWORK) { try { com.devc.minecraftempires.PreSprint7Regression.tickSprint9Network(event.getServer()); } catch(Throwable failure) { failure.printStackTrace(); Runtime.getRuntime().halt(1); } return; }
             if (!REPLAY) return;
             try {
                 if (com.devc.minecraftempires.PreSprint7Regression.tickTerrainReplay(event.getServer())) { System.out.println("TERRAIN_REPLAY_FIXTURES_PASSED"); event.getServer().halt(false); }
@@ -251,6 +257,12 @@ public final class Harness {
         });
     }
     private static final class ClientOnly {
+        static void registerNetwork() {
+            net.neoforged.neoforge.common.NeoForge.EVENT_BUS.addListener((net.neoforged.neoforge.client.event.ClientTickEvent.Post event) -> {
+                try { com.devc.minecraftempires.PreSprint7Regression.Sprint9NetworkClient.tick(); }
+                catch (Throwable failure) { failure.printStackTrace(); Runtime.getRuntime().halt(1); }
+            });
+        }
         static void register() {
             net.neoforged.neoforge.common.NeoForge.EVENT_BUS.addListener((net.neoforged.neoforge.client.event.ClientTickEvent.Post event) -> {
                 try { com.devc.minecraftempires.PreSprint7Regression.ClientUiSmoke.tick(); }
@@ -259,7 +271,7 @@ public final class Harness {
         }
     }
 }
-'''.replace('REPLAY_MODE', replayMode.toString()).replace('UI_MODE', uiSmokeMode.toString())
+'''.replace('REPLAY_MODE', replayMode.toString()).replace('UI_MODE', uiSmokeMode.toString()).replace('NETWORK_MODE', networkMode.toString())
             def metadata = new File(fixtureRoot, 'resources/META-INF/neoforge.mods.toml')
             metadata.parentFile.mkdirs()
             metadata.text = '''modLoader="javafml"
@@ -318,6 +330,9 @@ displayName="Isolated terrain verification"
     if (providers.gradleProperty('terrainDevelopmentOnly').isPresent()) neoForge.runs.gameTestServer {
         systemProperty 'minecraftempires.developmentOnly', 'true'
     }
+    if (providers.gradleProperty('terrainQualificationOnly').isPresent()) neoForge.runs.gameTestServer {
+        systemProperty 'minecraftempires.qualificationOnly', 'true'
+    }
     if (providers.gradleProperty('terrainStartupOnly').isPresent()) neoForge.runs.gameTestServer {
         systemProperty 'minecraftempires.startupOnly', 'true'
     }
@@ -331,6 +346,7 @@ displayName="Isolated terrain verification"
         gameDirectory = replayDirectory
         if (providers.gradleProperty('terrainStrategicReplay').isPresent()) systemProperty 'minecraftempires.strategicReplay', 'true'
         providers.gradleProperty('sprint8Process').orNull?.with { mode -> systemProperty 'minecraftempires.sprint8Process', mode }
+        providers.gradleProperty('sprint9Process').orNull?.with { mode -> systemProperty 'minecraftempires.sprint9Process', mode }
         providers.gradleProperty('terrainSitingReplay').orNull?.with { mode -> systemProperty 'minecraftempires.sitingReplay', mode }
         if (providers.gradleProperty('terrainVillageReplay').isPresent()) systemProperty 'minecraftempires.villageReplay', 'true'
     }
@@ -338,5 +354,20 @@ displayName="Isolated terrain verification"
         gameDirectory = layout.buildDirectory.dir('terrain-harness/client').get().asFile
         systemProperty 'minecraftempires.coastFixtureOutput', layout.buildDirectory.file('coast-preview-render.dat').get().asFile.absolutePath
         programArguments.addAll '--width', '1280', '--height', '900'
+    }
+    if (networkMode) {
+        def networkRole = providers.gradleProperty('terrainNetwork').get()
+        def networkRoot = layout.buildDirectory.dir('sprint9-phase8-network').get().asFile
+        neoForge.runs.server {
+            gameDirectory = new File(networkRoot, 'server')
+            systemProperty 'minecraftempires.networkRole', 'server'
+            systemProperty 'minecraftempires.networkRoot', networkRoot.absolutePath
+        }
+        neoForge.runs.client {
+            gameDirectory = new File(networkRoot, networkRole)
+            systemProperty 'minecraftempires.networkRole', networkRole
+            systemProperty 'minecraftempires.networkRoot', networkRoot.absolutePath
+            programArguments.addAll '--username', networkRole, '--width', '960', '--height', '640'
+        }
     }
 }

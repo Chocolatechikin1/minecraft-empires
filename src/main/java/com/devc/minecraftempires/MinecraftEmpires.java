@@ -185,6 +185,7 @@ public class MinecraftEmpires {
         StateManager.get(event.getServer().overworld()).getAIWars().close();
         StateManager.get(event.getServer().overworld()).getRegionInfo().close();
         StateManager.get(event.getServer().overworld()).getConstruction().close();
+        StateManager.get(event.getServer().overworld()).getDevelopment().close();
         BattleManager.resolveAllOnShutdown(event.getServer());
         BattleManager.clearAll();
         ModNetworking.clearAll();
