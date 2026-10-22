@@ -195,6 +195,7 @@ public class MinecraftEmpires {
     @SubscribeEvent
     public void onPlayerLogout(net.neoforged.neoforge.event.entity.player.PlayerEvent.PlayerLoggedOutEvent event) {
         if(event.getEntity().level() instanceof net.minecraft.server.level.ServerLevel level)StateManager.get(level).getProvinces().clearPlayer(event.getEntity().getUUID());
+        if(event.getEntity().level() instanceof net.minecraft.server.level.ServerLevel level)StateManager.get(level).getDevelopment().clearPlayer(event.getEntity().getUUID());
         ModNetworking.clearPlayer(event.getEntity().getUUID());
     }
 
@@ -207,6 +208,7 @@ public class MinecraftEmpires {
         StateManager.get(event.getServer().overworld()).getRegionInfo().tick(event.getServer().overworld());
         StateManager.get(event.getServer().overworld()).getProvinces().tick(event.getServer().overworld());
         StateManager.get(event.getServer().overworld()).getConstruction().tick(event.getServer().overworld());
+        StateManager.get(event.getServer().overworld()).getDevelopment().tick(event.getServer().overworld());
     }
 
     // Chunk load events only enqueue positions. Sampling waits for a server tick after promotion to FULL.

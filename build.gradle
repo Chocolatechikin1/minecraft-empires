@@ -315,6 +315,9 @@ displayName="Isolated terrain verification"
         systemProperty 'minecraftempires.constructionGuardOnly', providers.gradleProperty('terrainConstructionOnly').get() == 'guards' ? 'true' : 'false'
         systemProperty 'minecraftempires.constructionFixtureOutput', layout.buildDirectory.dir('construction-previews').get().asFile.absolutePath
     }
+    if (providers.gradleProperty('terrainDevelopmentOnly').isPresent()) neoForge.runs.gameTestServer {
+        systemProperty 'minecraftempires.developmentOnly', 'true'
+    }
     if (providers.gradleProperty('terrainStartupOnly').isPresent()) neoForge.runs.gameTestServer {
         systemProperty 'minecraftempires.startupOnly', 'true'
     }
@@ -329,6 +332,7 @@ displayName="Isolated terrain verification"
         if (providers.gradleProperty('terrainStrategicReplay').isPresent()) systemProperty 'minecraftempires.strategicReplay', 'true'
         providers.gradleProperty('sprint8Process').orNull?.with { mode -> systemProperty 'minecraftempires.sprint8Process', mode }
         providers.gradleProperty('terrainSitingReplay').orNull?.with { mode -> systemProperty 'minecraftempires.sitingReplay', mode }
+        if (providers.gradleProperty('terrainVillageReplay').isPresent()) systemProperty 'minecraftempires.villageReplay', 'true'
     }
     if (uiSmokeMode) neoForge.runs.client {
         gameDirectory = layout.buildDirectory.dir('terrain-harness/client').get().asFile

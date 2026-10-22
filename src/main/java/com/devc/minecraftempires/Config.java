@@ -55,8 +55,14 @@ public class Config {
             .defineInRange("aiMaxSettlements", 16384, 4096, 16384);
 
     public static final ModConfigSpec.BooleanValue PHYSICAL_CONSTRUCTION_ENABLED = BUILDER
-            .comment("Materialize state-owned generated settlements near real players in already loaded, newly generated terrain. Existing player builds and vanilla villages are not adopted by this switch.")
+            .comment("Materialize generated state-owned and independent settlements near real players in loaded new terrain. Existing builds are preserved.")
             .define("physicalConstructionEnabled", true);
+    public static final ModConfigSpec.BooleanValue VANILLA_VILLAGE_ADOPTION = BUILDER
+            .comment("register loaded, generated vanilla villages near players and place one safe altar.")
+            .define("vanillaVillageAdoption", true);
+    public static final ModConfigSpec.IntValue INDEPENDENT_SITE_CHANCE = BUILDER
+            .comment("Percent of new strategic regions that may admit one independent site, separately from state-owned density. Saved in the generation manifest.")
+            .defineInRange("independentSiteChance", 25, 0, 100);
     public static final ModConfigSpec.IntValue CONSTRUCTION_RANGE = BUILDER
             .comment("Player proximity required to inspect/place construction. This never grants chunk tickets or generates missing chunks.")
             .defineInRange("constructionRange", 160, 80, 256);
