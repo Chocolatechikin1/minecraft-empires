@@ -367,11 +367,17 @@ public final class LogisticsManager extends SavedData {
         return result;
     }
     public void applySurrender(long sequence, UUID donor, UUID recipient, CompoundTag snapshot) {
+        installInteractionSnapshot(sequence, donor, recipient, snapshot, true);
+    }
+    public void applyProvinceSnapshot(long sequence, UUID donor, UUID recipient, CompoundTag snapshot) {
+        installInteractionSnapshot(sequence, donor, recipient, snapshot, false);
+    }
+    private void installInteractionSnapshot(long sequence, UUID donor, UUID recipient, CompoundTag snapshot, boolean surrender) {
         if (interactionSequence >= sequence) return;
         Set<UUID> owners = Set.of(donor, recipient); CompoundTag restored = snapshot.copy();
         for (String key : List.of("Roads", "Camps", "Bridges")) for (var value : restored.getListOrEmpty(key)) {
             CompoundTag tag = (CompoundTag) value;
-            if (donor.toString().equals(tag.getString("Owner").orElse(""))) tag.putString("Owner", recipient.toString());
+            if (surrender && donor.toString().equals(tag.getString("Owner").orElse(""))) tag.putString("Owner", recipient.toString());
         }
         LogisticsManager source = fromTag(restored);
         roads.values().removeIf(r -> owners.contains(r.ownerId())); camps.values().removeIf(c -> owners.contains(c.ownerId()));

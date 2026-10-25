@@ -114,5 +114,7 @@
   "gui.minecraftempires.management.news_knowledge": "Reports summarize learned events. Map borders and locations remain last observed until explored again.",
   "gui.minecraftempires.management.news_newer": "Newer",
   "gui.minecraftempires.management.news_older": "Older",
-  "gui.minecraftempires.management.news_refresh": "Refresh"
+  "gui.minecraftempires.management.news_refresh": "Refresh",
+  "gui.minecraftempires.provinces.title": "Provincial Administration",
+  "gui.minecraftempires.provinces.toggle": "Provinces: %s"
 }

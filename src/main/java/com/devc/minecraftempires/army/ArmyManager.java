@@ -340,6 +340,12 @@ public class ArmyManager extends SavedData {
     }
     /** Replay uses the frozen participant snapshot, preserving losses from before a split save. */
     public void applySurrender(long sequence, UUID donor, UUID recipient, CompoundTag snapshot) {
+        installInteractionSnapshot(sequence, donor, recipient, snapshot, true);
+    }
+    public void applyProvinceSnapshot(long sequence, UUID donor, UUID recipient, CompoundTag snapshot) {
+        installInteractionSnapshot(sequence, donor, recipient, snapshot, false);
+    }
+    private void installInteractionSnapshot(long sequence, UUID donor, UUID recipient, CompoundTag snapshot, boolean surrender) {
         if (interactionSequence >= sequence) return;
         Set<UUID> owners = Set.of(donor, recipient);
         for (UUID owner : owners) {
@@ -354,7 +360,7 @@ public class ArmyManager extends SavedData {
             String field = key.equals("StrategicForces") || key.equals("DetailedOrigins") ? "Owner" : "OwningStateId";
             ListTag list = new ListTag();
             for (var value : restored.getListOrEmpty(key)) {
-                CompoundTag tag = ((CompoundTag) value).copy(); boolean transferred = donor.toString().equals(tag.getString(field).orElse(""));
+                CompoundTag tag = ((CompoundTag) value).copy(); boolean transferred = surrender && donor.toString().equals(tag.getString(field).orElse(""));
                 if (transferred && key.equals("Campaigns")) continue;
                 if (transferred) {
                     tag.putString(field, recipient.toString());
