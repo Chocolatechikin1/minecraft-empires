@@ -35,6 +35,9 @@ public class CityAltarBlock extends Block {
         }
         StateManager manager = StateManager.get(player.level());
         SettlementData settlement = manager.getSettlementByAltarPos(pos);
+        if(player.isShiftKeyDown()||settlement!=null&&settlement.isIndependent()) {
+            manager.getDevelopment().open(player,pos);return;
+        }
         if (settlement == null) {
             manager.beginFounding(player, pos);
             return;
