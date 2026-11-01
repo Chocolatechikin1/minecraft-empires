@@ -1,0 +1,23 @@
+{
+  "fallback": "minecraft:empty",
+  "elements": [
+    {
+      "weight": 3,
+      "element": {
+        "element_type": "minecraft:single_pool_element",
+        "location": "minecraftempires:construction/v1/cottage_a",
+        "processors": "minecraftempires:construction/v1/masonry",
+        "projection": "rigid"
+      }
+    },
+    {
+      "weight": 2,
+      "element": {
+        "element_type": "minecraft:single_pool_element",
+        "location": "minecraftempires:construction/v1/cottage_b",
+        "processors": "minecraftempires:construction/v1/masonry",
+        "projection": "rigid"
+      }
+    }
+  ]
+}

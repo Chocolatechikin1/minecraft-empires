@@ -1,0 +1,14 @@
+{
+  "fallback": "minecraft:empty",
+  "elements": [
+    {
+      "weight": 1,
+      "element": {
+        "element_type": "minecraft:single_pool_element",
+        "location": "minecraftempires:construction/v1/stone_gate",
+        "processors": "minecraftempires:construction/v1/masonry",
+        "projection": "rigid"
+      }
+    }
+  ]
+}
